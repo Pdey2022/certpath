@@ -1,8 +1,24 @@
+import { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router";
 import type { Route } from "./+types/learner";
+
+import { PracticeDemo } from "../components/practice-demo";
 import { WorkspaceShell } from "../components/workspace-shell";
+import {
+  demoToday,
+  demoQuestions,
+  getProAccessState,
+  parsePracticeDemoState,
+  proDurationMonths,
+  type DemoEntitlement,
+  type ProAccessState,
+} from "../lib/prototype-data";
 
 export function headers() {
-  return { "Cache-Control": "private, no-store" };
+  return {
+    "Cache-Control": "private, no-store",
+    "X-Robots-Tag": "noindex, nofollow",
+  };
 }
 
 export function meta(_: Route.MetaArgs) {
@@ -12,24 +28,758 @@ export function meta(_: Route.MetaArgs) {
   ];
 }
 
+const learnerLinks = [
+  { label: "Home", to: "/app" },
+  { label: "My Exams", to: "/app/exams" },
+  { label: "Practice", to: "/app/practice" },
+  { label: "Progress", to: "/app/progress" },
+  { label: "Account", to: "/app/account" },
+];
+
+const demoEntitlements: Record<string, DemoEntitlement> = {
+  CISSP: {
+    standardEndsAt: "2027-06-30T00:00:00.000Z",
+    proStartsAt: "2026-10-10T00:00:00.000Z",
+    proEndsAt: "2027-01-10T00:00:00.000Z",
+  },
+  CISM: { standardEndsAt: "2027-06-30T00:00:00.000Z" },
+};
+
+const dateFormatter = new Intl.DateTimeFormat("en", {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+function formatDate(value: string) {
+  return dateFormatter.format(new Date(value));
+}
+
+function statusLabel(status: ProAccessState) {
+  return {
+    "no-standard": "No Standard",
+    eligible: "Eligible",
+    insufficient: "Insufficient Standard coverage",
+    active: "Active",
+    expired: "Expired",
+  }[status];
+}
+
+function AccessLine({
+  certification,
+  entitlement,
+}: {
+  certification: string;
+  entitlement: DemoEntitlement;
+}) {
+  const state = getProAccessState(entitlement, new Date(demoToday));
+  return (
+    <article className="access-card">
+      <div className="access-card-heading">
+        <h3>{certification}</h3>
+        <span className={`state-pill state-pill--${state}`}>{statusLabel(state)}</span>
+      </div>
+      <dl className="access-dates">
+        <div>
+          <dt>Standard</dt>
+          <dd>
+            {entitlement.standardEndsAt
+              ? `Ends ${formatDate(entitlement.standardEndsAt)}`
+              : "No active access"}
+          </dd>
+        </div>
+        <div>
+          <dt>Pro</dt>
+          <dd>
+            {entitlement.proEndsAt
+              ? `${formatDate(entitlement.proStartsAt ?? entitlement.proEndsAt)} – ends ${formatDate(entitlement.proEndsAt)} · 3 months`
+              : "Not active"}
+          </dd>
+        </div>
+      </dl>
+    </article>
+  );
+}
+
+function DemoNotice() {
+  return (
+    <p className="prototype-notice" role="note">
+      Synthetic prototype data · not an account, purchase, or official exam result.
+    </p>
+  );
+}
+
+function LearnerHome() {
+  return (
+    <>
+      <DemoNotice />
+      <p className="eyebrow">Tuesday, 10 November 2026 · synthetic demo</p>
+      <h1>Welcome back, learner</h1>
+      <section className="dashboard-grid">
+        <article className="feature-card">
+          <p className="eyebrow">Continue studying · CISSP</p>
+          <h2>Pick up your practice</h2>
+          <p>Question 7 of 15 · sample session · saved 2 minutes ago in this browser</p>
+          <Link className="button-primary" to="/app/practice/session">
+            Continue practice
+          </Link>
+        </article>
+        <article className="card recommendation-card">
+          <p className="eyebrow">Recommended next</p>
+          <h2>Review Security and Risk Management</h2>
+          <p>Suggested from 12 first-seen sample answers. Synthetic demo rationale.</p>
+          <Link className="button-secondary" to="/app/exams/cissp/practice">
+            See practice options
+          </Link>
+        </article>
+      </section>
+
+      <section className="section-block" aria-labelledby="my-exams-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Separate access by certification</p>
+            <h2 id="my-exams-title">Your exams</h2>
+          </div>
+          <Link to="/app/exams">View all exams</Link>
+        </div>
+        <div className="access-grid">
+          {Object.entries(demoEntitlements).map(([name, entitlement]) => (
+            <div className="access-card" key={name}>
+              <AccessLine certification={name} entitlement={entitlement} />
+              <Link className="button-secondary" to={`/app/exams/${name.toLowerCase()}`}>
+                Open {name}
+              </Link>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card-grid section-block">
+        <article className="card">
+          <h2>Practice</h2>
+          <p>Try original illustrative sample questions with explanations.</p>
+          <Link to="/app/practice/setup">Set up practice</Link>
+        </article>
+        <article className="card">
+          <h2>Mock preview</h2>
+          <p>Review timing and navigation instructions before a static preview.</p>
+          <Link to="/app/exams/cissp/mock">View mock setup</Link>
+        </article>
+        <article className="card">
+          <h2>Progress</h2>
+          <p>See first-seen and repeated-question sample statistics separately.</p>
+          <Link to="/app/progress">View progress</Link>
+        </article>
+      </section>
+    </>
+  );
+}
+
+function ExamList() {
+  return (
+    <>
+      <DemoNotice />
+      <p className="eyebrow">My exams</p>
+      <h1>Certification access</h1>
+      <p className="intro">
+        Each certification has independent Standard and Pro coverage. Dates below are synthetic.
+      </p>
+      <div className="access-grid">
+        {Object.entries(demoEntitlements).map(([name, entitlement]) => (
+          <article className="access-card" key={name}>
+            <AccessLine certification={name} entitlement={entitlement} />
+            <p>Standard includes practice, explanations, normal mock previews and progress.</p>
+            <Link className="button-primary" to={`/app/exams/${name.toLowerCase()}`}>
+              Open exam workspace
+            </Link>
+            <Link to={`/app/exams/${name.toLowerCase()}/pro`}>View Pro access</Link>
+          </article>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function ExamWorkspace({
+  certification,
+  section,
+}: {
+  certification: string;
+  section: string;
+}) {
+  const name = certification.toUpperCase() === "CISM" ? "CISM" : "CISSP";
+  const entitlement = demoEntitlements[name];
+  const workspaceSections = [
+    ["Overview", `/app/exams/${name.toLowerCase()}`],
+    ["Practice", `/app/exams/${name.toLowerCase()}/practice`],
+    ["Mock exams", `/app/exams/${name.toLowerCase()}/mock`],
+    ["Pro", `/app/exams/${name.toLowerCase()}/pro`],
+    ["History", `/app/exams/${name.toLowerCase()}/history`],
+  ];
+
+  return (
+    <>
+      <DemoNotice />
+      <p className="eyebrow">Exam workspace · sample syllabus version 2026</p>
+      <h1>{name} preparation</h1>
+      <p className="intro">
+        Standard and Pro are separate for this certification. Synthetic dates are for display only.
+      </p>
+      <nav className="section-tabs" aria-label={`${name} workspace sections`}>
+        {workspaceSections.map(([label, to]) => (
+          <Link
+            aria-current={
+              (section === "" && label === "Overview") ||
+              section === label.toLowerCase().replace(" exams", "").replace(" ", "-")
+                ? "page"
+                : undefined
+            }
+            key={to}
+            to={to}
+          >
+            {label}
+          </Link>
+        ))}
+      </nav>
+
+      {section === "practice" ? (
+        <PracticeSetup certification={name} />
+      ) : section === "mock" || section === "mock/active" ? (
+        <MockSetup
+          certification={name}
+          active={section === "mock/active"}
+        />
+      ) : section === "pro" ||
+        section === "pro/preview" ||
+        section === "pro/preview/session" ? (
+        <ProPreview
+          certification={name}
+          preview={section === "pro/preview"}
+          showSession={section === "pro/preview/session"}
+        />
+      ) : section === "history" ? (
+        <ExamHistory certification={name} />
+      ) : (
+        <>
+          <div className="access-grid section-block">
+            <AccessLine certification={name} entitlement={entitlement} />
+            <article className="card">
+              <p className="eyebrow">Target exam date</p>
+              <h2>Not set</h2>
+              <p>No target date is configured in this prototype.</p>
+            </article>
+          </div>
+          <div className="feature-grid section-block">
+            <article className="card">
+              <h2>Practice</h2>
+              <p>Original illustrative questions, explanations, and bookmarks.</p>
+              <Link className="button-primary" to={`/app/exams/${name.toLowerCase()}/practice`}>
+                Choose practice
+              </Link>
+            </article>
+            <article className="card">
+              <h2>Normal mock exam</h2>
+              <p>Review the instructions; the attempt screen uses a static demonstration timer.</p>
+              <Link className="button-primary" to={`/app/exams/${name.toLowerCase()}/mock`}>
+                Mock instructions
+              </Link>
+            </article>
+            <article className="card">
+              <h2>Pro preparation</h2>
+              <p>Three-month add-on. Same-certification Standard must cover its full duration.</p>
+              <Link className="button-primary" to={`/app/exams/${name.toLowerCase()}/pro`}>
+                View Pro states
+              </Link>
+            </article>
+          </div>
+          <p>
+            <Link to={`/app/exams/${name.toLowerCase()}/history`}>
+              View synthetic attempt history
+            </Link>
+          </p>
+        </>
+      )}
+    </>
+  );
+}
+
+function PracticeSetup({ certification }: { certification: string }) {
+  return (
+    <section className="card setup-card">
+      <p className="eyebrow">Practice setup · {certification}</p>
+      <h2>Choose a short practice set</h2>
+      <div className="form-grid">
+        <label>
+          Domains
+          <select defaultValue="all">
+            <option value="all">All available domains</option>
+            <option value="risk">Security and Risk Management</option>
+            <option value="asset">Asset Security</option>
+          </select>
+        </label>
+        <label>
+          Question pool
+          <select defaultValue="unanswered">
+            <option value="unanswered">Unanswered first</option>
+            <option value="incorrect">Previously incorrect</option>
+            <option value="bookmarked">Bookmarked</option>
+          </select>
+        </label>
+        <label>
+          Sample question count
+          <select defaultValue="3">
+            <option value="3">3 questions · all illustrative samples</option>
+          </select>
+        </label>
+      </div>
+      <p>3 original illustrative sample questions match these demo filters.</p>
+      <Link className="button-primary" to="/app/practice/session">
+        Start sample practice
+      </Link>
+      <p className="muted">
+        This demonstration supports selection, submission, explanations, bookmarks and local demo resume.
+      </p>
+    </section>
+  );
+}
+
+function MockSetup({
+  certification,
+  active,
+}: {
+  certification: string;
+  active: boolean;
+}) {
+  return active ? (
+    <section className="card">
+      <p className="eyebrow">Mock interface preview · not a live attempt</p>
+      <h2>{certification} mock question preview</h2>
+      <p>
+        Static timer illustration: <strong>1:59 remaining</strong>. It does not run or persist.
+      </p>
+      <p>
+        This sample screen illustrates a question, answer navigation, and a leave warning only.
+        No mock attempt or result is created.
+      </p>
+      <div className="question-card">
+        <h3>Which approach best supports a consistent review of a proposed control?</h3>
+        <label className="answer-option">
+          <input type="radio" name="mock-sample" />
+          <span>Compare its expected risk reduction with its context and operating cost</span>
+        </label>
+        <label className="answer-option">
+          <input type="radio" name="mock-sample" />
+          <span>Select it solely because another organization uses it</span>
+        </label>
+      </div>
+      <div className="button-row">
+        <Link className="button-secondary" to={`/app/exams/${certification.toLowerCase()}/mock`}>
+          Leave preview
+        </Link>
+        <span className="muted">Leaving a real non-pausable exam would not stop its server timer.</span>
+      </div>
+    </section>
+  ) : (
+    <section className="card setup-card">
+      <p className="eyebrow">Mock instructions · {certification}</p>
+      <h2>Before you begin</h2>
+      <ul className="instruction-list">
+        <li>This interface preview has a static timer display; no production timer runs.</li>
+        <li>A real mock profile would define its duration, question count and navigation rules.</li>
+        <li>A real non-pausable timer continues while away; leaving does not imply a pause.</li>
+        <li>Saved answers and resume behavior shown here are illustrative only.</li>
+      </ul>
+      <Link className="button-primary" to={`/app/exams/${certification.toLowerCase()}/mock/active`}>
+        Open static mock preview
+      </Link>
+    </section>
+  );
+}
+
+function ProPreview({
+  certification,
+  preview,
+  showSession,
+}: {
+  certification: string;
+  preview: boolean;
+  showSession: boolean;
+}) {
+  const samples: Array<{
+    label: string;
+    exam: string;
+    entitlement: DemoEntitlement;
+    note: string;
+  }> = [
+    {
+      label: "Active",
+      exam: "CISSP",
+      entitlement: demoEntitlements.CISSP,
+      note: "Active Pro add-on; CISSP Standard continues beyond it.",
+    },
+    {
+      label: "Eligible",
+      exam: "CISM",
+      entitlement: demoEntitlements.CISM,
+      note: "Same-exam Standard covers a full three calendar months from the demo date.",
+    },
+    {
+      label: "Insufficient coverage",
+      exam: "CISM",
+      entitlement: { standardEndsAt: "2026-12-15T00:00:00.000Z" },
+      note: "This synthetic scenario has too little CISM Standard coverage for the full add-on.",
+    },
+    {
+      label: "Expired",
+      exam: "CISSP",
+      entitlement: {
+        standardEndsAt: "2027-06-30T00:00:00.000Z",
+        proStartsAt: "2026-07-10T00:00:00.000Z",
+        proEndsAt: "2026-10-10T00:00:00.000Z",
+      },
+      note: "A previous three-month Pro period has ended; Standard remains separate.",
+    },
+  ];
+
+  return (
+    <section className="section-block">
+      <div className="notice" role="note">
+        <strong>Pro is a three-calendar-month add-on.</strong> It requires Standard access for the
+        same certification throughout its full duration. No price is configured or displayed.
+      </div>
+      <h2>{certification} Pro access states</h2>
+      <p>These are labelled synthetic examples, not account entitlements or purchase options.</p>
+      <div className="access-grid">
+        {samples.map((sample) => {
+          const state = getProAccessState(sample.entitlement, new Date(demoToday));
+          return (
+            <article className="access-card" key={sample.label}>
+              <div className="access-card-heading">
+                <h3>{sample.label}</h3>
+                <span className={`state-pill state-pill--${state}`}>{statusLabel(state)}</span>
+              </div>
+              <p>{sample.exam} · {sample.note}</p>
+              <p>
+                Standard:{" "}
+                {sample.entitlement.standardEndsAt
+                  ? `ends ${formatDate(sample.entitlement.standardEndsAt)}`
+                  : "not active"}
+              </p>
+              <p>Pro duration: {proDurationMonths} calendar months.</p>
+              {state === "active" ? (
+                <Link
+                  className="button-secondary"
+                  to={`/app/exams/${sample.exam.toLowerCase()}/pro/preview`}
+                >
+                  Open Pro preparation preview
+                </Link>
+              ) : state === "insufficient" ? (
+                <p className="muted">
+                  Extend same-exam Standard to cover the full period. Extension pricing is not configured.
+                </p>
+              ) : state === "eligible" ? (
+                <p className="muted">Purchase is not available in this prototype.</p>
+              ) : state === "expired" ? (
+                <p className="muted">Expired Pro does not remove Standard access.</p>
+              ) : (
+                <p className="muted">Standard access is required first.</p>
+              )}
+            </article>
+          );
+        })}
+      </div>
+      {preview && (
+        <ProPreparationPreview certification={certification} />
+      )}
+      {showSession && (
+        <div className="question-card section-block">
+          <p className="eyebrow">Static preview · no attempt</p>
+          <h3>Illustrative adaptive-preparation question</h3>
+          <p>Static timer illustration: 1:59. No scoring, selection engine, or persistence.</p>
+          <p>Leaving this preview returns to the Pro setup; it does not affect progress.</p>
+          <Link className="button-secondary" to={`/app/exams/${certification.toLowerCase()}/pro/preview`}>
+            Back to Pro setup
+          </Link>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProPreparationPreview({ certification }: { certification: string }) {
+  return (
+    <section className="card section-block">
+      <p className="eyebrow">Pro preparation · interface preview</p>
+      <h2>{certification} simulation setup</h2>
+      <ul className="instruction-list">
+        <li>A real profile would show the configured duration and number of questions here.</li>
+        <li>Navigation and leaving rules depend on the approved exam profile.</li>
+        <li>Leaving a real timed simulation would not necessarily pause its timer.</li>
+        <li>Resume would restore server-acknowledged answers and authoritative remaining time.</li>
+      </ul>
+      <p className="notice" role="note">
+        No adaptive engine, live timer, readiness prediction, or attempt is implemented.
+      </p>
+      <div className="button-row">
+        <Link className="button-primary" to="/app/exams/cissp/pro/preview/session">
+          Preview static question screen
+        </Link>
+        <Link className="button-secondary" to="/app/exams/cissp/pro">
+          Back to Pro states
+        </Link>
+      </div>
+    </section>
+  );
+}
+
+function ExamHistory({ certification }: { certification: string }) {
+  return (
+    <>
+      <h2>{certification} history</h2>
+      <p>Sample records only. These are not saved attempts or official results.</p>
+      <div className="table-scroll">
+        <table>
+          <caption>Synthetic practice history</caption>
+          <thead>
+            <tr><th scope="col">Date</th><th scope="col">Activity</th><th scope="col">Result</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>08 Nov 2026</td><td>Practice · Security and Risk Management</td><td>7 / 10 sample questions</td></tr>
+            <tr><td>05 Nov 2026</td><td>Practice · Mixed domains</td><td>6 / 10 sample questions</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function PracticeHub() {
+  const [bookmarks, setBookmarks] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [storageError, setStorageError] = useState("");
+
+  useEffect(() => {
+    try {
+      const state = parsePracticeDemoState(
+        window.localStorage.getItem("certpath-demo-practice-v1"),
+      );
+      setBookmarks(state?.bookmarks ?? []);
+    } catch (error) {
+      setStorageError(
+        error instanceof Error ? error.message : "Browser demo data could not be read.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return (
+    <>
+      <DemoNotice />
+      <p className="eyebrow">Illustrative sample content</p>
+      <h1>Practice</h1>
+      <div className="dashboard-grid">
+        <article className="card">
+          <h2>Continue CISSP practice</h2>
+          <p>3 original questions · resume restores this browser's explicitly saved demo session only.</p>
+          <Link className="button-primary" to="/app/practice/session">Continue session</Link>
+        </article>
+        <article className="card">
+          <h2>Start a new sample set</h2>
+          <p>Choose the available illustrative question pool and filters.</p>
+          <Link className="button-secondary" to="/app/practice/setup">Practice setup</Link>
+        </article>
+      </div>
+      <section className="card section-block">
+        <h2>Bookmarks</h2>
+        <p>Bookmarks in this demo session are stored with that session in browser storage only.</p>
+        {loading ? (
+          <p role="status">Loading this browser’s demo bookmarks…</p>
+        ) : storageError ? (
+          <p className="form-errors" role="alert">{storageError}</p>
+        ) : bookmarks.length ? (
+          <ul>
+            {bookmarks.map((id) => {
+              const question = demoQuestions.find((item) => item.id === id);
+              return question ? (
+                <li key={id}>{question.domain}: {question.stem}</li>
+              ) : null;
+            })}
+          </ul>
+        ) : (
+          <p className="empty-state">No bookmarked sample questions in this browser.</p>
+        )}
+        <Link to="/app/account">Review demo storage and reset options</Link>
+      </section>
+    </>
+  );
+}
+
+function ProgressPage() {
+  return (
+    <>
+      <DemoNotice />
+      <p className="eyebrow">Synthetic statistics only</p>
+      <h1>Progress</h1>
+      <div className="notice" role="note">
+        This prototype contains no actual learner performance and makes no readiness prediction.
+      </div>
+      <section className="progress-grid section-block">
+        <article className="card">
+          <h2>First-seen performance</h2>
+          <p className="metric">72% <span>· 25 sample answers</span></p>
+          <p>Each question counted once, at its first submitted response.</p>
+          <div className="progress-track" role="img" aria-label="Synthetic first-seen performance: 72 percent">
+            <span style={{ width: "72%" }} />
+          </div>
+        </article>
+        <article className="card">
+          <h2>Repeated-question performance</h2>
+          <p className="metric">86% <span>· 14 repeat answers</span></p>
+          <p>Repeat responses are separate from first-seen accuracy.</p>
+          <div className="progress-track" role="img" aria-label="Synthetic repeat performance: 86 percent">
+            <span style={{ width: "86%" }} />
+          </div>
+        </article>
+      </section>
+      <section className="card section-block">
+        <h2>Domain sample coverage</h2>
+        <ul className="domain-bars">
+          <li><span>Security and Risk Management · 8 / 12</span><span className="progress-track"><span style={{ width: "67%" }} /></span></li>
+          <li><span>Asset Security · 5 / 10</span><span className="progress-track"><span style={{ width: "50%" }} /></span></li>
+          <li><span>Security Architecture · 2 / 10</span><span className="progress-track"><span style={{ width: "20%" }} /></span></li>
+        </ul>
+      </section>
+      <section className="empty-state section-block" aria-labelledby="empty-progress-title">
+        <h2 id="empty-progress-title">No data for this date range</h2>
+        <p>Example empty state. A real report would need sufficient submitted answers.</p>
+        <Link to="/app/practice/setup">Try illustrative practice</Link>
+      </section>
+    </>
+  );
+}
+
+function AccountPage() {
+  return (
+    <>
+      <DemoNotice />
+      <p className="eyebrow">Account and access preview</p>
+      <h1>Access management</h1>
+      <p className="intro">No signed-in account exists. All displayed dates are synthetic.</p>
+      <div className="access-grid">
+        {Object.entries(demoEntitlements).map(([name, entitlement]) => (
+          <article className="card" key={name}>
+            <AccessLine certification={name} entitlement={entitlement} />
+            <p>Purchase history preview · no payment provider or purchase is connected.</p>
+            <button className="button-secondary" type="button" disabled>
+              Extend Standard unavailable in prototype
+            </button>
+            <button className="button-secondary" type="button" disabled>
+              Add Pro unavailable in prototype
+            </button>
+          </article>
+        ))}
+      </div>
+      <section className="card section-block">
+        <p className="eyebrow">Expired access example</p>
+        <h2>Sample certification · Standard expired 30 Oct 2026</h2>
+        <p>New protected questions and attempts would be blocked; account and history would remain.</p>
+        <p>Historical explanation access is unresolved and is not simulated as a policy here.</p>
+      </section>
+      <section className="card-grid section-block">
+        <article className="card">
+          <h2>Device-management preview</h2>
+          <p>Demo browser · this page · no real device registration or session revocation.</p>
+          <button className="button-secondary" type="button" disabled>
+            Manage devices unavailable
+          </button>
+        </article>
+        <article className="card">
+          <h2>Privacy and preferences</h2>
+          <p>No analytics are transmitted. No personal data is collected.</p>
+          <button className="button-secondary" type="button" disabled>
+            Preferences unavailable
+          </button>
+        </article>
+      </section>
+      {import.meta.env.DEV && (
+        <section className="demo-panel section-block">
+          <p className="eyebrow">Development-only demo controls</p>
+          <h2>Browser demo data</h2>
+          <p>
+            Only the active sample practice session is stored in this browser; it is not an account,
+            server acknowledgement, or cross-device sync.
+          </p>
+          <button
+            className="button-secondary"
+            type="button"
+            onClick={() => {
+              window.localStorage.removeItem("certpath-demo-practice-v1");
+              window.location.reload();
+            }}
+          >
+            Reset demo
+          </button>
+        </section>
+      )}
+    </>
+  );
+}
+
+function NotFoundState() {
+  return (
+    <section className="empty-state">
+      <h1>Preview not available</h1>
+      <p>This route is not part of the Milestone 1 prototype.</p>
+      <Link to="/app">Return to learner home</Link>
+    </section>
+  );
+}
+
 export default function Learner() {
+  const { pathname } = useLocation();
+  const path = pathname.replace(/\/+$/, "") || "/app";
+  const segments = path.split("/").filter(Boolean);
+  const examPath = segments[1] === "exams" && segments[2];
+  const examSection = examPath ? segments.slice(3).join("/") : "";
+  const supported =
+    path === "/app" ||
+    path === "/app/exams" ||
+    path === "/app/practice" ||
+    path === "/app/practice/setup" ||
+    path === "/app/practice/session" ||
+    path === "/app/progress" ||
+    path === "/app/account" ||
+    (examPath && ["cissp", "cism"].includes(examPath.toLowerCase()));
+
   return (
     <WorkspaceShell
-      title="Learner workspace preview"
+      title="Learner preview · synthetic data"
       mobileNavigation="learner"
-      links={[
-        { label: "Home", to: "/app" },
-        { label: "My Exams", to: "/app/exams" },
-        { label: "Practice", to: "/app/practice" },
-        { label: "Progress", to: "/app/progress" },
-        { label: "Account", to: "/app/account" },
-      ]}
+      links={learnerLinks}
     >
-      <h1>Learner workspace</h1>
-      <div className="notice" role="note">
-        <strong>Foundation placeholder.</strong> Authentication, exam access,
-        learner data, practice, and saved progress are not implemented.
-      </div>
+      {!supported ? (
+        <NotFoundState />
+      ) : path === "/app" ? (
+        <LearnerHome />
+      ) : path === "/app/exams" ? (
+        <ExamList />
+      ) : path === "/app/practice/session" ? (
+        <PracticeDemo />
+      ) : path === "/app/practice/setup" ? (
+        <PracticeSetup certification="CISSP" />
+      ) : path === "/app/practice" ? (
+        <PracticeHub />
+      ) : path === "/app/progress" ? (
+        <ProgressPage />
+      ) : path === "/app/account" ? (
+        <AccountPage />
+      ) : examPath ? (
+        <ExamWorkspace certification={examPath} section={examSection} />
+      ) : (
+        <NotFoundState />
+      )}
     </WorkspaceShell>
   );
 }

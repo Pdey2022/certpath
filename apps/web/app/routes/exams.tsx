@@ -1,4 +1,5 @@
 import type { Route } from "./+types/exams";
+import { Link } from "react-router";
 import { PublicLayout } from "../components/public-layout";
 import { cloudflareContext } from "../lib/cloudflare-context";
 import {
@@ -33,10 +34,28 @@ export default function Exams() {
         <p className="eyebrow">Exam catalogue</p>
         <h1>Choose a certification to explore</h1>
         <p className="intro">
-          Certification listings and public sample questions will appear here
-          after their content and publication status are approved. No paid
-          question content is included in this catalogue.
+          This interactive prototype uses clearly labelled synthetic catalogue
+          entries. They are not publication approvals or payment offers. No
+          sample questions, prices, or paid question content are included here.
         </p>
+        <div className="prototype-notice" role="note">
+          Synthetic prototype catalogue · no official affiliation or live access offer.
+        </div>
+        <div className="card-grid section-block">
+          {["CISSP", "CISM"].map((certification) => (
+            <article className="card" key={certification}>
+              <p className="eyebrow">Synthetic catalogue example</p>
+              <h2>{certification}</h2>
+              <p>
+                Example exam-specific workspace. Standard and optional three-month
+                Pro access are shown in the demo; no price or purchase is configured.
+              </p>
+              <Link className="primary-link" to={`/app/exams/${certification.toLowerCase()}`}>
+                Open prototype workspace
+              </Link>
+            </article>
+          ))}
+        </div>
       </main>
     </PublicLayout>
   );
