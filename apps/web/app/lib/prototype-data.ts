@@ -13,6 +13,7 @@ export interface DemoEntitlement {
 
 export const demoToday = "2026-11-10T12:00:00.000Z";
 export const proDurationMonths = 3;
+export const practiceDemoStorageKey = "certpath-demo-practice-v1";
 
 export function addCalendarMonths(date: Date, months: number) {
   const day = date.getUTCDate();

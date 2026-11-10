@@ -68,7 +68,7 @@ export function meta(_: Route.MetaArgs) {
 }
 
 function DevRolePanel({ role, onChange }: { role: DemoRole; onChange: (role: DemoRole) => void }) {
-  if (!import.meta.env.DEV) {
+  if (typeof import.meta.env === "undefined" || !import.meta.env.DEV) {
     return null;
   }
 
@@ -439,7 +439,7 @@ function AdminSection({ path, role }: { path: string; role: DemoRole }) {
           The product contract reserves finance, unrestricted customer data, staff and security
           settings for Global Admin. This is a presentation example only, not server-side enforcement.
         </p>
-        <Link to="/admin/questions">Return to assigned CISSP content</Link>
+        <Link to="/admin/questions?demoRole=manager">Return to assigned CISSP content</Link>
       </section>
     );
   }

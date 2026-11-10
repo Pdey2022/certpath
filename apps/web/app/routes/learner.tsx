@@ -9,6 +9,7 @@ import {
   demoQuestions,
   getProAccessState,
   parsePracticeDemoState,
+  practiceDemoStorageKey,
   proDurationMonths,
   type DemoEntitlement,
   type ProAccessState,
@@ -610,7 +611,9 @@ function PracticeHub() {
         ) : (
           <p className="empty-state">No bookmarked sample questions in this browser.</p>
         )}
-        <Link to="/app/account">Review demo storage and reset options</Link>
+        {import.meta.env.DEV && (
+          <Link to="/app/prototype/reset">Open the development-only prototype reset page</Link>
+        )}
       </section>
     </>
   );
@@ -704,26 +707,59 @@ function AccountPage() {
         </article>
       </section>
       {import.meta.env.DEV && (
-        <section className="demo-panel section-block">
-          <p className="eyebrow">Development-only demo controls</p>
-          <h2>Browser demo data</h2>
-          <p>
-            Only the active sample practice session is stored in this browser; it is not an account,
-            server acknowledgement, or cross-device sync.
-          </p>
-          <button
-            className="button-secondary"
-            type="button"
-            onClick={() => {
-              window.localStorage.removeItem("certpath-demo-practice-v1");
-              window.location.reload();
-            }}
-          >
-            Reset demo
-          </button>
+        <section className="card section-block">
+          <p className="eyebrow">Development-only</p>
+          <Link to="/app/prototype/reset">Open prototype reset</Link>
         </section>
       )}
     </>
+  );
+}
+
+function PrototypeResetPage() {
+  const [message, setMessage] = useState("");
+
+  if (!import.meta.env.DEV) {
+    return (
+      <section className="empty-state">
+        <p className="eyebrow">Prototype reset</p>
+        <h1>Development-only controls</h1>
+        <p>Reset controls are available only in the local development preview.</p>
+        <Link to="/app/account">Return to account preview</Link>
+      </section>
+    );
+  }
+
+  return (
+    <section className="card">
+      <p className="eyebrow">Development-only prototype control</p>
+      <h1>Prototype reset</h1>
+      <p>
+        This clears the saved illustrative practice session from this browser
+        only. It does not affect an account or server data. The action cannot
+        be undone.
+      </p>
+      <button
+        className="button-secondary"
+        type="button"
+        onClick={() => {
+          try {
+            window.localStorage.removeItem(practiceDemoStorageKey);
+            setMessage("Demo practice data cleared from this browser.");
+          } catch (error) {
+            setMessage(
+              error instanceof Error
+                ? `Could not clear browser demo data: ${error.message}`
+                : "Could not clear browser demo data.",
+            );
+          }
+        }}
+      >
+        Reset demo practice data
+      </button>
+      {message && <p role="status" aria-live="polite">{message}</p>}
+      <p><Link to="/app/account">Return to account preview</Link></p>
+    </section>
   );
 }
 
@@ -751,6 +787,7 @@ export default function Learner() {
     path === "/app/practice/session" ||
     path === "/app/progress" ||
     path === "/app/account" ||
+    path === "/app/prototype/reset" ||
     (examPath && ["cissp", "cism"].includes(examPath.toLowerCase()));
 
   return (
@@ -775,6 +812,8 @@ export default function Learner() {
         <ProgressPage />
       ) : path === "/app/account" ? (
         <AccountPage />
+      ) : path === "/app/prototype/reset" ? (
+        <PrototypeResetPage />
       ) : examPath ? (
         <ExamWorkspace certification={examPath} section={examSection} />
       ) : (
