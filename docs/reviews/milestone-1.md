@@ -80,7 +80,7 @@ Environment: Windows, Node.js 24.18.0, npm 11.16.0.
 | Learner/admin practice and role previews | Previously checked in-browser: practice selection, submission, explanations, bookmarks, save status, refresh restoration, failed save/retry, Save & exit; Manager navigation scope and presentation-only denial; editor validation and import preview. |
 | SSR and private-route checks | Previously checked against the local Worker: public `/` and `/exams` return rendered page content; `/app/*` and `/admin/*` return HTTP 200 with `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`. |
 | Screenshot files | Four checked-in screenshots; learner/admin desktop are 1440×1000 and learner/admin mobile are 390×844. |
-| Ubuntu GitHub Actions | Passed: [CI run 42848425162](https://github.com/Pdey2022/certpath/actions/runs/42848425162) completed successfully on commit `a4ab9dda57488cf4521be06ddcd71ba6624e83af` using the existing Ubuntu workflow. |
+| Ubuntu GitHub Actions | Passed: [PR CI run 42848425162](https://github.com/Pdey2022/certpath/actions/runs/42848425162) completed on prototype commit `a4ab9dda57488cf4521be06ddcd71ba6624e83af`. After the review doc update, [manual Ubuntu CI run 42848717122](https://github.com/Pdey2022/certpath/actions/runs/42848717122) also passed `npm ci --include=optional` and `npm run verify` on commit `9275b8e8ba36ad80be3922b9943eabc37141aa7d`. |
 
 The behavior checks above are prototype-level browser checks, not production
 security or persistence tests. Browser persistence is isolated to
@@ -101,9 +101,9 @@ demo state. Reset removes only that key.
   timer, adaptive selection, readiness prediction, or exam engine.
 - Demo dates, access states, role selection, admin changes, and import/revision
   previews are not live entitlements, authorization, or durable content edits.
-The first draft PR revision passed both local Windows verification and the
-  Ubuntu CI workflow. The documentation-only follow-up will trigger the same CI
-  workflow; verify that rerun before architect approval.
+  The prototype passed local Windows verification and Ubuntu CI. The Ubuntu
+  workflow was also manually dispatched on the documentation follow-up commit,
+  which completed its clean install and full verification successfully.
 
 ## Architect inspection and run steps
 
