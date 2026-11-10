@@ -1,0 +1,26 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "certpath-foundation",
+	"compatibility_date": "2026-11-10",
+	"main": "./workers/app.ts",
+	"vars": {
+		"INDEXING_ENABLED": "false",
+		"PUBLIC_SITE_ORIGIN": ""
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "certpath-local",
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "../../db/migrations"
+		}
+	],
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true
+}

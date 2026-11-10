@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible issue in the project
+body:
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Content and privacy
+      options:
+        - label: I have not included credentials, personal data, or paid question content.
+          required: true
