@@ -34,6 +34,20 @@ export async function createTestSession(
     mfaVerifiedAt?: number | null;
   } = {},
 ): Promise<string> {
+  const credentials = await createTestSessionCredentials(database, userId, options);
+  return credentials.tokenDigest;
+}
+
+export async function createTestSessionCredentials(
+  database: SecurityDatabase,
+  userId: string,
+  options: {
+    now?: number;
+    expiresAt?: number;
+    mfaMethod?: string | null;
+    mfaVerifiedAt?: number | null;
+  } = {},
+): Promise<{ tokenDigest: string; rawToken: string }> {
   const now = options.now ?? testNow;
   const expiresAt = options.expiresAt ?? now + 60_000;
   const rawToken = crypto.getRandomValues(new Uint8Array(32));
@@ -62,7 +76,13 @@ export async function createTestSession(
       mfaVerifiedAt,
     )
     .run();
-  return tokenDigest;
+  return {
+    tokenDigest,
+    rawToken: btoa(String.fromCharCode(...rawToken))
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replace(/=+$/, ""),
+  };
 }
 
 export async function grantTestRole(
