@@ -79,6 +79,7 @@ Windows verification command and outcome:
 |---|---|
 | `Set-Location apps\api; npx vitest run --config vitest.config.ts test/protected-content.test.ts` | Passed: 10 protected HTTP integration tests on isolated Worker/D1. |
 | `npm run verify` | Passed on Windows: workspace TypeScript checks; API health test; 52 API Worker/D1 tests across 8 files; 13 web tests including public SEO/prototype tests; client and Cloudflare Worker SSR production builds. |
+| Ubuntu GitHub Actions | Passed for implementation commit `5c8f3fff8d0a396e36ab401d43d58f0316973de7`: [CI run 42896823869](https://github.com/Pdey2022/certpath/actions/runs/42896823869). |
 
 The HTTP integration tests cover missing/malformed/expired/revoked/disabled
 sessions, forged client authority, missing/invalid/stale/unsupported MFA,
@@ -90,9 +91,9 @@ sanitized D1 failures, and unchanged health behavior. Test session creation
 uses the isolated test-only factories; session revocation and assignment
 revocation exercise existing security services.
 
-Ubuntu CI has not yet been run on the committed head. The PR handoff must state
-the exact final SHA and passing Actions URL; no run on a different commit is
-evidence for this head.
+If this handoff is amended after the implementation commit, verify the resulting
+final head independently; a run on an earlier SHA is not evidence for a later
+commit.
 
 ## Configuration and limitations
 
