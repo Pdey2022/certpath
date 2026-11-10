@@ -80,8 +80,25 @@ Environment: Node.js 24.18.0, npm 11.16.0, Windows.
 | `npm ci --no-audit --no-fund` | Passed; installed 128 packages from the lockfile. npm warned that install scripts for `workerd` and `esbuild` were not approved by the local npm policy. |
 | `npm run db:migrate:local` | Passed; `0001_foundation.sql` applied to the local D1 emulator (two SQL commands executed). |
 | `npm run verify` | Passed after clean install: API, web and contracts type checks; 1 API test and 4 SEO tests; React Router client and Worker SSR production builds. |
+| `npm ci --include=optional --no-audit --no-fund` (Windows, after lockfile fix) | Passed; installed 128 packages from the lockfile. npm emitted its existing local install-script approval warnings for `workerd` and `esbuild`. |
+| `npm run verify` (Windows, after lockfile fix) | Passed: all type checks, 1 API test, 4 SEO tests, and client/Worker SSR production builds. |
+| `npm ls @rolldown/binding-win32-x64-msvc @rolldown/binding-linux-x64-gnu --all` (Windows) | Passed; the Windows x64 binding is installed. The Linux x64 package remains in the lockfile for Linux installs and is excluded by npm’s platform filter on Windows. |
 | Local Worker HTTP checks | `/` and `/exams` returned HTTP 200 with visible headings, title, description, canonical and social metadata in the raw HTML response; WebPage JSON-LD parsed and matched the canonical URL. `/app` and `/admin` returned HTTP 200 with `noindex,nofollow` and `Cache-Control: private, no-store`. `/api/health` returned HTTP 200 and `{"status":"ok"}`. Local `/robots.txt` disallowed crawling and `/sitemap.xml` contained no URLs. |
 | Browser responsive checks | Learner and admin shells tested at 320, 390, 768, 1024 and 1440 CSS pixels. No document overflow; mobile navigation controls were at least 48px high; desktop showed the sidebar and hid mobile navigation. Keyboard Tab reached the visible skip link with a focus outline. |
+
+### Cross-platform optional dependency correction
+
+The original lockfile recorded Rolldown's Windows x64 native binding but not
+its Linux x64 glibc binding. On Ubuntu, `npm ci` therefore completed without
+the binding, and `react-router typegen` failed with “Cannot find native
+binding.” The lockfile now records the matching Linux package version,
+registry URL, integrity, and platform constraints while retaining the Windows
+entry. CI continues to use `npm ci` and now explicitly passes
+`--include=optional`; it does not skip checks or alter the runner OS.
+
+The corrected clean install and full verification passed on Windows. The
+Ubuntu Actions result for this correction is pending and will be recorded
+after the run completes.
 
 No deploy command was run, no Cloudflare account was contacted, and no payment
 or production integration was configured.
