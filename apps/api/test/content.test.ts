@@ -31,6 +31,11 @@ import {
 
 const database: SecurityDatabase = env.DB;
 
+const twoOptionQuestionContent = {
+  ...validQuestionContent,
+  options: validQuestionContent.options.slice(0, 2),
+};
+
 async function createDraft(
   scope: Awaited<ReturnType<typeof createContentScope>>,
   content: typeof validQuestionContent = validQuestionContent,
@@ -272,6 +277,24 @@ describe("versioned D1 content foundations", () => {
       value: { revisionNumber: 2 },
     });
     if (!correction.ok) return;
+    expect(
+      await database
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM question_revision_seals
+           WHERE question_revision_id IN (?, ?)`,
+        )
+        .bind(draft.value.revisionId, correction.value.revisionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 2 });
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM question_option_construction WHERE question_id = ?",
+        )
+        .bind(draft.value.questionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
 
     const preserved = await getQuestionRevision(
       database,
@@ -368,6 +391,424 @@ describe("versioned D1 content foundations", () => {
         .bind(draft.value.questionId)
         .first<{ lock_version: number }>(),
     ).toMatchObject({ lock_version: 3 });
+  });
+
+  it("seals complete option sets before construction returns and rejects all late inserts", async () => {
+    const scope = await createContentScope(database);
+    const draft = await createDraft(scope, twoOptionQuestionContent);
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+
+    const seal = await database
+      .prepare(
+        "SELECT question_revision_id FROM question_revision_seals WHERE question_revision_id = ?",
+      )
+      .bind(draft.value.revisionId)
+      .first<{ question_revision_id: string }>();
+    expect(seal?.question_revision_id).toBe(draft.value.revisionId);
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM question_option_construction WHERE question_id = ?",
+        )
+        .bind(draft.value.questionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+
+    const tryLateInsert = (
+      revisionId: string,
+      key: string,
+      correct: boolean,
+    ) =>
+      database
+        .prepare(
+          `INSERT INTO answer_options (
+             id, certification_id, question_revision_id, option_key,
+             option_order, option_text, is_correct, explanation
+           ) VALUES (?, ?, ?, ?, 3, 'A complete synthetic option',
+                     ?, 'A complete synthetic explanation')`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          scope.certificationId,
+          revisionId,
+          key,
+          correct ? 1 : 0,
+        )
+        .run();
+
+    await expect(
+      tryLateInsert(draft.value.revisionId, "C", true),
+    ).rejects.toThrow();
+    await expect(
+      tryLateInsert(draft.value.revisionId, "C", false),
+    ).rejects.toThrow();
+
+    const submitted = await createDraft(scope, twoOptionQuestionContent);
+    expect(submitted.ok).toBe(true);
+    if (!submitted.ok) return;
+    expect(
+      await submitQuestionForReview(
+        database,
+        scope.tokenDigest,
+        { certificationId: scope.certificationId, revisionId: submitted.value.revisionId },
+        contentOperation("seal-submitted"),
+        contentMfaPolicy,
+      ),
+    ).toMatchObject({ ok: true });
+
+    const approved = await createDraft(scope, twoOptionQuestionContent);
+    expect(approved.ok).toBe(true);
+    if (!approved.ok) return;
+    expect(
+      await approveRevision(scope, approved.value.revisionId, "seal-approved"),
+    ).toMatchObject({ ok: true });
+
+    const published = await createDraft(scope, twoOptionQuestionContent);
+    expect(published.ok).toBe(true);
+    if (!published.ok) return;
+    expect(
+      await approveRevision(scope, published.value.revisionId, "seal-published"),
+    ).toMatchObject({ ok: true });
+    expect(
+      await publishQuestionRevision(
+        database,
+        scope.tokenDigest,
+        {
+          certificationId: scope.certificationId,
+          examVersionId: scope.examVersionId,
+          questionId: published.value.questionId,
+          revisionId: published.value.revisionId,
+          expectedPointerVersion: null,
+        },
+        contentOperation("seal-publish"),
+        contentMfaPolicy,
+      ),
+    ).toMatchObject({ ok: true });
+
+    for (const revisionId of [
+      draft.value.revisionId,
+      submitted.value.revisionId,
+      approved.value.revisionId,
+      published.value.revisionId,
+    ]) {
+      await expect(
+        tryLateInsert(revisionId, `late-${crypto.randomUUID()}`, false),
+      ).rejects.toThrow();
+      await expect(
+        database
+          .prepare(
+            "UPDATE question_revision_seals SET sealed_at = sealed_at + 1 WHERE question_revision_id = ?",
+          )
+          .bind(revisionId)
+          .run(),
+      ).rejects.toThrow();
+      await expect(
+        database
+          .prepare(
+            "DELETE FROM question_revision_seals WHERE question_revision_id = ?",
+          )
+          .bind(revisionId)
+          .run(),
+      ).rejects.toThrow();
+    }
+
+    expect(
+      await database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM answer_options
+           WHERE question_revision_id = ?`,
+        )
+        .bind(draft.value.revisionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 2 });
+  });
+
+  it("rolls back invalid or incomplete construction before any revision, lock, option, or audit persists", async () => {
+    const scope = await createContentScope(database);
+    const existing = await createDraft(scope);
+    expect(existing.ok).toBe(true);
+    if (!existing.ok) return;
+    const questionId = crypto.randomUUID();
+    const questionOperationId = `invalid-build-question:${crypto.randomUUID()}`;
+    const revisionOperationId = `invalid-build-revision:${crypto.randomUUID()}`;
+    const revisionId = crypto.randomUUID();
+    const operationId = `invalid-build:${crypto.randomUUID()}`;
+    const statements = [
+      database
+        .prepare(
+          `INSERT INTO questions (
+             id, certification_id, question_key, lock_version, created_by_user_id,
+             created_operation_id, creation_reason, created_at
+           ) VALUES (?, ?, ?, 0, ?, ?, 'Synthetic invalid construction', ?)`,
+        )
+        .bind(
+          questionId,
+          scope.certificationId,
+          `invalid-build-${crypto.randomUUID()}`,
+          scope.userId,
+          questionOperationId,
+          1_800_000_000_000,
+        ),
+      database
+        .prepare(
+          `INSERT INTO question_option_construction (
+             operation_id, question_id, question_operation_id, option_key,
+             option_order, option_text, is_correct, explanation
+           ) VALUES
+             (?, ?, ?, 'A', 1, 'Synthetic answer A', 0, 'Explanation A'),
+             (?, ?, ?, 'B', 2, 'Synthetic answer B', 0, 'Explanation B')`,
+        )
+        .bind(
+          revisionOperationId,
+          questionId,
+          questionOperationId,
+          revisionOperationId,
+          questionId,
+          questionOperationId,
+        ),
+      database
+        .prepare(
+          `INSERT INTO question_revisions (
+             id, certification_id, exam_version_id, question_id,
+             revision_number, base_lock_version, domain_id, topic_id, item_type,
+             stem, difficulty, source_reference, license_reference,
+             authored_by_user_id, created_operation_id, created_at
+           ) VALUES (?, ?, ?, ?, 1, 0, ?, ?, 'single_choice', ?, 'medium',
+                     'Synthetic reference', 'Synthetic license', ?, ?, ?)`,
+        )
+        .bind(
+          revisionId,
+          scope.certificationId,
+          scope.examVersionId,
+          questionId,
+          scope.domainId,
+          scope.topicId,
+          validQuestionContent.stem,
+          scope.userId,
+          revisionOperationId,
+          1_800_000_000_000,
+        ),
+      database
+        .prepare(
+          `INSERT INTO audit_events (
+             operation_id, actor_user_id, action, subject_type, subject_id,
+             certification_id, reason, occurred_at
+           ) VALUES (?, ?, 'test', 'test', ?, ?, 'Must not persist', ?)`,
+        )
+        .bind(
+          operationId,
+          scope.userId,
+          questionId,
+          scope.certificationId,
+          1_800_000_000_000,
+        ),
+    ];
+
+    await expect(database.batch(statements)).rejects.toThrow();
+    for (const [table, column, value] of [
+      ["questions", "id", questionId],
+      ["question_revisions", "id", revisionId],
+      ["answer_options", "question_revision_id", revisionId],
+      ["question_revision_seals", "question_revision_id", revisionId],
+      ["question_option_construction", "operation_id", revisionOperationId],
+    ]) {
+      const row = await database
+        .prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column} = ?`)
+        .bind(value)
+        .first<{ count: number }>();
+      expect(row?.count).toBe(0);
+    }
+    expect(await countAuditForPrefix(questionOperationId)).toBe(0);
+    expect(await countAuditForPrefix(revisionOperationId)).toBe(0);
+    expect(
+      await database
+        .prepare("SELECT COUNT(*) AS count FROM audit_events WHERE operation_id = ?")
+        .bind(operationId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+
+    const bypassQuestionId = crypto.randomUUID();
+    const bypassQuestionOperation = `bypass-question:${crypto.randomUUID()}`;
+    const bypassRevisionOperation = `bypass-revision:${crypto.randomUUID()}`;
+    await expect(
+      database.batch([
+        database
+          .prepare(
+            `INSERT INTO questions (
+               id, certification_id, question_key, lock_version, created_by_user_id,
+               created_operation_id, creation_reason, created_at
+             ) VALUES (?, ?, ?, 0, ?, ?, 'Synthetic bypass attempt', ?)`,
+          )
+          .bind(
+            bypassQuestionId,
+            scope.certificationId,
+            `bypass-${crypto.randomUUID()}`,
+            scope.userId,
+            bypassQuestionOperation,
+            1_800_000_000_000,
+          ),
+        database
+          .prepare(
+            `INSERT INTO question_revisions (
+               id, certification_id, exam_version_id, question_id,
+               revision_number, base_lock_version, domain_id, topic_id, item_type,
+               stem, difficulty, source_reference, license_reference,
+               authored_by_user_id, created_operation_id, created_at
+             ) VALUES (?, ?, ?, ?, 1, 0, ?, ?, 'single_choice', ?, 'medium',
+                       'Synthetic reference', 'Synthetic license', ?, ?, ?)`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            scope.certificationId,
+            scope.examVersionId,
+            bypassQuestionId,
+            scope.domainId,
+            scope.topicId,
+            validQuestionContent.stem,
+            scope.userId,
+            bypassRevisionOperation,
+            1_800_000_000_000,
+          ),
+      ]),
+    ).rejects.toThrow();
+    expect(
+      await database
+        .prepare("SELECT COUNT(*) AS count FROM questions WHERE id = ?")
+        .bind(bypassQuestionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+    expect(await countAuditForPrefix(bypassQuestionOperation)).toBe(0);
+    expect(await countAuditForPrefix(bypassRevisionOperation)).toBe(0);
+
+    const failedCorrectionOperation = `failed-correction:${crypto.randomUUID()}`;
+    const failedCorrectionRevisionId = crypto.randomUUID();
+    await expect(
+      database.batch([
+        database
+          .prepare(
+            `INSERT INTO question_option_construction (
+               operation_id, question_id, question_operation_id, option_key,
+               option_order, option_text, is_correct, explanation
+             ) VALUES
+               (?, ?, NULL, 'A', 1, 'Synthetic answer A', 0, 'Explanation A'),
+               (?, ?, NULL, 'B', 2, 'Synthetic answer B', 0, 'Explanation B')`,
+          )
+          .bind(
+            failedCorrectionOperation,
+            existing.value.questionId,
+            failedCorrectionOperation,
+            existing.value.questionId,
+          ),
+        database
+          .prepare(
+            `INSERT INTO question_revisions (
+               id, certification_id, exam_version_id, question_id,
+               revision_number, base_lock_version, domain_id, topic_id, item_type,
+               stem, difficulty, source_reference, license_reference,
+               authored_by_user_id, created_operation_id, created_at
+             ) VALUES (?, ?, ?, ?, 2, 1, ?, ?, 'single_choice', ?, 'medium',
+                       'Synthetic reference', 'Synthetic license', ?, ?, ?)`,
+          )
+          .bind(
+            failedCorrectionRevisionId,
+            scope.certificationId,
+            scope.examVersionId,
+            existing.value.questionId,
+            scope.domainId,
+            scope.topicId,
+            validQuestionContent.stem,
+            scope.userId,
+            failedCorrectionOperation,
+            1_800_000_000_000,
+          ),
+      ]),
+    ).rejects.toThrow();
+    expect(
+      await database
+        .prepare("SELECT lock_version FROM questions WHERE id = ?")
+        .bind(existing.value.questionId)
+        .first<{ lock_version: number }>(),
+    ).toMatchObject({ lock_version: 1 });
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM question_revisions WHERE question_id = ?",
+        )
+        .bind(existing.value.questionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 1 });
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM question_option_construction WHERE operation_id = ?",
+        )
+        .bind(failedCorrectionOperation)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+    expect(await countAuditForPrefix(failedCorrectionOperation)).toBe(0);
+  });
+
+  it("serializes concurrent late option inserts with workflow finalisation", async () => {
+    const scope = await createContentScope(database);
+    const draft = await createDraft(scope, twoOptionQuestionContent);
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+
+    const submit = submitQuestionForReview(
+      database,
+      scope.tokenDigest,
+      { certificationId: scope.certificationId, revisionId: draft.value.revisionId },
+      contentOperation("concurrent-finalise"),
+      contentMfaPolicy,
+    );
+    const lateInsert = (key: string, correct: boolean) =>
+      database
+        .prepare(
+          `INSERT INTO answer_options (
+             id, certification_id, question_revision_id, option_key,
+             option_order, option_text, is_correct, explanation
+           ) VALUES (?, ?, ?, ?, 3, 'Synthetic late answer',
+                     ?, 'Synthetic late explanation')`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          scope.certificationId,
+          draft.value.revisionId,
+          key,
+          correct ? 1 : 0,
+        )
+        .run();
+    const results = await Promise.allSettled([
+      submit,
+      lateInsert("concurrent-correct", true),
+      lateInsert("concurrent-distractor", false),
+    ]);
+
+    expect(results[0]).toMatchObject({
+      status: "fulfilled",
+      value: { ok: true },
+    });
+    expect(results[1]?.status).toBe("rejected");
+    expect(results[2]?.status).toBe("rejected");
+    expect(
+      await database
+        .prepare(
+          `SELECT COUNT(*) AS count,
+                  SUM(is_correct) AS correct_count
+           FROM answer_options WHERE question_revision_id = ?`,
+        )
+        .bind(draft.value.revisionId)
+        .first<{ count: number; correct_count: number }>(),
+    ).toMatchObject({ count: 2, correct_count: 1 });
+    expect(
+      await database
+        .prepare(
+          "SELECT event_type FROM question_revision_events WHERE question_revision_id = ? ORDER BY sequence_number DESC LIMIT 1",
+        )
+        .bind(draft.value.revisionId)
+        .first<{ event_type: string }>(),
+    ).toMatchObject({ event_type: "submitted" });
   });
 
   it("requires review of the exact revision and publishes/retires atomically", async () => {

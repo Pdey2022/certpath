@@ -77,6 +77,20 @@ CREATE TABLE questions (
 CREATE INDEX questions_certification_idx
   ON questions(certification_id, created_at, id);
 
+CREATE TABLE question_option_construction (
+  operation_id TEXT NOT NULL,
+  question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE RESTRICT,
+  question_operation_id TEXT,
+  requires_provenance INTEGER NOT NULL DEFAULT 0 CHECK (requires_provenance IN (0, 1)),
+  option_key TEXT NOT NULL CHECK (length(option_key) BETWEEN 1 AND 32),
+  option_order INTEGER NOT NULL CHECK (option_order BETWEEN 1 AND 8),
+  option_text TEXT NOT NULL CHECK (length(trim(option_text)) BETWEEN 1 AND 1000),
+  is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+  explanation TEXT NOT NULL CHECK (length(trim(explanation)) BETWEEN 1 AND 3000),
+  PRIMARY KEY (operation_id, option_key),
+  UNIQUE (operation_id, option_order)
+);
+
 CREATE TABLE question_revisions (
   id TEXT PRIMARY KEY NOT NULL,
   certification_id TEXT NOT NULL,
@@ -132,6 +146,65 @@ CREATE TABLE answer_options (
 
 CREATE INDEX answer_options_revision_order_idx
   ON answer_options(certification_id, question_revision_id, option_order);
+
+CREATE TABLE question_revision_seals (
+  certification_id TEXT NOT NULL,
+  question_revision_id TEXT PRIMARY KEY NOT NULL,
+  sealed_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  operation_id TEXT NOT NULL UNIQUE,
+  sealed_at INTEGER NOT NULL,
+  FOREIGN KEY (certification_id, question_revision_id)
+    REFERENCES question_revisions(certification_id, id) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER question_revision_seals_validate_insert
+BEFORE INSERT ON question_revision_seals
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM question_revisions AS revision
+  WHERE revision.id = NEW.question_revision_id
+    AND revision.certification_id = NEW.certification_id
+    AND revision.authored_by_user_id = NEW.sealed_by_user_id
+    AND NEW.operation_id = revision.created_operation_id || ':seal'
+    AND NEW.sealed_at = revision.created_at
+    AND length(trim(revision.stem)) BETWEEN 5 AND 4000
+    AND revision.difficulty IN ('easy', 'medium', 'hard')
+    AND length(trim(revision.source_reference)) BETWEEN 1 AND 1000
+    AND length(trim(revision.license_reference)) BETWEEN 1 AND 200
+)
+OR (SELECT COUNT(*) FROM answer_options
+    WHERE question_revision_id = NEW.question_revision_id) NOT BETWEEN 2 AND 8
+OR (SELECT COUNT(*) FROM answer_options
+    WHERE question_revision_id = NEW.question_revision_id AND is_correct = 1) <> 1
+OR EXISTS (
+  SELECT 1 FROM answer_options
+  WHERE question_revision_id = NEW.question_revision_id
+    AND (
+      length(trim(option_text)) NOT BETWEEN 1 AND 1000
+      OR length(trim(explanation)) NOT BETWEEN 1 AND 3000
+    )
+)
+OR EXISTS (
+  SELECT 1 FROM answer_options
+  WHERE question_revision_id = NEW.question_revision_id
+  GROUP BY question_revision_id
+  HAVING MIN(option_order) <> 1 OR MAX(option_order) <> COUNT(*)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'question revision content cannot be sealed incomplete or invalid');
+END;
+
+CREATE TRIGGER question_revision_seals_immutable_update
+BEFORE UPDATE ON question_revision_seals
+BEGIN
+  SELECT RAISE(ABORT, 'question revision seals are immutable');
+END;
+
+CREATE TRIGGER question_revision_seals_immutable_delete
+BEFORE DELETE ON question_revision_seals
+BEGIN
+  SELECT RAISE(ABORT, 'question revision seals cannot be reopened');
+END;
 
 CREATE TABLE question_revision_events (
   id TEXT PRIMARY KEY NOT NULL,
@@ -317,6 +390,34 @@ BEGIN
   SELECT RAISE(ABORT, 'stale question revision');
 END;
 
+CREATE TRIGGER question_revisions_validate_construction
+BEFORE INSERT ON question_revisions
+WHEN (SELECT COUNT(*) FROM question_option_construction
+      WHERE operation_id = NEW.created_operation_id) NOT BETWEEN 2 AND 8
+  OR (SELECT COUNT(*) FROM question_option_construction
+      WHERE operation_id = NEW.created_operation_id AND is_correct = 1) <> 1
+  OR EXISTS (
+    SELECT 1 FROM question_option_construction
+    WHERE operation_id = NEW.created_operation_id
+      AND (
+        length(trim(option_text)) NOT BETWEEN 1 AND 1000
+        OR length(trim(explanation)) NOT BETWEEN 1 AND 3000
+      )
+  )
+  OR EXISTS (
+    SELECT 1 FROM question_option_construction
+    WHERE operation_id = NEW.created_operation_id
+    GROUP BY operation_id
+    HAVING MIN(option_order) <> 1 OR MAX(option_order) <> COUNT(*)
+  )
+  OR length(trim(NEW.stem)) NOT BETWEEN 5 AND 4000
+  OR NEW.difficulty NOT IN ('easy', 'medium', 'hard')
+  OR length(trim(NEW.source_reference)) NOT BETWEEN 1 AND 1000
+  OR length(trim(NEW.license_reference)) NOT BETWEEN 1 AND 200
+BEGIN
+  SELECT RAISE(ABORT, 'question revision construction must be complete and valid');
+END;
+
 CREATE TRIGGER question_revisions_advance_lock
 AFTER INSERT ON question_revisions
 BEGIN
@@ -337,6 +438,25 @@ BEGIN
     lower(hex(randomblob(16))), NEW.certification_id, NEW.id, 1,
     'draft', NEW.authored_by_user_id, NEW.created_operation_id || ':draft',
     'Draft revision created', NEW.created_at
+  );
+  INSERT INTO answer_options (
+    id, certification_id, question_revision_id, option_key,
+    option_order, option_text, is_correct, explanation
+  )
+  SELECT lower(hex(randomblob(16))), NEW.certification_id, NEW.id,
+         construction.option_key, construction.option_order,
+         construction.option_text, construction.is_correct,
+         construction.explanation
+  FROM question_option_construction AS construction
+  WHERE construction.operation_id = NEW.created_operation_id;
+
+  INSERT INTO question_revision_seals (
+    certification_id, question_revision_id, sealed_by_user_id,
+    operation_id, sealed_at
+  )
+  VALUES (
+    NEW.certification_id, NEW.id, NEW.authored_by_user_id,
+    NEW.created_operation_id || ':seal', NEW.created_at
   );
 END;
 
@@ -364,9 +484,92 @@ BEGIN
   SELECT RAISE(ABORT, 'answer option history is immutable');
 END;
 
+CREATE TRIGGER answer_options_insert_only_during_construction
+BEFORE INSERT ON answer_options
+WHEN EXISTS (
+  SELECT 1 FROM question_revision_seals
+  WHERE question_revision_id = NEW.question_revision_id
+)
+OR EXISTS (
+  SELECT 1 FROM question_revision_events
+  WHERE question_revision_id = NEW.question_revision_id
+    AND event_type <> 'draft'
+)
+OR NOT EXISTS (
+  SELECT 1
+  FROM question_revisions AS revision
+  JOIN question_option_construction AS construction
+    ON construction.operation_id = revision.created_operation_id
+   AND construction.question_id = revision.question_id
+   AND construction.option_key = NEW.option_key
+   AND construction.option_order = NEW.option_order
+   AND construction.option_text = NEW.option_text
+   AND construction.is_correct = NEW.is_correct
+   AND construction.explanation = NEW.explanation
+  WHERE revision.id = NEW.question_revision_id
+    AND revision.certification_id = NEW.certification_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'answer options may only be materialized from revision construction');
+END;
+
+CREATE TRIGGER question_option_construction_validate_cleanup
+BEFORE DELETE ON question_option_construction
+WHEN (
+  OLD.question_operation_id IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM questions AS question
+    WHERE question.id = OLD.question_id
+      AND question.created_operation_id = OLD.question_operation_id
+      AND NOT EXISTS (
+        SELECT 1
+        FROM question_revisions AS revision
+        JOIN question_revision_seals AS seal
+          ON seal.certification_id = revision.certification_id
+         AND seal.question_revision_id = revision.id
+        WHERE revision.question_id = question.id
+          AND revision.created_operation_id = OLD.operation_id
+      )
+  )
+)
+OR EXISTS (
+  SELECT 1
+  FROM question_revisions AS revision
+  WHERE revision.question_id = OLD.question_id
+    AND revision.created_operation_id = OLD.operation_id
+    AND NOT EXISTS (
+      SELECT 1 FROM question_revision_seals AS seal
+      WHERE seal.certification_id = revision.certification_id
+        AND seal.question_revision_id = revision.id
+    )
+)
+OR (
+  OLD.requires_provenance = 1
+  AND NOT EXISTS (
+    SELECT 1
+    FROM question_revisions AS revision
+    JOIN question_derivations AS derivation
+      ON derivation.destination_question_id = revision.question_id
+     AND derivation.destination_revision_id = revision.id
+    WHERE revision.question_id = OLD.question_id
+      AND revision.created_operation_id = OLD.operation_id
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'unfinalised question revision construction cannot complete');
+END;
+
 CREATE TRIGGER question_revision_events_validate_transition
 BEFORE INSERT ON question_revision_events
 BEGIN
+  SELECT RAISE(ABORT, 'question revision must be sealed before workflow')
+  WHERE NEW.event_type <> 'draft'
+    AND NOT EXISTS (
+      SELECT 1 FROM question_revision_seals
+      WHERE question_revision_id = NEW.question_revision_id
+        AND certification_id = NEW.certification_id
+    );
+
   SELECT RAISE(ABORT, 'invalid question revision workflow transition')
   WHERE NEW.sequence_number <> COALESCE((
     SELECT MAX(sequence_number) + 1
@@ -424,6 +627,12 @@ BEGIN
   SELECT RAISE(ABORT, 'question content is incomplete')
   WHERE NEW.event_type = 'submitted'
     AND (
+      NOT EXISTS (
+        SELECT 1 FROM question_revision_seals
+        WHERE question_revision_id = NEW.question_revision_id
+          AND certification_id = NEW.certification_id
+      )
+      OR
       (SELECT COUNT(*) FROM answer_options
        WHERE question_revision_id = NEW.question_revision_id) NOT BETWEEN 2 AND 8
       OR (SELECT COUNT(*) FROM answer_options
@@ -479,13 +688,18 @@ END;
 
 CREATE TRIGGER content_reviews_validate_insert
 BEFORE INSERT ON content_reviews
-WHEN COALESCE((
-  SELECT event_type FROM question_revision_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM question_revision_seals
   WHERE question_revision_id = NEW.question_revision_id
-  ORDER BY sequence_number DESC LIMIT 1
-), '') <> 'submitted'
+    AND certification_id = NEW.certification_id
+)
+OR COALESCE((
+    SELECT event_type FROM question_revision_events
+    WHERE question_revision_id = NEW.question_revision_id
+    ORDER BY sequence_number DESC LIMIT 1
+  ), '') <> 'submitted'
 BEGIN
-  SELECT RAISE(ABORT, 'only a submitted revision can be reviewed');
+  SELECT RAISE(ABORT, 'only a sealed submitted revision can be reviewed');
 END;
 
 CREATE TRIGGER content_reviews_append_decision
@@ -517,6 +731,11 @@ END;
 CREATE TRIGGER exam_version_questions_validate_insert
 BEFORE INSERT ON exam_version_questions
 WHEN NEW.publication_state <> 'published'
+  OR NOT EXISTS (
+    SELECT 1 FROM question_revision_seals
+    WHERE question_revision_id = NEW.question_revision_id
+      AND certification_id = NEW.certification_id
+  )
   OR COALESCE((
     SELECT event_type FROM question_revision_events
     WHERE question_revision_id = NEW.question_revision_id
@@ -534,11 +753,18 @@ WHEN NEW.certification_id IS NOT OLD.certification_id
   OR NEW.lock_version <> OLD.lock_version + 1
   OR (
     NEW.publication_state = 'published'
-    AND COALESCE((
-      SELECT event_type FROM question_revision_events
-      WHERE question_revision_id = NEW.question_revision_id
-      ORDER BY sequence_number DESC LIMIT 1
-    ), '') <> 'approved'
+    AND (
+      NOT EXISTS (
+        SELECT 1 FROM question_revision_seals
+        WHERE question_revision_id = NEW.question_revision_id
+          AND certification_id = NEW.certification_id
+      )
+      OR COALESCE((
+        SELECT event_type FROM question_revision_events
+        WHERE question_revision_id = NEW.question_revision_id
+        ORDER BY sequence_number DESC LIMIT 1
+      ), '') <> 'approved'
+    )
   )
   OR (
     NEW.publication_state = 'retired'
@@ -750,4 +976,7 @@ CREATE VIEW published_question_revisions AS
 SELECT pointer.certification_id, pointer.exam_version_id, pointer.question_id,
        pointer.question_revision_id, pointer.lock_version
 FROM exam_version_questions AS pointer
+JOIN question_revision_seals AS seal
+  ON seal.certification_id = pointer.certification_id
+ AND seal.question_revision_id = pointer.question_revision_id
 WHERE pointer.publication_state = 'published';

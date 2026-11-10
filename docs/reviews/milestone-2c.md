@@ -13,9 +13,11 @@
 - Exam-version, domain, and topic identities and meanings are immutable. Changes to syllabus or taxonomy create new identities; old references retain their historical meaning.
 - A question keeps its certification ownership permanently. Same-certification corrections create a new immutable revision with an expected lock version. Reuse across certifications creates a new question and revision and records source certification, question, revision, actor, and reason.
 - Composite foreign keys enforce certification, exam-version, domain, topic, question, and revision consistency. Restrictive deletion, immutable-row triggers, and append-only workflow/review/publication records preserve history.
+- Revision options are staged in an internal construction table and validated by a `BEFORE INSERT` trigger. In the same revision-insert statement, D1 advances the question lock, records the draft event, materializes all staged options, validates their complete single-choice shape, and writes an immutable seal before the revision insert completes. The calling D1 batch then removes the staging rows.
+- Database triggers prevent direct revision inserts without a complete valid construction set, option insertion not sourced from that construction set, and any option insertion after sealing. Seals cannot be updated or deleted. Workflow transitions, review decisions, protected reads, and publication require a seal; corrections create and seal a new revision.
 - Single-choice content is supported in this slice. Stems, difficulty, source/license references, 2–8 ordered unique options, explanations, and exactly one correct answer are validated before writes and again at submission.
 - Review and publication are separate workflow events. The database only permits publishing the exact approved revision. A Manager may review/publish their own revision under the existing proposed launch policy; no second-person rule was added.
-- D1 conditional statements contain the current session, MFA, role, and assignment predicates. Question/revision/option creation and cross-certification provenance use D1 batches; option sets are inserted with one guarded statement. SQL errors and trigger/audit failures abort the batch. Zero-row guards are handled through dependent-row predicates, so a denied/stale parent produces no child, publication, or success-audit row; no post-batch check is treated as rollback.
+- D1 conditional statements contain the current session, MFA, role, and assignment predicates. Question/revision construction and cross-certification provenance use D1 batches; revision triggers materialize the staged option set and seal it atomically. SQL errors and trigger/audit failures abort the batch. Zero-row guards are handled through dependent-row predicates and a cleanup trigger, so a denied/stale parent produces no child, publication, or success-audit row; no post-batch check is treated as rollback.
 - Publication uses an expected pointer version and guarded state transition. Triggers append publication history and audit events in the same statement. A concurrent or stale publisher gets a conflict and creates no success audit.
 
 ## Files changed
@@ -37,13 +39,13 @@ All commands were run on Windows in the repository worktree:
 
 - `npm run verify` — passed.
   - TypeScript checks passed for API, API test code, contracts, and web.
-  - API tests: 6 Vitest files, 26 tests passed; the health test passed.
+  - API tests: 6 Vitest files, 29 tests passed; the health test passed.
   - Web tests: 13 passed.
   - React Router production client and Worker builds completed successfully.
-- `Set-Location apps\api; npx vitest run --config vitest.config.ts test/content.test.ts test/schema.test.ts` — passed, 2 files and 12 tests.
+- `Set-Location apps\api; npx vitest run --config vitest.config.ts test/content.test.ts test/schema.test.ts` — passed, 2 files and 15 tests.
   - The Cloudflare Vitest plugin ran against its isolated Miniflare Worker/D1 runtime.
-  - Test setup applied all migrations twice. Tests cover invalid taxonomy references, immutable revisions/options, stale and concurrent edits/publication, editorial transitions, retirement, access/MFA/session/assignment denial, copy provenance and both-scope authorization, and audit-failure atomicity.
-- Ubuntu GitHub Actions verification is required on the exact pushed commit before review handoff is complete.
+  - Test setup applied all migrations twice. Tests cover invalid taxonomy references, immutable revisions/options, stale and concurrent edits/publication, editorial transitions, retirement, access/MFA/session/assignment denial, copy provenance and both-scope authorization, audit-failure atomicity, seal immutability, late inserts in draft/submitted/approved/published states, invalid construction rollback, direct-construction bypass, and concurrent late inserts versus workflow finalisation.
+- The Ubuntu Actions `verify` result for the exact final pushed SHA is the CI approval gate; its SHA and run URL are included in the review handoff response.
 
 ## Limitations and deferred work
 

@@ -3,7 +3,11 @@ import type {
   AuthorizationResult,
 } from "./repository.ts";
 import { authorizeCertification } from "./repository.ts";
-import type { SecurityDatabase, D1Value } from "./database.ts";
+import type {
+  D1PreparedStatement,
+  D1Value,
+  SecurityDatabase,
+} from "./database.ts";
 import { isValidTokenDigest } from "./database.ts";
 import type { StaffMfaPolicy } from "./mfa.ts";
 import { isConfiguredMfaPolicy } from "./mfa.ts";
@@ -168,9 +172,8 @@ function createOptionInput(options: QuestionOptionInput[]): {
   values: D1Value[];
 } {
   return {
-    sql: options.map(() => "(?, ?, ?, ?, ?, ?)").join(", "),
+    sql: options.map(() => "(?, ?, ?, ?, ?)").join(", "),
     values: options.flatMap((option, index) => [
-      crypto.randomUUID(),
       option.key,
       index + 1,
       option.text,
@@ -178,6 +181,56 @@ function createOptionInput(options: QuestionOptionInput[]): {
       option.explanation,
     ]),
   };
+}
+
+function createOptionConstructionInsert(
+  database: SecurityDatabase,
+  operationId: string,
+  questionId: string,
+  questionOperationId: string | null,
+  requiresProvenance: boolean,
+  options: QuestionOptionInput[],
+): D1PreparedStatement {
+  const optionInput = createOptionInput(options);
+  return database
+    .prepare(
+      `WITH option_input(option_key, option_order, option_text, is_correct, explanation)
+       AS (VALUES ${optionInput.sql})
+       INSERT INTO question_option_construction (
+         operation_id, question_id, question_operation_id,
+         requires_provenance, option_key,
+         option_order, option_text, is_correct, explanation
+       )
+       SELECT ?, ?, ?, ?, option_key, option_order, option_text, is_correct, explanation
+       FROM option_input
+       WHERE EXISTS (
+         SELECT 1 FROM questions AS question
+         WHERE question.id = ?
+           AND (? IS NULL OR question.created_operation_id = ?)
+       )
+       RETURNING operation_id`,
+    )
+    .bind(
+      ...optionInput.values,
+      operationId,
+      questionId,
+      questionOperationId,
+      requiresProvenance ? 1 : 0,
+      questionId,
+      questionOperationId,
+      questionOperationId,
+    );
+}
+
+function createOptionConstructionCleanup(
+  database: SecurityDatabase,
+  operationId: string,
+): D1PreparedStatement {
+  return database
+    .prepare(
+      "DELETE FROM question_option_construction WHERE operation_id = ?",
+    )
+    .bind(operationId);
 }
 
 function isValidMetadata(metadata: MutationMetadata): boolean {
@@ -629,38 +682,23 @@ async function createQuestionWithRevision(
       ...sourceValues,
     );
 
-  const optionInput = createOptionInput(content.options);
-  const optionInsert = database
-    .prepare(
-      `WITH option_input(id, option_key, option_order, option_text, is_correct, explanation)
-       AS (VALUES ${optionInput.sql})
-       INSERT INTO answer_options (
-         id, certification_id, question_revision_id, option_key,
-         option_order, option_text, is_correct, explanation
-       )
-       SELECT option_input.id, revision.certification_id, revision.id,
-              option_input.option_key, option_input.option_order,
-              option_input.option_text, option_input.is_correct,
-              option_input.explanation
-       FROM option_input
-       JOIN question_revisions AS revision ON revision.id = ?
-       JOIN questions AS question ON question.id = revision.question_id
-       WHERE revision.created_operation_id = ?
-         AND question.created_operation_id = ?
-         AND ${destinationGuard.sql}
-         ${sourceExistsSql}
-       RETURNING id`,
-    )
-    .bind(
-      ...optionInput.values,
-      revisionId,
-      revisionOperationId,
-      questionOperationId,
-      ...destinationGuard.values,
-      ...sourceValues,
-    );
-
-  const batchStatements = [questionInsert, revisionInsert, optionInsert];
+  const optionConstructionInsert = createOptionConstructionInsert(
+    database,
+    revisionOperationId,
+    questionId,
+    questionOperationId,
+    input.source !== undefined,
+    content.options,
+  );
+  const optionConstructionCleanup = createOptionConstructionCleanup(
+    database,
+    revisionOperationId,
+  );
+  const batchStatements = [
+    questionInsert,
+    optionConstructionInsert,
+    revisionInsert,
+  ];
   if (input.source) {
     const derivationInsert = database
       .prepare(
@@ -697,9 +735,10 @@ async function createQuestionWithRevision(
       );
     batchStatements.push(derivationInsert);
   }
+  batchStatements.push(optionConstructionCleanup);
 
   const results = await database.batch(batchStatements);
-  if (!idResult(results[0] ?? {}) || !idResult(results[1] ?? {})) {
+  if (!idResult(results[0] ?? {}) || !idResult(results[2] ?? {})) {
     return { ok: false, reason: "conflict" };
   }
   return {
@@ -857,38 +896,24 @@ export async function createQuestionRevision(
       input.topicId,
       ...guard.values,
     );
-  const optionInput = createOptionInput(content.options);
-  const optionInsert = database
-    .prepare(
-      `WITH option_input(id, option_key, option_order, option_text, is_correct, explanation)
-       AS (VALUES ${optionInput.sql})
-       INSERT INTO answer_options (
-         id, certification_id, question_revision_id, option_key,
-         option_order, option_text, is_correct, explanation
-       )
-       SELECT option_input.id, revision.certification_id, revision.id,
-              option_input.option_key, option_input.option_order,
-              option_input.option_text, option_input.is_correct,
-              option_input.explanation
-       FROM option_input
-       JOIN question_revisions AS revision ON revision.id = ?
-       JOIN questions AS question ON question.id = revision.question_id
-       WHERE revision.created_operation_id = ?
-         AND question.id = ?
-         AND question.lock_version = ?
-         AND ${guard.sql}
-       RETURNING id`,
-    )
-    .bind(
-      ...optionInput.values,
-      revisionId,
-      revisionOperationId,
-      input.questionId,
-      input.expectedLockVersion + 1,
-      ...guard.values,
-    );
-  const results = await database.batch([revisionInsert, optionInsert]);
-  if (!idResult(results[0] ?? {})) {
+  const optionConstructionInsert = createOptionConstructionInsert(
+    database,
+    revisionOperationId,
+    input.questionId,
+    null,
+    false,
+    content.options,
+  );
+  const optionConstructionCleanup = createOptionConstructionCleanup(
+    database,
+    revisionOperationId,
+  );
+  const results = await database.batch([
+    optionConstructionInsert,
+    revisionInsert,
+    optionConstructionCleanup,
+  ]);
+  if (!idResult(results[1] ?? {})) {
     return { ok: false, reason: "conflict" };
   }
   return {
@@ -1397,6 +1422,9 @@ export async function getQuestionRevision(
               option.is_correct, option.explanation
        FROM question_revisions AS revision
        JOIN questions AS question ON question.id = revision.question_id
+       JOIN question_revision_seals AS seal
+         ON seal.certification_id = revision.certification_id
+        AND seal.question_revision_id = revision.id
        LEFT JOIN answer_options AS option
          ON option.question_revision_id = revision.id
        WHERE revision.id = ?
