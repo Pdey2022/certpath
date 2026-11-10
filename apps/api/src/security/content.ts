@@ -61,12 +61,12 @@ export interface QuestionContent {
   }>;
 }
 
-interface ScopeGuard {
+export interface ScopeGuard {
   sql: string;
   values: D1Value[];
 }
 
-interface NormalizedQuestionContent {
+export interface NormalizedQuestionContent {
   stem: string;
   difficulty: "easy" | "medium" | "hard";
   sourceReference: string;
@@ -81,7 +81,7 @@ interface CopySource {
   reason: string;
 }
 
-interface CreateQuestionInput {
+export interface CreateQuestionInput {
   certificationId: string;
   examVersionId: string;
   domainId: string;
@@ -115,19 +115,29 @@ function isBoundedText(
   );
 }
 
-function normalizeQuestionContent(
-  value: QuestionContentInput,
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isDifficulty(
+  value: unknown,
+): value is QuestionContentInput["difficulty"] {
+  return value === "easy" || value === "medium" || value === "hard";
+}
+
+export function normalizeQuestionContent(
+  value: unknown,
 ): NormalizedQuestionContent | null {
+  if (!isRecord(value)) return null;
+  const optionsInput = value["options"];
   if (
-    value === null ||
-    typeof value !== "object" ||
-    !isBoundedText(value.stem, 5, 4000) ||
-    !["easy", "medium", "hard"].includes(value.difficulty) ||
-    !isBoundedText(value.sourceReference, 1, 1000) ||
-    !isBoundedText(value.licenseReference, 1, 200) ||
-    !Array.isArray(value.options) ||
-    value.options.length < 2 ||
-    value.options.length > 8
+    !isBoundedText(value["stem"], 5, 4000) ||
+    !isDifficulty(value["difficulty"]) ||
+    !isBoundedText(value["sourceReference"], 1, 1000) ||
+    !isBoundedText(value["licenseReference"], 1, 200) ||
+    !Array.isArray(optionsInput) ||
+    optionsInput.length < 2 ||
+    optionsInput.length > 8
   ) {
     return null;
   }
@@ -135,34 +145,38 @@ function normalizeQuestionContent(
   const keys = new Set<string>();
   const options: QuestionOptionInput[] = [];
   let correctCount = 0;
-  for (const option of value.options) {
+  for (const option of optionsInput) {
+    if (!isRecord(option)) return null;
+    const key = option["key"];
+    const text = option["text"];
+    const explanation = option["explanation"];
+    const correct = option["correct"];
     if (
-      option === null ||
-      typeof option !== "object" ||
-      !isKey(option.key, 32) ||
-      !isBoundedText(option.text, 1, 1000) ||
-      !isBoundedText(option.explanation, 1, 3000) ||
-      typeof option.correct !== "boolean" ||
-      keys.has(option.key)
+      typeof key !== "string" ||
+      !isKey(key, 32) ||
+      !isBoundedText(text, 1, 1000) ||
+      !isBoundedText(explanation, 1, 3000) ||
+      typeof correct !== "boolean" ||
+      keys.has(key)
     ) {
       return null;
     }
-    keys.add(option.key);
-    if (option.correct) correctCount += 1;
+    keys.add(key);
+    if (correct) correctCount += 1;
     options.push({
-      key: option.key,
-      text: option.text.trim(),
-      correct: option.correct,
-      explanation: option.explanation.trim(),
+      key,
+      text: text.trim(),
+      correct,
+      explanation: explanation.trim(),
     });
   }
   if (correctCount !== 1) return null;
 
   return {
-    stem: value.stem.trim(),
-    difficulty: value.difficulty,
-    sourceReference: value.sourceReference.trim(),
-    licenseReference: value.licenseReference.trim(),
+    stem: value["stem"].trim(),
+    difficulty: value["difficulty"],
+    sourceReference: value["sourceReference"].trim(),
+    licenseReference: value["licenseReference"].trim(),
     options,
   };
 }
@@ -241,7 +255,7 @@ function isValidMetadata(metadata: MutationMetadata): boolean {
   );
 }
 
-function createScopeGuard(
+export function createScopeGuard(
   tokenDigest: string,
   certificationId: string,
   now: number,
@@ -556,17 +570,32 @@ async function createQuestionWithRevision(
   metadata: MutationMetadata,
   policy: StaffMfaPolicy,
   actorUserId: string,
+  options?: {
+    questionId?: string;
+    revisionId?: string;
+    additionalGuard?: ScopeGuard;
+    statements?: D1PreparedStatement[];
+  },
 ): Promise<ContentResult<{ questionId: string; revisionId: string; revisionNumber: number }>> {
-  const questionId = crypto.randomUUID();
-  const revisionId = crypto.randomUUID();
+  const questionId = options?.questionId ?? crypto.randomUUID();
+  const revisionId = options?.revisionId ?? crypto.randomUUID();
   const questionOperationId = `${metadata.operationId}:question`;
   const revisionOperationId = `${metadata.operationId}:revision`;
-  const destinationGuard = createScopeGuard(
+  const baseDestinationGuard = createScopeGuard(
     tokenDigest,
     input.certificationId,
     metadata.now,
     policy,
   );
+  const destinationGuard = options?.additionalGuard
+    ? {
+        sql: `(${baseDestinationGuard.sql}) AND (${options.additionalGuard.sql})`,
+        values: [
+          ...baseDestinationGuard.values,
+          ...options.additionalGuard.values,
+        ],
+      }
+    : baseDestinationGuard;
   const sourceGuard = input.source
     ? createScopeGuard(tokenDigest, input.source.certificationId, metadata.now, policy)
     : null;
@@ -737,6 +766,14 @@ async function createQuestionWithRevision(
   }
   batchStatements.push(optionConstructionCleanup);
 
+  if (options?.statements) {
+    options.statements.push(...batchStatements);
+    return {
+      ok: true,
+      value: { questionId, revisionId, revisionNumber: 1 },
+    };
+  }
+
   const results = await database.batch(batchStatements);
   if (!idResult(results[0] ?? {}) || !idResult(results[2] ?? {})) {
     return { ok: false, reason: "conflict" };
@@ -744,6 +781,44 @@ async function createQuestionWithRevision(
   return {
     ok: true,
     value: { questionId, revisionId, revisionNumber: 1 },
+  };
+}
+
+export async function prepareImportedQuestionDraft(
+  database: SecurityDatabase,
+  tokenDigest: string,
+  input: CreateQuestionInput & { questionId: string; revisionId: string },
+  metadata: MutationMetadata,
+  policy: StaffMfaPolicy,
+  actorUserId: string,
+  additionalGuard: ScopeGuard,
+): Promise<
+  ContentResult<{
+    questionId: string;
+    revisionId: string;
+    revisionNumber: number;
+    statements: D1PreparedStatement[];
+  }>
+> {
+  const statements: D1PreparedStatement[] = [];
+  const prepared = await createQuestionWithRevision(
+    database,
+    tokenDigest,
+    input,
+    metadata,
+    policy,
+    actorUserId,
+    {
+      questionId: input.questionId,
+      revisionId: input.revisionId,
+      additionalGuard,
+      statements,
+    },
+  );
+  if (!prepared.ok) return prepared;
+  return {
+    ok: true,
+    value: { ...prepared.value, statements },
   };
 }
 

@@ -36,6 +36,9 @@ describe("local security D1 schema", () => {
     expect(names).toContain("exam_version_questions");
     expect(names).toContain("content_publication_events");
     expect(names).toContain("question_derivations");
+    expect(names).toContain("question_import_previews");
+    expect(names).toContain("question_import_rows");
+    expect(names).toContain("question_import_results");
     expect(names).not.toContain("provider_events");
   });
 
