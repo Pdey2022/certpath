@@ -18,6 +18,7 @@ export interface D1ReadSession {
 
 export interface SecurityDatabase extends D1ReadSession {
   withSession(constraint: "first-primary"): D1ReadSession;
+  batch(statements: D1PreparedStatement[]): Promise<D1Result[]>;
 }
 
 export function isValidTokenDigest(value: string): boolean {

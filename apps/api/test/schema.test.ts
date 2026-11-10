@@ -6,7 +6,7 @@ import { createTestIdentity, createTestSession, testNow } from "./factories.ts";
 const database: SecurityDatabase = env.DB;
 
 describe("local security D1 schema", () => {
-  it("applies migrations repeatedly and keeps the initial bootstrap singleton", async () => {
+  it("applies all migrations repeatedly and keeps the initial bootstrap singleton", async () => {
     const bootstrap = await database
       .prepare("SELECT * FROM initial_admin_provisioning")
       .all();
@@ -23,7 +23,19 @@ describe("local security D1 schema", () => {
     expect(names).toContain("certifications");
     expect(names).toContain("manager_certification_assignments");
     expect(names).toContain("audit_events");
-    expect(names).not.toContain("question_revisions");
+    expect(names).toContain("exam_versions");
+    expect(names).toContain("domains");
+    expect(names).toContain("topics");
+    expect(names).toContain("questions");
+    expect(names).toContain("question_option_construction");
+    expect(names).toContain("question_revisions");
+    expect(names).toContain("answer_options");
+    expect(names).toContain("question_revision_seals");
+    expect(names).toContain("question_revision_events");
+    expect(names).toContain("content_reviews");
+    expect(names).toContain("exam_version_questions");
+    expect(names).toContain("content_publication_events");
+    expect(names).toContain("question_derivations");
     expect(names).not.toContain("provider_events");
   });
 
