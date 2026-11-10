@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./security/question-import-cleanup": "./src/security/question-import-cleanup.ts",
+    "./security/question-imports": "./src/security/question-imports.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
@@ -12,6 +14,7 @@
   },
   "dependencies": {
     "@certpath/contracts": "0.0.0",
+    "csv-parse": "7.0.3",
     "hono": "4.13.17"
   },
   "devDependencies": {
