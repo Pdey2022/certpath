@@ -1,0 +1,33 @@
+{
+  "name": "@certpath/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "react-router build",
+    "dev": "react-router dev",
+    "typecheck": "wrangler types && react-router typegen && tsc -b",
+    "test": "tsx --test app/lib/seo.test.ts",
+    "preview": "npm run build && vite preview",
+    "db:migrate:local": "wrangler d1 migrations apply certpath-local --local",
+    "cf-typegen": "wrangler types",
+    "postinstall": "wrangler types"
+  },
+  "dependencies": {
+    "isbot": "^5.1.36",
+    "@certpath/api": "0.0.0",
+    "@certpath/contracts": "0.0.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router": "^8.5.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.68.0",
+    "@react-router/dev": "^8.5.1",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.3",
+    "wrangler": "^4.160.0"
+  }
+}
