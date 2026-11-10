@@ -94,7 +94,9 @@ the binding, and `react-router typegen` failed with “Cannot find native
 binding.” The lockfile now records the matching Linux package version,
 registry URL, integrity, and platform constraints while retaining the Windows
 entry. CI continues to use `npm ci` and now explicitly passes
-`--include=optional`; it does not skip checks or alter the runner OS.
+`--include=optional`; it does not skip checks or alter the runner OS. A
+`workflow_dispatch` trigger is also available to repeat the same Ubuntu
+verification directly against a branch head.
 
 The corrected clean install and full verification passed on Windows. The
 Ubuntu Actions result for this correction is pending and will be recorded
