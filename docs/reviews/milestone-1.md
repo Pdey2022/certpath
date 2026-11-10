@@ -80,7 +80,7 @@ Environment: Windows, Node.js 24.18.0, npm 11.16.0.
 | Learner/admin practice and role previews | Previously checked in-browser: practice selection, submission, explanations, bookmarks, save status, refresh restoration, failed save/retry, Save & exit; Manager navigation scope and presentation-only denial; editor validation and import preview. |
 | SSR and private-route checks | Previously checked against the local Worker: public `/` and `/exams` return rendered page content; `/app/*` and `/admin/*` return HTTP 200 with `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`. |
 | Screenshot files | Four checked-in screenshots; learner/admin desktop are 1440×1000 and learner/admin mobile are 390×844. |
-| Ubuntu GitHub Actions | Pending creation of the draft pull request; no Milestone 1 Actions run exists yet. |
+| Ubuntu GitHub Actions | Passed: [CI run 42848425162](https://github.com/Pdey2022/certpath/actions/runs/42848425162) completed successfully on commit `a4ab9dda57488cf4521be06ddcd71ba6624e83af` using the existing Ubuntu workflow. |
 
 The behavior checks above are prototype-level browser checks, not production
 security or persistence tests. Browser persistence is isolated to
@@ -101,8 +101,9 @@ demo state. Reset removes only that key.
   timer, adaptive selection, readiness prediction, or exam engine.
 - Demo dates, access states, role selection, admin changes, and import/revision
   previews are not live entitlements, authorization, or durable content edits.
-- This local Windows verification does not replace the required Ubuntu CI run.
-  Architect review should wait for the pull request's required checks.
+The first draft PR revision passed both local Windows verification and the
+  Ubuntu CI workflow. The documentation-only follow-up will trigger the same CI
+  workflow; verify that rerun before architect approval.
 
 ## Architect inspection and run steps
 
@@ -123,5 +124,6 @@ demo state. Reset removes only that key.
    and question editor, validation, import, and revision history. These are
    display-only demo interactions, not permission enforcement or persisted
    mutations.
-6. Run `npm run verify`. Review the draft PR's Ubuntu Actions result before
-   approval. Do not merge or deploy this branch as part of Milestone 1 review.
+6. Run `npm run verify`. Review the latest draft PR's Ubuntu Actions result
+   before approval. Do not merge or deploy this branch as part of Milestone 1
+   review.
