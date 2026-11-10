@@ -140,18 +140,40 @@ emulator and remote non-production tests before relying on it.
 
 Concrete conditional-write patterns:
 
-- **First Global Admin:** enforce a unique partial index permitting only one
-  `global_admin`. In one batch, insert the role using `INSERT ... SELECT ...
-  WHERE NOT EXISTS (SELECT 1 FROM staff_roles WHERE role='global_admin')`,
-  bound to the exact preverified internal user and one-time provisioning
-  operation ID. Insert the consumed provisioning record and audit event only
-  through statements guarded by that operation/role row. Check returned
-  changes; any unexpected row count is a failed provisioning result. A unique
-  constraint resolves concurrent bootstrap attempts; no read-then-insert
-  decision is trusted by itself.
+- **Initial Global Admin bootstrap:** do not constrain the number of
+  `global_admin` role rows with a unique index. Seed one
+  `global_admin_bootstrap` row with the fixed primary key
+  `initial-global-admin`, an unconsumed state, and no public write path. In one
+  D1 batch, conditionally consume that row only when it is still unconsumed and
+  no active Global Admin exists, binding a unique operation ID and the exact
+  preverified internal user; insert the role and audit event only when that
+  same consumed row, operation ID and target user match. A unique bootstrap
+  key plus the conditional consume allows only one initial provisioning
+  operation; inspect each statement's affected row count and report success
+  only when every expected write affected exactly one row. Missing,
+  already-consumed, mismatched or no-longer-initial conditions fail closed.
+  The batch rolls back on SQL errors; a zero-row conditional write must also
+  be treated as failure, not success.
+- **Later Global Admin appointment:** this is a separate operation, not a
+  bootstrap retry. Require a current active Global Admin actor, a valid app
+  session with fresh server-verified MFA, explicit target identity, reason and
+  unique operation ID. In one D1 batch, conditionally add the role and append
+  its audit event only when the guarded role insertion succeeds; the write
+  predicates must recheck the actor's current role, session/MFA state and
+  target account. More than one active Global Admin is permitted.
+- **Last-Global-Admin protection:** role removal or demotion must be
+  conditional on another active account retaining the Global Admin role. A
+  concurrent change must not be able to remove the last active administrator.
+  Bypassing this guard is allowed only through a separately approved, audited
+  recovery procedure; its authorization, operator proof and exact write path
+  remain pending approval. Use the same conditional write path and append an
+  audit event only when its guarded role change succeeds. Validate
+  affected-row checks and concurrent behavior in D1 tests before
+  implementation.
 - **Assignment-sensitive mutation:** make the actual `UPDATE`/`INSERT` predicate
   require the target certification assignment (and source assignment for a
-  move), actor/session state, and expected `lock_version`/revision. In the
+  cross-certification copy), actor/session state, and expected
+  `lock_version`/revision. In the
   same batch, persist history/audit rows tied to a unique operation ID and
   condition them on the target row carrying that operation ID. Check each
   result; zero affected target rows means denied/conflict and no successful
@@ -203,30 +225,53 @@ is:
    Duplicate event IDs are no-ops; transient D1 failures return a retryable
    non-success response and are alerted. Keep unprocessed events durable and
    replay/reconcile them before reopening access.
-3. **Delivery target and outage mode:** target event-to-D1 revocation within
-   60 seconds during healthy provider/event/D1 operation. Enforce this with a
-   feed watermark/cursor and an independent freshness monitor, not an
-   assumption that a webhook is instantaneous. If the event feed is behind,
-   cannot prove cursor continuity, or D1 is unavailable, fail closed for
-   protected authenticated routes; do not renew/create app sessions. Keep that
-   gate closed after recovery until the provider event history has been
-   reconciled through a known cursor and D1 has applied all revocations.
-   Alert, retry with bounded exponential backoff, deduplicate by provider
-   event ID, and expose an operator recovery procedure. No stale event may
-   restore access. A provider without a documented and demonstrated durable
-   event/replay or equivalent status-check mechanism does not meet this
-   architecture requirement.
+3. **External-provider assurance and outage policy (pending approval):**
+   compare two mechanisms rather than assuming a universal event guarantee:
+   (a) authenticated, replayable lifecycle events with verified signatures,
+   event IDs and feed continuity; and (b) bounded per-identity provider-status
+   revalidation using a verified provider API. Establish from official
+   documentation and a non-production proof which password-reset, disable/
+   suspension and compromise signals each mechanism actually covers, and its
+   delivery, ordering, retry, availability and rate-limit behavior. An event
+   or status result that is successfully verified and mapped to an internal
+   identity causes immediate D1 account/session revocation. Deduplicate valid
+   event IDs; duplicate delivery of an already accepted event is an idempotent
+   no-op. Retry transient D1 failures and acknowledge events only after
+   commit. A malformed, unverifiable, suspiciously replayed or unmapped event
+   is rejected and recorded for investigation; it must not automatically deny
+   service to unrelated users.
+4. **Separate stale-assurance limits by population (pending approval):** retain
+   the last successfully verified provider status/assurance timestamp and
+   define finite maximum stale windows independently for staff and learners.
+   Staff may have a stricter availability policy; learners may have a
+   different, explicitly approved window. Do not select or imply values in
+   this proposal. Before implementation, the owner/architect must approve
+   exact maximum windows and behavior for each population. If provider
+   revalidation or a lifecycle feed is unavailable, do not create or renew
+   sessions; existing sessions may rely on prior assurance only until their
+   population's approved maximum, then protected requests fail closed. If no
+   maximum is approved, do not enable provider-dependent sessions. A detected
+   feed continuity gap is handled according to the affected population's
+   approved staleness policy; it is not equivalent to an invalid individual
+   event and must not be silently ignored.
+5. **Application/D1 outage behavior:** application-controlled logout,
+   compromise response, role removal and assignment removal revoke or change
+   D1 state immediately, and each protected request reads current session,
+   role and assignment state from the D1 primary. A D1 outage or inability to
+   establish primary consistency denies protected requests immediately; never
+   fall back to a provider token, replica or cache. Provider status outages
+   follow the separate staff/learner stale-assurance limits above. Alert,
+   retry with bounded backoff, deduplicate events and provide an audited
+   reconciliation procedure. Provider-session expiry alone does not revoke a
+   D1 session.
 
-The 60-second target is an application SLO to validate, not a provider SLA.
-The vendor docs reviewed so far establish password/session APIs for some
-candidates, but do not establish complete event coverage, ordering, replay,
-delivery retry guarantees, or a 60-second bound for all password resets,
-suspensions and compromise signals. These are selection/proof-of-concept
-gates. Until verified for a chosen provider, do not claim remote password
-resets or out-of-band suspension invalidate D1 sessions within a bounded
-period. Provider outage, missing event, invalid signature, unmapped identity,
-or inconsistent D1 results must never silently leave staff or learner
-sessions authorized.
+The external-provider revocation latency and maximum stale-assurance windows
+are measurable policies to be selected and approved before implementation,
+not an approved universal 60-second requirement or provider SLA. Existing
+provider documentation does not establish complete event coverage or bounded
+delivery for every candidate. Until the chosen mechanism and per-population
+limits are verified, do not claim out-of-band password resets, suspensions or
+compromise signals invalidate D1 sessions within a guaranteed time.
 
 ### Account registration, recovery and linking
 
@@ -263,20 +308,24 @@ architect/owner approval. If the provider cannot produce trustworthy MFA
 assurance for a flow, deny staff access through that flow.
 
 The first Global Admin must not be obtainable through public registration or
-an ordinary UI. Proposed bootstrap: after a verified, MFA-enrolled identity
-exists, an authorized operator runs a one-time, audited provisioning command
-through a tightly scoped deployment/data-access credential and approved change
-record. The command must transactionally require that no Global Admin exists,
-resolve the exact `(issuer, subject)` to one internal user, insert exactly one
-`global_admin` role and an audit event, and then disable/remove the bootstrap
-capability. No shared bootstrap password, default account, or permanent
-bootstrap endpoint. The exact operator approval and credential mechanism must
-be reviewed before implementation.
+an ordinary UI. After a verified, MFA-enrolled identity exists, an authorized
+operator runs a one-time, audited provisioning command through a tightly
+scoped deployment/data-access credential and approved change record. The
+command conditionally consumes the uniquely keyed
+`initial-global-admin` bootstrap record and grants the role to the bound
+`(issuer, subject)`/internal user in the same D1 batch. It does not require that
+there be only one Global Admin, and the consumed bootstrap record cannot be
+reused. No shared bootstrap password, default account, or permanent bootstrap
+endpoint. The exact operator approval and credential mechanism must be
+reviewed before implementation.
 
-Public registration never writes `staff_roles`. After bootstrap, only a
-Global Admin can assign Managers or alter staff roles; each operation requires
-MFA, reason, and audit event. Removing a role or assignment is effective on
-the next protected request because every request re-reads current D1 scope.
+Later Global Admin appointments use the separate MFA-protected, audited
+procedure described above and may result in multiple active Global Admins.
+Public registration never writes `staff_roles`. Only a current Global Admin
+may assign Managers or appoint/remove staff roles. Do not remove or demote the
+last active Global Admin except through a separately approved recovery
+procedure. Role and assignment changes are effective on the next protected
+request because every request re-reads current D1 scope.
 
 ## Server-enforced permission model
 
@@ -292,7 +341,7 @@ payload, hidden navigation, `demoRole`, or user metadata.
 | Review, approve/publish/retire content | All certifications | Assigned certifications only; record reviewer and publisher separately; do not require a second person unless separately approved |
 | List/detail access to content | All certifications | Query must be scoped by current assignments, including list totals/search/counts; direct IDs and nested IDs must independently prove the same scope |
 | Import/export | All certifications | Only assigned certifications; validate every row and requested output scope before reading/writing; never bulk-export other exams |
-| Move content between certification scopes | Any; audit both sides | Only if both source and destination certifications are currently assigned; otherwise deny |
+| Reuse content across certification scopes | May copy into a new question identity; audit source and destination | May copy only when assigned to both source and destination certifications; otherwise deny |
 | Manage staff, assignments, security, integrations, secrets, settings | Yes | No |
 | Prices, orders, payments/refunds, access grants, unrestricted customer data | Yes | No |
 | Learner context for content reports | As product/admin policy permits | Only minimal context required for assigned-certification quality investigations |
@@ -306,9 +355,11 @@ Implementation boundary proposal:
   certification before returning fields or applying side effects. Return a
   consistent not-found/denied response that does not confirm unassigned
   records.
-- For moves, check source and destination in the same transaction as the
-  update; require scope on both sides. A Manager cannot move content out of an
-  assignment they are losing or into an unassigned exam.
+- For cross-certification reuse, never update a stable question's
+  certification ownership. Create a new question identity and revision with
+  provenance to the source, preserving all source history. Check authorization
+  for both source and destination in the same transaction/batch; a Manager
+  must currently be assigned to both.
 - For imports, authorize the requested certification before parsing or storing;
   validate every parsed certification/version/domain/topic reference on
   preview and again at confirmation. Confirmation creates drafts only.
@@ -337,6 +388,7 @@ exam-version effective-date presentation follows existing product decisions.
 | `users` | Stable internal `id`; account state and timestamps. Do not use email as the primary or authorization key. |
 | `auth_identities` | `id`, `user_id -> users`, provider key, exact issuer and subject, verified-email metadata, linked/created timestamps; unique `(issuer, subject)`. No passwords or provider bearer tokens. |
 | `staff_roles` | `user_id -> users`, role constrained to exactly `global_admin` or `manager`, actor and timestamps. No row means non-staff. |
+| `global_admin_bootstrap` | One row keyed by the fixed value `initial-global-admin`; consumed state, unique operation ID, bound target user, operator and timestamp. The row can be consumed only once; it is not a cardinality constraint on `staff_roles`. |
 | `manager_certification_assignments` | Manager `user_id`, `certification_id`, assigning Global Admin, timestamps/revocation; unique active assignment per manager/certification. Changes are audited. |
 | `app_sessions` | Digest of random opaque cookie secret, `user_id`, created/expiry/revocation timestamps, MFA time/method/assurance, authentication time and limited device/session metadata. Never store the raw cookie secret. |
 
@@ -451,8 +503,10 @@ production bootstrap as separate, reviewable tasks. No item starts in Milestone
    email verification/recovery, production staff MFA assurance, lifecycle
    event delivery/replay and account linking in a non-production harness. Keep
    this separate from production accounts, D1 schema, business records and
-   deployment. Do not proceed if the 60-second revocation target cannot be
-   demonstrated or safely failed closed.
+   deployment. Demonstrate the selected lifecycle-event and/or status-
+   revalidation mechanism, then obtain approval for separate finite staff and
+   learner stale-assurance limits and outage behavior. Do not treat a latency
+   target as approved until the owner/architect sets one.
 3. **Local identity/session schema first.** Add reviewed D1 migrations for
    internal users, auth identity keys, account security state, opaque app
    sessions, provider event ledger/feed watermark, and audit records. Add
@@ -494,9 +548,10 @@ production bootstrap as separate, reviewable tasks. No item starts in Milestone
   session.
 - **Assigned-exam isolation:** Manager A can list/detail/mutate only assigned
   certification content. Test collection queries, counts, pagination, search,
-  direct IDs, nested IDs, profile operations, import/export and both sides of
-  reassignment. Removing the assignment blocks the next request. Global Admin
-  has the approved cross-certification scope.
+  direct IDs, nested IDs, profile operations, import/export and both source
+  and destination scopes for cross-certification copies. Removing the
+  assignment blocks the next request. Global Admin has the approved
+  cross-certification scope.
 - **MFA:** each staff role is denied without server-verified MFA, with
   unsupported or missing assurance, or after the approved freshness window.
   Learner session state cannot satisfy staff MFA. Test step-up, recovery and
@@ -509,16 +564,21 @@ production bootstrap as separate, reviewable tasks. No item starts in Milestone
 - **Session revocation/logout:** logout and remote revocation invalidate the
   app session on the next request even if a provider JWT remains cryptographically
   valid. Expired, revoked, malformed and rotated cookies fail closed.
-- **Provider lifecycle invalidation:** password reset, account disable/
-  suspension and compromise events are authenticated, mapped to the correct
-  internal user, idempotently applied, audited and retried. Healthy operation
-  meets the 60-second target; event-feed staleness/provider outage/D1 outage
-  closes protected routes until replay/reconciliation completes. Provider
-  session expiry alone must not pass this test.
-- **Registration/bootstrap:** anonymous/public registration cannot create
-  `staff_roles`; concurrent or repeated bootstrap attempts cannot create a
-  second Global Admin; wrong/unverified identity or missing MFA aborts without
-  partial role/audit state.
+- **Provider lifecycle invalidation:** test authenticated lifecycle events and
+  bounded provider-status revalidation for the documented provider signals.
+  A valid result revokes the mapped user's D1 sessions immediately; duplicate
+  events are idempotent. Invalid/unmapped events are rejected, recorded and
+  investigated without automatically denying unrelated users. Test provider
+  and event-feed outages against separately approved staff and learner
+  maximum stale-assurance windows; D1 outages deny protected requests
+  immediately. Provider session expiry alone must not pass this test.
+- **Registration/bootstrap and administrator continuity:** anonymous/public
+  registration cannot create `staff_roles`; a uniquely keyed consumed
+  bootstrap record allows only one initial provisioning; later authorized,
+  MFA-protected, audited appointments may create additional Global Admins.
+  Wrong/unverified identity or missing MFA aborts without partial role/audit
+  state. Concurrent removal/demotion cannot remove the last active Global
+  Admin without the separately approved recovery procedure.
 - **Imports/exports:** malformed, duplicate, oversized and cross-certification
   rows fail safely; preview has no write/publication side effect; confirmation
   is idempotent, revalidates assignment and creates drafts only; exports and

@@ -23,12 +23,14 @@ migrations, implement authentication/authorization, or start Milestone 2B.
   envelope, event coverage, and staff MFA/session policy before implementation
   or paid setup. No provider account was created.
 - Specified default-deny Global Admin/Manager permissions, certification
-  assignment checks, safe first-Global-Admin bootstrap, staff MFA enforcement,
-  safe account linking, opaque D1 sessions, D1 primary-consistent security
-  reads and conditional atomic-batch write patterns, provider-event session
-  invalidation with retry/deduplication and a fail-closed 60-second target,
-  immutable cross-certification content provenance, prototype isolation,
-  implementation slices, and behavioral acceptance tests.
+  assignment checks, a uniquely keyed one-time initial-Global-Admin bootstrap
+  with separate later appointments and last-admin protection, staff MFA
+  enforcement, safe account linking, opaque D1 sessions, D1 primary-consistent
+  security reads and conditional atomic-batch write patterns, immediate
+  application-controlled session revocation, provider-event/status
+  revalidation alternatives with pending per-population stale-assurance
+  limits, immutable cross-certification content provenance, prototype
+  isolation, implementation slices, and behavioral acceptance tests.
 
 ## Decision status
 
@@ -56,25 +58,33 @@ migrations, implement authentication/authorization, or start Milestone 2B.
 - Require verified provider MFA for every staff request; record MFA assurance
   in server-owned session state. The freshness window and step-up policy remain
   to be approved.
-- Provision the first Global Admin through an audited, one-time operator
-  procedure, never public registration or a permanent bootstrap endpoint.
+- Provision the first Global Admin through an audited operator procedure that
+  consumes one uniquely keyed bootstrap record exactly once. Permit later
+  Global Admin appointments through a separate authorized, MFA-protected,
+  audited procedure; prevent removal/demotion of the last active Global Admin
+  without a separately approved recovery procedure.
 - Use immutable question revisions and answer-option rows with a separate
   current-publication pointer and append-only workflow/publication/audit
   history.
 - Do not move stable question identities across certifications. Cross-scope
-  reuse creates a new question identity with provenance; published revisions
-  retain fixed domain/topic identities and meanings.
+  reuse creates a new question identity with provenance and checks both
+  source/destination authorization; published revisions retain fixed
+  domain/topic identities and meanings.
 - Have Managers create/publish content only within assigned certifications;
-  both sides of a content move must be assigned. Keep the existing proposal
-  that one Manager may publish their own reviewed revision unless a separate
-  second-person policy is approved.
+  a Manager must be assigned to both scopes for a cross-certification copy.
+  Keep the existing proposal that one Manager may publish their own reviewed
+  revision unless a separate second-person policy is approved.
 - Route session, role, assignment and ownership reads to D1 primary using
   `withSession("first-primary")`; use conditional writes and D1 `batch()` for
   atomic database operations, not assumed interactive transactions.
-- Treat provider lifecycle event coverage and the 60-second revocation target
-  as provider-selection gates. If events are stale, unverifiable or D1 is
-  unavailable, protected requests fail closed until event history is replayed
-  and reconciled.
+- Revoke D1 sessions immediately for application-controlled revocations and
+  check current session, role and assignment state from D1 primary on every
+  protected request. Compare authenticated/replayable lifecycle events with
+  bounded provider-status revalidation. External-provider latency is a
+  pending measurable policy, not a universal 60-second requirement. Invalid
+  events are rejected and investigated without automatically denying
+  unrelated users. Approve separate finite staff/learner stale-assurance
+  windows and outage behavior before implementation; D1 outages fail closed.
 - Create identity/session schema before the routes/code that consume it. Keep
   provider compatibility proof, local schema/permissions work, and production
   first-admin execution separate.
@@ -100,7 +110,9 @@ database migration or production data was changed.
 | `git fetch origin`; compare `git rev-parse main` and `git rev-parse origin/main` | Passed before branch creation; both were `3d2b12a61b9228f7cd2e07b6297e243fb1b75dea`. |
 | Official provider/platform and Cloudflare D1 documentation review | Completed on 10 November 2026. Direct links and capability caveats are in the proposal. Prices are a point-in-time comparison, not a quote. D1 `first-primary`, `batch()` transaction/rollback behavior, and replica-consistency limits were checked against Cloudflare documentation. |
 | `npm run verify` | Passed on Windows: workspace type checks, 1 API test, 13 web tests, and client/Cloudflare Worker SSR production builds. No dependencies were installed or changed. |
-| `git diff --check` | Passed after staging the two documentation files; no whitespace errors. |
+| `git diff --check` | Passed for the current documentation changes before commit; no whitespace errors. |
+| Earlier GitHub Actions run [42857695850](https://github.com/Pdey2022/certpath/actions/runs/42857695850) | Passed on commit `7110b33549c3af786a5817d74f99ca5836bdb21`; it did **not** verify the later `3ef0f017492fd855889859cbbab52fe1b553d7be` commit or the corrections in this handoff. |
+| Earlier GitHub Actions run [42858109307](https://github.com/Pdey2022/certpath/actions/runs/42858109307) | Passed on commit `3ef0f017492fd855889859cbbab52fe1b553d7be`; it does **not** verify the corrections in this handoff. CI for the corrected head must be reported only with the exact tested commit SHA and run URL. |
 | Browser, provider, MFA, session and D1 behavior tests | Not applicable to this planning-only branch; no implementation or provider configuration was performed. |
 
 ## Pending owner/architect input
@@ -113,10 +125,10 @@ database migration or production data was changed.
 3. Confirm expected MAUs and approve a production-capable MFA plan and total
     cost envelope; Firebase Spark without Identity Platform TOTP is not
     sufficient for staff. Decide whether learners also require MFA.
-4. Verify provider lifecycle event types, signature validation, delivery
-    retry/replay, ordering/cursor support and outage behavior for password
-    resets, suspensions and compromise. Approve or revise the proposed
-    60-second application target.
+4. Compare verified lifecycle-event delivery/replay with bounded provider-
+    status revalidation for password resets, suspensions and compromise.
+    Approve measurable latency and outage policies, including separate finite
+    maximum stale-assurance windows for staff and learners.
 5. Approve the staff authentication/MFA experience, accepted factors/recovery,
     reauthentication freshness window, and which actions require step-up.
 6. Approve session lifetime, remote sign-out behavior, support recovery, and
@@ -145,10 +157,11 @@ database migration or production data was changed.
   trial credits are excluded. Email/SMS, support, region, tax and ancillary
   service charges may be additional.
 - Provider documentation reviewed here does not establish complete lifecycle
-  event delivery/replay or a 60-second invalidation guarantee for every
-  candidate. This is a hard selection/proof gate. The design specifies
-  idempotent event processing and global fail-closed behavior while the feed
-  is stale or D1 is unavailable; no provider event SLA is claimed.
+  event delivery/replay or bounded provider-status availability for every
+  candidate. Coverage, measured latency, and separate staff/learner maximum
+  stale-assurance windows remain approval and proof gates. Invalid events are
+  rejected and investigated without automatically denying unrelated users;
+  D1 outages still fail closed immediately.
 - The proposed schema has not been validated against D1/SQLite migration
   constraints or performance. Cloudflare documents `withSession("first-primary")`
   and atomic sequential `batch()` rollback behavior; exact conditional-write,
