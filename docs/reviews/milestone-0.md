@@ -88,19 +88,22 @@ Environment: Node.js 24.18.0, npm 11.16.0, Windows.
 
 ### Cross-platform optional dependency correction
 
-The original lockfile recorded Rolldown's Windows x64 native binding but not
-its Linux x64 glibc binding. On Ubuntu, `npm ci` therefore completed without
-the binding, and `react-router typegen` failed with “Cannot find native
-binding.” The lockfile now records the matching Linux package version,
-registry URL, integrity, and platform constraints while retaining the Windows
-entry. CI continues to use `npm ci` and now explicitly passes
-`--include=optional`; it does not skip checks or alter the runner OS. A
-`workflow_dispatch` trigger is also available to repeat the same Ubuntu
-verification directly against a branch head.
+The original lockfile recorded Windows x64 native bindings but not their
+Linux x64 glibc counterparts for either Rolldown or Lightning CSS. On Ubuntu,
+`npm ci` completed without them: React Router type generation first failed
+with “Cannot find native binding”; after adding that binding, the production
+build exposed the missing Lightning CSS native module. The lockfile now
+records both Linux package versions, registry URLs, integrity values, and
+platform constraints while retaining the Windows entries. CI continues to
+use `npm ci` and now explicitly passes `--include=optional`; it does not skip
+checks or alter the runner OS. A `workflow_dispatch` trigger is also
+available to repeat the same Ubuntu verification directly against a branch
+head.
 
-The corrected clean install and full verification passed on Windows. The
-Ubuntu Actions result for this correction is pending and will be recorded
-after the run completes.
+The corrected clean install and full verification passed on Windows. Ubuntu
+Actions exposed the second missing binding during the build; the final Linux
+run after adding both bindings is pending and will be recorded after it
+completes.
 
 No deploy command was run, no Cloudflare account was contacted, and no payment
 or production integration was configured.
