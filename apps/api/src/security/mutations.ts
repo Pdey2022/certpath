@@ -220,7 +220,21 @@ async function appointStaffRole(
          operation_id = excluded.operation_id,
          reason = excluded.reason,
          changed_at = excluded.changed_at
-       WHERE staff_roles.active = 0 OR staff_roles.role <> excluded.role
+       WHERE (staff_roles.active = 0 OR staff_roles.role <> excluded.role)
+         AND (
+           excluded.role <> 'manager'
+           OR staff_roles.role <> 'global_admin'
+           OR staff_roles.active <> 1
+           OR EXISTS (
+             SELECT 1
+             FROM staff_roles AS other_role
+             JOIN users AS other_user ON other_user.id = other_role.user_id
+             WHERE other_role.role = 'global_admin'
+               AND other_role.active = 1
+               AND other_role.user_id <> staff_roles.user_id
+               AND other_user.status = 'active'
+           )
+         )
        RETURNING user_id`,
     )
     .bind(

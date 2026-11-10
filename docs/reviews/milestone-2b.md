@@ -11,6 +11,7 @@ This slice adds provider-independent local identity/session database foundations
 - `staff_roles` permits only `global_admin` and `manager`; Manager certification assignments reference immutable certification roots. No unique index limits the number of Global Admins.
 - `initial_admin_provisioning` has one fixed bootstrap key and a one-way consumed state. A trigger consumes it atomically with the initial Global Admin role insert. Later Global Admin appointments use the separately authorized, MFA-checked mutation path.
 - Conditional role, assignment, certification-root, and session writes use D1 `RETURNING` rows to identify whether the target row changed. Audit triggers write append-only audit events in the same SQLite write operation. The final-active-Global-Admin guard remains a conditional write.
+- Global Admin-to-Manager upserts enforce the same last-active-admin invariant inside the D1 write: demotion is allowed only if another active Global Admin belongs to an active user. The conditional upsert serializes safely against concurrent demotions and removals; denied writes emit no audit event and cannot alter the bootstrap record.
 - Security reads use D1's `first-primary` consistency option. Provider lifecycle-event infrastructure, content revisions/imports, and learner persistence are deferred until their respective designs are approved.
 
 ### Runtime and permission boundaries
@@ -26,10 +27,10 @@ Environment: Windows, Node `v24.18.0`, npm `11.16.0`.
 | Command | Result |
 |---|---|
 | `npm ci --include=optional` | Passed on Windows from the committed lockfile; installed 174 packages, reported 0 vulnerabilities. npm printed install-script approval warnings for workerd/esbuild packages; the Worker tests subsequently ran successfully. |
-| `npm run verify` | Passed after clean install. Typechecks passed for API/runtime tests, web, and contracts; API Node health test passed; all 12 local Worker/D1 tests passed; all 13 web tests passed; client and SSR production builds passed. |
+| `npm run verify` | Passed on the correction. Typechecks passed for API/runtime tests, web, and contracts; API Node health test passed; all 18 local Worker/D1 tests passed; all 13 web tests passed; client and SSR production builds passed. |
 | `git diff --check` | Passed. |
 
-Worker/D1 integration tests use `@cloudflare/vitest-plugin` and Vitest with the repository's Wrangler configuration and an isolated Miniflare D1 database. Test setup applies the versioned migrations twice. Coverage includes repeated migration application, constraints/foreign keys, audit immutability, valid/expired/revoked/disabled-account sessions, role and Manager assignment isolation, current assignment revocation, fail-closed MFA, conditional audit behavior, concurrent one-time bootstrap, separately authorized later Global Admin appointment, and last-admin removal races.
+Worker/D1 integration tests use `@cloudflare/vitest-plugin` and Vitest with the repository's Wrangler configuration and an isolated Miniflare D1 database. Test setup applies the versioned migrations twice. Coverage includes repeated migration application, constraints/foreign keys, audit immutability, valid/expired/revoked/disabled-account sessions, role and Manager assignment isolation, current assignment revocation, fail-closed MFA, conditional audit behavior, concurrent one-time bootstrap, separately authorized later Global Admin appointment, and last-admin removal races. Six added D1 regression cases cover sole-admin self-demotion denial, successful demotion with another active admin, ignoring disabled users in the guard, concurrent demotions, concurrent demotion/removal, and no audit record on rejected demotion.
 
 The CI workflow continues to run `npm ci --include=optional` and `npm run verify` on `ubuntu-latest`; the final pull-request check result is reported with the exact commit and Actions run after push.
 
