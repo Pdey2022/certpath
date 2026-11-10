@@ -105,7 +105,7 @@ Environment: Windows, Node.js 24.18.0, npm 11.16.0.
 | Learner/admin practice and role previews | Previously checked in-browser: practice selection, submission, explanations, bookmarks, save status, refresh restoration; Manager navigation scope and presentation-only denial; editor validation and import preview. |
 | SSR and private-route checks | Previously checked against the local Worker: public `/` and `/exams` return rendered page content; `/app/*` and `/admin/*` return HTTP 200 with `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`. |
 | Screenshot files | Four checked-in screenshots; learner/admin desktop are 1440×1000 and learner/admin mobile are 390×844. |
-| Ubuntu GitHub Actions | Pending for the architect-correction commit; the prior prototype revision passed [PR CI run 42848425162](https://github.com/Pdey2022/certpath/actions/runs/42848425162). |
+| Ubuntu GitHub Actions | Passed on correction commit `a4f73911e51c6e7b9a504a740e50d2a3f62ae022` with clean `npm ci --include=optional` and `npm run verify` in [workflow run 42854019552](https://github.com/Pdey2022/certpath/actions/runs/42854019552). The push did not produce a pull-request check context, so the existing CI workflow was manually dispatched against the feature branch; no workflow checks were skipped or changed. |
 
 The behavior checks above are prototype-level browser checks, not production
 security or persistence tests. Browser persistence is isolated to
