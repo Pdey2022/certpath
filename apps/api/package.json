@@ -7,11 +7,15 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/index.test.ts"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "test": "tsx --test src/index.test.ts && vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@certpath/contracts": "0.0.0",
     "hono": "4.13.17"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.7.0",
+    "vitest": "^4.1.12"
   }
 }

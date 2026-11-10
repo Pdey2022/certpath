@@ -28,6 +28,22 @@ Provider selection, market, residency obligations, staff MFA freshness, and
 first-admin operations remain pending. The recommendation below is not an
 accepted provider decision.
 
+## Milestone 2B local implementation status
+
+The local-foundations slice implements provider-independent identity mappings,
+opaque session digests, the two staff roles, certification roots and Manager
+assignments, a consumed initial-admin bootstrap record, and append-only audit
+records. Internal authorization reads are primary-consistent. Server-only
+conditional writes use D1 `RETURNING` rows to distinguish an applied write
+from a zero-row conflict; audit triggers remain in the same SQLite write
+operation. The local Worker/D1 tests exercise the migrations and services.
+
+This does not change this ADR's proposed status. No provider, production MFA
+freshness or stale-assurance policy, identity route, provider event
+infrastructure, or production provisioning operation is approved or
+implemented. Test MFA policies and identities are synthetic and test-only.
+Content revisions/imports and learner attempts/bookmarks remain later slices.
+
 ## Managed provider comparison
 
 Three candidates were reviewed against current official documentation:
@@ -488,10 +504,9 @@ of historical content.
 
 ## Remaining Milestone 2 work: reviewable sequence
 
-These are proposed implementation slices after design review. Keep the
-provider compatibility proof, local schema/permissions work and any real
-production bootstrap as separate, reviewable tasks. No item starts in Milestone
-2A.
+The local identity/session and permission foundations are implemented in the
+Milestone 2B branch. Keep remaining provider compatibility, protected content,
+and any real production bootstrap as separate, reviewable tasks.
 
 1. **Approve a provider candidate and operating constraints.** Confirm market,
    region/residency, MAU forecast, full email/SMS/MFA costs, allowed factors,
@@ -502,41 +517,32 @@ production bootstrap as separate, reviewable tasks. No item starts in Milestone
    test OAuth callback/state/nonce/PKCE, Worker token/JWKS validation, Google,
    email verification/recovery, production staff MFA assurance, lifecycle
    event delivery/replay and account linking in a non-production harness. Keep
-   this separate from production accounts, D1 schema, business records and
-   deployment. Demonstrate the selected lifecycle-event and/or status-
+   this separate from production accounts, business records and deployment.
+   Do not add provider event infrastructure until a mechanism is selected and
+   approved. Demonstrate the selected lifecycle-event and/or status-
    revalidation mechanism, then obtain approval for separate finite staff and
    learner stale-assurance limits and outage behavior. Do not treat a latency
    target as approved until the owner/architect sets one.
-3. **Local identity/session schema first.** Add reviewed D1 migrations for
-   internal users, auth identity keys, account security state, opaque app
-   sessions, provider event ledger/feed watermark, and audit records. Add
-   constraints and primary-read repositories. No route or permission code may
-   depend on a schema that has not been migrated and tested locally.
-4. **Local roles, assignments and permission service.** Add exactly the two
-   staff roles and certification assignments; implement default-deny guards
-   and assignment-scoped reads/writes against local test identities. Test
-   primary consistency and D1 conditional batches before wiring a provider.
-   Never treat demo fixtures/query parameters as identities.
-5. **Local content/revision schema.** Add certification/version/domain/topic,
+3. **Local content/revision schema.** Add certification/version/domain/topic,
    stable questions, immutable revisions/options, review/publication history,
    imports and audit constraints. Test version/certification integrity,
    cross-scope copy provenance, atomic publication and concurrent edits.
-6. **Provider-backed identity/session routes.** After the isolated proof and
-   schema are approved, implement registration, verification, Google, recovery,
+4. **Provider-backed identity/session routes.** After the isolated proof and
+   provider/schema/policy approvals, implement registration, verification, Google, recovery,
    explicit identity linking, opaque D1 session creation/logout, CSRF/rate
    limiting, and authenticated lifecycle-event intake/reconciliation. Add no
    public staff-role assignment.
-7. **Admin content workflow and imports.** Replace only content-management
+5. **Admin content workflow and imports.** Replace only content-management
    preview paths with guarded server-backed CRUD, review, publish, correction,
    retirement, import preview, draft-only confirmation and scoped exports.
    Keep unrelated synthetic practice/question fixtures isolated.
-8. **Production bootstrap as a separate gated operation.** Implement and test
+6. **Production bootstrap as a separate gated operation.** Implement and test
    a one-shot provisioning tool in a non-production environment first. Do not
    execute it in production from this milestone/PR. Production execution needs
    a separate explicit approval, identified operator, verified MFA identity,
    narrowly scoped credential, change record, runbook, dry-run evidence and
    post-run audit verification.
-9. **Security acceptance and handoff.** Run the applicable tests below, direct
+7. **Security acceptance and handoff.** Run the applicable tests below, direct
    ID probes, data-leak checks and migration/index review. Keep ADR 0002
    proposed until the architect/owner accepts provider and design decisions.
 

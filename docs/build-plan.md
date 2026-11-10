@@ -24,7 +24,15 @@ Acceptance: a complete mobile practice journey and admin editing preview; no hor
 
 ## Milestone 2 — content and identity
 
-Select auth provider; configure email/Google flows, secure sessions and staff MFA. Add user and certification/content schema, Global Admin/Manager roles, certification assignments, ownership/permission checks, question revision workflow, bulk-import preview, and audit records. Use development identities, never fake production roles.
+Keep identity/provider compatibility, local security foundations, production identity routes, and content management as separate reviewable slices. No provider, production authentication, or production bootstrap operation is implied by local foundations.
+
+### Milestone 2B — provider-independent local security foundations
+
+Create D1 identity/session and audit migrations first, followed by server-only default-deny session, role, assignment, and mutation services. Use isolated synthetic identities and explicit test MFA policies in the actual local Worker/D1 runtime. Test primary-consistent reads, conditional writes, audit atomicity, one-time initial provisioning, later Global Admin appointments, and last-active-admin protection. Keep test factories out of runtime imports. Do not expose login, bootstrap, role-changing, or test-session HTTP endpoints. Do not add provider-specific event infrastructure, content revision/import tables, or production provisioning operations.
+
+### Deferred Milestone 2 work
+
+Provider selection and its compatibility proof remain pending approval; do not weaken either staff role's MFA requirement to meet a cost target. Provider-backed registration, Google sign-in/account linking, recovery, session issuance/revocation, and lifecycle-event handling require a separately approved provider and assurance/outage policies. Content versioning, immutable question revisions, review/publication, imports/exports, and authenticated admin workflows remain separate implementation work. Carry attempt, bookmark, notes, learner-record ownership, and attempt-to-revision snapshot tests into the milestone that implements learner persistence. Preserve the existing same-exam Pro prerequisite, public SEO, and prototype isolation.
 
 Acceptance: cross-user and unauthorised admin requests fail; unsafe account linking fails; published revisions remain immutable; import validation prevents accidental publication. Manager cannot access unassigned certifications through direct IDs, list queries, reassignment, imports or exports; cannot change finance/access/security/staff settings. Assignment revocation is effective on subsequent requests. Both staff roles require MFA. Content and role changes are audited.
 
