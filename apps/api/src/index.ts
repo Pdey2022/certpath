@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { healthResponseSchema } from "@certpath/contracts";
 import { protectedContentApi } from "./protected-content.ts";
+import { learnerPracticeApi } from "./learner-practice.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 
 type ApiBindings = {
@@ -20,3 +21,4 @@ api.get("/health", (context) => {
 });
 
 api.route("/admin/content", protectedContentApi);
+api.route("/practice", learnerPracticeApi);

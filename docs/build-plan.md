@@ -62,9 +62,23 @@ Acceptance for the remaining identity and admin workflows: cross-user and unauth
 
 ## Milestone 3 — Standard learning engine
 
-Persist practice, attempts, answers, notes, bookmarks and reports. Add autosave and explicit Save & exit with server acknowledgements, revision conflicts, deduplicated retries, saved question position/order/filter state, and interrupted-session recovery. Implement versioned fixed mock profiles, authoritative timers, safe answer retries, refresh recovery, results and honest progress metrics. Add manual development-only grants behind an explicit environment guard, then remove their necessity for production.
+Deliver learner persistence in separately reviewed slices. Milestone 3A implements only untimed single-choice practice; notes, bookmarks, reports, timed mocks, adaptive exams, grant-management workflows and production provisioning remain later work.
 
-Acceptance: acknowledged answers survive interruption; duplicate answer requests have one effect; server timing applies; content updates preserve attempt snapshots; correct keys are not disclosed prematurely. Save & exit cannot report success on failed persistence; stale writes cannot overwrite later progress; final attempts stay locked. Leaving non-pausable exams does not stop their timer. Reauthentication recovery and access expiry follow explicit policies.
+### Milestone 3A — untimed learner practice
+
+Use the opaque application-session cookie and active, time-bounded Standard access grant for every practice read and write. Learners may select an authorized certification/version, domain, difficulty and 1–20 published questions. Persist the exact sealed revision, ordered question/option snapshots, filters, position, accepted answers and expected version. The Worker withholds correct-answer keys and explanations until that question is submitted, scores server-side, and locks completed attempts. Use a request ID for start/answer retries and a compare-and-set version for answers. Keep current progress server-side; never write protected questions, answers or credentials to browser storage. Save & exit is available only when there is no unsubmitted local selection; all submitted progress is already acknowledged by the server.
+
+The access-grant table is read-only to runtime APIs in this slice. Isolated test factories seed synthetic learners, sessions and grants; provider-backed sign-in, grant issuance/management and payments are not implemented. Require active access to start, resume, read and answer an attempt. If access expires mid-attempt, deny further reads and writes while retaining the immutable snapshot. This is a conservative temporary gate, not an approved release policy: the owner must decide whether an active attempt may continue, receives a grace interval, or stops at expiry, and how completed explanations remain available.
+
+Implementation status: the protected Worker/D1 API, immutable attempt snapshots,
+answer submission and resume UI are implemented and covered by isolated
+synthetic-session integration tests. The standalone `/app/practice/live` route
+is separate from the browser-storage prototype. Responsive browser inspection
+used synthetic protected-API responses; it did not imply provider-backed or
+live session issuance. See the [Milestone 3A handoff](reviews/milestone-3a.md)
+for actual verification and limitations.
+
+Acceptance for the remaining learning-engine slices: acknowledged answers survive interruption; duplicate answer requests have one effect; server timing applies; content updates preserve attempt snapshots; correct keys are not disclosed prematurely. Save & exit cannot report success on failed persistence; stale writes cannot overwrite later progress; final attempts stay locked. Leaving non-pausable exams does not stop their timer. Reauthentication recovery and access expiry follow explicit policies.
 
 ## Milestone 4 — commerce and entitlement rules
 
