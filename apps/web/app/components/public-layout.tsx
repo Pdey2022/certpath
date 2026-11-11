@@ -17,7 +17,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function checkLearnerSignInAvailability(): Promise<LearnerSignInAvailability> {
   let response: Response;
   try {
-    response = await fetch("/api/auth/cognito/preflight", {
+    response = await fetch("/api/auth/local/preflight", {
       credentials: "same-origin",
       cache: "no-store",
       headers: { Accept: "application/json" },
@@ -33,7 +33,11 @@ async function checkLearnerSignInAvailability(): Promise<LearnerSignInAvailabili
   } catch {
     return "unavailable";
   }
-  if (!isRecord(body) || typeof body.signInEnabled !== "boolean") {
+  if (
+    !isRecord(body) ||
+    typeof body.signInEnabled !== "boolean" ||
+    typeof body.localMailboxEnabled !== "boolean"
+  ) {
     return "unavailable";
   }
   return body.signInEnabled ? "enabled" : "disabled";

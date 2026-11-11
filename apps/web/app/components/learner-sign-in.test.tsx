@@ -54,7 +54,10 @@ test("shows disabled sign-in state without offering the sign-in link or action",
   const paths: string[] = [];
   globalThis.fetch = async (input) => {
     paths.push(new URL(String(input), browser.location.href).pathname);
-    return preflightResponse({ signInEnabled: false });
+    return preflightResponse({
+      signInEnabled: false,
+      localMailboxEnabled: false,
+    });
   };
 
   renderSignIn();
@@ -64,22 +67,31 @@ test("shows disabled sign-in state without offering the sign-in link or action",
     screen.queryByRole("link", { name: "Learner sign in" }),
     null,
   );
-  assert.equal(screen.queryByRole("link", { name: "Continue with email" }), null);
-  assert.deepEqual(paths, ["/api/auth/cognito/preflight"]);
+  assert.equal(screen.queryByRole("button", { name: "Sign in" }), null);
+  assert.deepEqual(paths, ["/api/auth/local/preflight"]);
 });
 
-test("offers the sign-in link and hosted entry action when enabled", async () => {
-  globalThis.fetch = async () =>
-    preflightResponse({ signInEnabled: true });
+test("offers the learner email and password entry when enabled", async () => {
+  const paths: string[] = [];
+  globalThis.fetch = async (input) => {
+    paths.push(new URL(String(input), browser.location.href).pathname);
+    return preflightResponse({
+      signInEnabled: true,
+      localMailboxEnabled: true,
+    });
+  };
 
   renderSignIn();
 
   const navigationLink = await screen.findByRole("link", {
     name: "Learner sign in",
   });
-  const continueLink = screen.getByRole("link", { name: "Continue with email" });
+  await screen.findByRole("button", { name: "Create account" });
   assert.equal(navigationLink.getAttribute("href"), "/sign-in");
-  assert.equal(continueLink.getAttribute("href"), "/api/auth/cognito/start");
+  assert.ok(screen.getByLabelText("Email address"));
+  assert.ok(screen.getByLabelText("Password"));
+  assert.ok(screen.getByRole("link", { name: "Open the synthetic local test inbox" }));
+  assert.deepEqual(paths, ["/api/auth/local/preflight"]);
 });
 
 test("fails closed when sign-in availability cannot be checked", async () => {
@@ -94,5 +106,5 @@ test("fails closed when sign-in availability cannot be checked", async () => {
     screen.queryByRole("link", { name: "Learner sign in" }),
     null,
   );
-  assert.equal(screen.queryByRole("link", { name: "Continue with email" }), null);
+  assert.equal(screen.queryByRole("button", { name: "Sign in" }), null);
 });

@@ -1,8 +1,9 @@
 # Identity and content architecture proposal
 
 - Status: **Proposed; pending architect and owner approval**
-- Scope: Milestone 2A planning only. No provider, account, paid service,
-  authentication flow, schema, or production permission has been configured.
+- Scope: Milestone 2A planning plus a local-only learner authentication proof.
+  No external provider, live account, paid service, or production permission
+  has been configured.
 - Research checked: 10 November 2026. Provider prices and plan features must be
   reconfirmed before selection.
 
@@ -25,8 +26,9 @@ new decisions:
   versioning, and attempt history; this proposal does not change those rules.
 
 Provider selection, market, residency obligations, staff MFA freshness, and
-first-admin operations remain pending. The recommendation below is not an
-accepted provider decision.
+first-admin operations remain pending. CertPath-owned learner authentication
+is the direction under local test only; the recommendation below is not an
+accepted production provider decision.
 
 ## Milestone 2B local implementation status
 
@@ -39,10 +41,48 @@ from a zero-row conflict; audit triggers remain in the same SQLite write
 operation. The local Worker/D1 tests exercise the migrations and services.
 
 This does not change this ADR's proposed status. No provider, production MFA
-freshness or stale-assurance policy, identity route, provider event
-infrastructure, or production provisioning operation is approved or
-implemented. Test MFA policies and identities are synthetic and test-only.
-Content revisions/imports and learner attempts/bookmarks remain later slices.
+freshness or stale-assurance policy, provider event infrastructure, or
+production provisioning operation is approved. Test MFA policies and
+identities are synthetic and test-only. Content revisions/imports and learner
+attempts/bookmarks remain later slices.
+
+## CertPath-owned learner authentication direction under local test
+
+The current proof tests CertPath-owned email/password authentication for
+learners rather than adopting a production identity provider. The local Worker
+supports synthetic `@example.test` registration, email verification, password
+sign-in, password recovery, opaque D1 sessions, and session revocation after a
+password reset. Verification and reset messages are held by an in-memory local
+test inbox; no live email, external identity provider, cloud resource, or
+deployment was used. The feature remains disabled unless explicit local-only
+Worker bindings are set.
+
+The proof uses the maintained, dependency-free JavaScript implementation in
+`@noble/hashes` 2.0.1 with scrypt (`N=32768`, `r=8`, `p=1`, 16-byte random
+salt, 32-byte output, 64 MiB configured maximum memory). The PHC-style value
+stores the algorithm parameters and salt with the derived key. The local
+Cloudflare Worker/D1 test runtime successfully created and verified these
+hashes. This is runtime compatibility evidence, not a production performance
+benchmark, security certification, or approval of the parameter policy.
+
+Before any launch, the owner and architect must review or approve:
+
+- Production password policy, scrypt cost/memory tuning, concurrent login
+  behavior, abuse limits, monitoring, recovery support, and incident handling.
+- Live email delivery, domain reputation, verification/reset deliverability,
+  bounce handling, abuse prevention, and the associated service costs.
+- Identity migration and recovery, account linking only after explicit proof
+  of control (never by matching email alone), data retention, and deletion.
+- Session lifetime, CSRF, revocation, and operational response for account
+  compromise.
+- Separate Global Admin and Manager sign-in. Password-only learner sessions
+  must not receive staff roles or access staff routes; staff MFA still needs
+  Worker-verifiable evidence of a recent completed authenticator-app
+  challenge, plus owner-approved freshness and failure policies.
+
+The Cognito foundation remains disabled and is not modified by this proof.
+Google sign-in, a production provider choice, production email, cloud
+provisioning, deployment, and production rollout remain outside this test.
 
 ## Managed provider comparison
 

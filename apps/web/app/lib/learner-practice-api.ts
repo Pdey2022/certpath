@@ -16,7 +16,7 @@ import {
 import type { z } from "zod";
 
 const apiRoot = "/api/practice";
-const learnerAuthApiRoot = "/api/auth/cognito";
+const learnerAuthApiRoot = "/api/auth/session";
 
 export type PracticeScope = z.infer<
   typeof practiceScopeResponseSchema

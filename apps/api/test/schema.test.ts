@@ -19,6 +19,9 @@ describe("local security D1 schema", () => {
     expect(names).toContain("users");
     expect(names).toContain("auth_identities");
     expect(names).toContain("app_sessions");
+    expect(names).toContain("learner_password_credentials");
+    expect(names).toContain("learner_auth_tokens");
+    expect(names).toContain("local_auth_rate_limit_windows");
     expect(names).toContain("staff_roles");
     expect(names).toContain("certifications");
     expect(names).toContain("manager_certification_assignments");
@@ -125,5 +128,33 @@ describe("local security D1 schema", () => {
         .bind("plain-token", identity.userId, testNow, testNow + 1000)
         .run(),
     ).rejects.toThrow();
+  });
+
+  it("keeps local credentials and action tokens in hash-only tables", async () => {
+    const credentialColumns = await database
+      .prepare("PRAGMA table_info(learner_password_credentials)")
+      .all<{ name: string }>();
+    expect(credentialColumns.results.map((column) => column.name)).toContain(
+      "password_hash",
+    );
+    expect(credentialColumns.results.map((column) => column.name)).not.toContain(
+      "password",
+    );
+    expect(credentialColumns.results.map((column) => column.name)).not.toContain(
+      "raw_password",
+    );
+
+    const tokenColumns = await database
+      .prepare("PRAGMA table_info(learner_auth_tokens)")
+      .all<{ name: string }>();
+    expect(tokenColumns.results.map((column) => column.name)).toContain(
+      "token_digest",
+    );
+    expect(tokenColumns.results.map((column) => column.name)).not.toContain(
+      "raw_token",
+    );
+    expect(tokenColumns.results.map((column) => column.name)).not.toContain(
+      "token",
+    );
   });
 });
