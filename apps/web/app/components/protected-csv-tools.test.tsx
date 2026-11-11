@@ -156,8 +156,10 @@ test("retries a lost confirmation response using the same preview ID", async () 
   await screen.findByRole("button", { name: "Confirm draft-only import" });
   fireEvent.click(screen.getByRole("button", { name: "Confirm draft-only import" }));
 
-  const retry = await screen.findByRole("button", { name: "Retry same preview" });
-  assert.match(screen.getByRole("alert").textContent ?? "", /same preview ID/);
+  const retry = await screen.findByRole("button", {
+    name: "Retry confirmation for Synthetic version",
+  });
+  assert.match(screen.getByText(/Preview import-1 is retained/).textContent ?? "", /Preview import-1 is retained/);
   fireEvent.click(retry);
   await screen.findByText(/Created 1 sealed draft/);
   assert.equal(confirmCalls, 2);
@@ -166,6 +168,116 @@ test("retries a lost confirmation response using the same preview ID", async () 
     "/api/admin/content/certifications/cert-1/import-previews/import-1/confirm",
   ]);
   assert.match(screen.getByText(/They are not published/).textContent ?? "", /not published/);
+});
+
+test("keeps the original confirmation across file and scope changes while its outcome is unknown", async () => {
+  let previewCalls = 0;
+  let confirmationCalls = 0;
+  let rejectFirstConfirmation!: (cause: Error) => void;
+  let firstConfirmationStarted!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    firstConfirmationStarted = resolve;
+  });
+  const firstConfirmation = new Promise<Response>((_, reject) => {
+    rejectFirstConfirmation = reject;
+  });
+  const createdBatches = new Map<string, {
+    importId: string;
+    questionIds: string[];
+    revisionIds: string[];
+    questionKeys: string[];
+  }>();
+  let batchCreates = 0;
+  const confirmationPaths: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname.endsWith("/csrf")) {
+      return jsonResponse({ csrfToken: `v1.${"A".repeat(43)}` });
+    }
+    if (url.pathname.endsWith("/import-previews")) {
+      previewCalls += 1;
+      assert.equal(init?.method, "POST");
+      return previewResponse(`import-${previewCalls}`);
+    }
+    if (url.pathname.endsWith("/confirm")) {
+      confirmationCalls += 1;
+      confirmationPaths.push(url.pathname);
+      const importId = url.pathname.split("/").at(-2)!;
+      if (importId === "import-1") {
+        if (!createdBatches.has(importId)) {
+          batchCreates += 1;
+          createdBatches.set(importId, {
+            importId,
+            questionIds: ["question-1"],
+            revisionIds: ["revision-1"],
+            questionKeys: ["SYNTHETIC-ORIGINAL"],
+          });
+        }
+        if (confirmationCalls === 1) {
+          firstConfirmationStarted();
+          return firstConfirmation;
+        }
+        return jsonResponse(createdBatches.get(importId));
+      }
+      const outcome = {
+        importId,
+        questionIds: ["question-2"],
+        revisionIds: ["revision-2"],
+        questionKeys: ["SYNTHETIC-OTHER"],
+      };
+      if (!createdBatches.has(importId)) {
+        batchCreates += 1;
+        createdBatches.set(importId, outcome);
+      }
+      return jsonResponse(createdBatches.get(importId));
+    }
+    throw new Error(`Unexpected request ${url.pathname}`);
+  };
+  const view = render(createElement(ProtectedCsvTools, scope));
+  selectFile("original.csv", "original synthetic content");
+  fireEvent.click(screen.getByRole("button", { name: "Preview selected CSV" }));
+  await screen.findByRole("button", { name: "Confirm draft-only import" });
+  fireEvent.click(screen.getByRole("button", { name: "Confirm draft-only import" }));
+  await firstStarted;
+
+  const fileInput = screen.getByLabelText("CSV file") as HTMLInputElement;
+  assert.equal(fileInput.disabled, true);
+  fireEvent.change(fileInput, {
+    target: { files: [new browser.File(["replacement"], "replacement.csv")] },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Preview selected CSV" }));
+  assert.equal(previewCalls, 1);
+  assert.equal(screen.queryByText(/Selected: replacement\.csv/), null);
+
+  view.rerender(createElement(ProtectedCsvTools, {
+    ...scope,
+    examVersionId: "version-2",
+    examVersionName: "Other version",
+  }));
+  assert.ok(screen.getByText(/Synthetic certification · Synthetic version/));
+  assert.ok(screen.getByText(/Confirmation is in progress for/));
+  assert.equal((screen.getByRole("button", { name: "Preview selected CSV" }) as HTMLButtonElement).disabled, true);
+  rejectFirstConfirmation(new Error("synthetic response lost"));
+  await screen.findByRole("button", {
+    name: "Retry confirmation for Synthetic version",
+  });
+  assert.ok(screen.getByText(/import-1 is retained/));
+  assert.equal(screen.queryByText(/Selected: replacement\.csv/), null);
+  assert.equal((screen.getByLabelText("CSV file") as HTMLInputElement).disabled, true);
+
+  fireEvent.click(screen.getByRole("button", {
+    name: "Retry confirmation for Synthetic version",
+  }));
+  await screen.findByText(/Confirmed for Synthetic certification · Synthetic version/);
+  assert.equal(confirmationCalls, 2);
+  assert.equal(previewCalls, 1);
+  assert.deepEqual(confirmationPaths, [
+    "/api/admin/content/certifications/cert-1/import-previews/import-1/confirm",
+    "/api/admin/content/certifications/cert-1/import-previews/import-1/confirm",
+  ]);
+  assert.deepEqual([...createdBatches.keys()], ["import-1"]);
+  assert.equal(batchCreates, 1);
+  assert.ok(screen.getByText(/SYNTHETIC-ORIGINAL/));
 });
 
 test("expired confirmation clears the preview and requires a fresh preview", async () => {

@@ -14,8 +14,8 @@ routes, deployment, or new API endpoints were added.
   separated from the synthetic admin preview and rendered only after the
   protected workspace resolves its staff session and authorized certification
   list. Certification and exam version come from the existing authorized
-  selectors; changing either remounts the panel and discards file, preview,
-  confirmation and pagination state.
+  selectors. The panel remains mounted across scope changes so an unresolved
+  confirmation cannot be discarded by selecting another exam version.
 - Reused the existing bounded CSV preview, confirmation, export, domain/topic
   reads, same-origin API client, CSRF endpoint, session cookie, MFA policy and
   certification authorization. No new dependency was needed.
@@ -33,11 +33,16 @@ routes, deployment, or new API endpoints were added.
   so the UI can report counts for invalid files without reparsing CSV or
   duplicating the server validation rules. Error responses include only safe
   issue codes and paths, never CSV rows or question content.
-- Confirmation sends only the server-issued preview ID. A lost or unavailable
-  response offers retry with the same ID; the existing server idempotency
-  returns the established outcome. Expired/conflicting previews are cleared
-  and require a fresh preview. Confirmation results explicitly describe sealed
-  drafts and do not imply publication.
+- Confirmation sends only the server-issued preview ID. While it is in flight
+  or its outcome is unknown, the panel retains the original preview ID,
+  certification/exam IDs and labels, expiry and filename independently from
+  the current file/preview state. File replacement and new previews are
+  disabled; changing scope clears only that scope's transient file, preview
+  and export cursor. A lost or unavailable response offers retry against the
+  original certification and preview ID; server idempotency returns the
+  established outcome. Expired/conflicting previews are cleared and require a
+  fresh preview. Confirmation results explicitly describe sealed drafts and
+  do not imply publication.
 - Export requests one existing cursor page at a time (up to 100 published
   questions), downloads each page with certification, exam version and page in
   the filename, and disables further downloads when no cursor remains. CSV
@@ -69,10 +74,11 @@ routes, deployment, or new API endpoints were added.
 
 | Check | Result |
 |---|---|
-| `npm run verify` | Passed on Windows: all workspace typechecks; API health test; 56 API tests across 8 files; 35 web tests; production client and Worker/SSR builds. |
+| `npm run verify` | Passed on Windows: all workspace typechecks; API health test; 56 API tests across 8 files; 36 web tests; production client and Worker/SSR builds. |
 | Protected Worker/D1 regression | Passed within the API suite using isolated synthetic sessions and content. Covers import preview/confirmation idempotency, expiry, authorization/scope denial, export pagination, safe invalid-preview counts, and that unknown CSV header text and question bodies are not reflected. |
-| Import/export UI regressions | Passed: invalid-row counts and guidance, file-change clearing, lost-confirmation retry with the same ID, expiry recovery, permission denial messaging, stale response after exam change, two-page cursor download, exact v1 template with current taxonomy, and pre-upload oversized-file rejection. |
-| Responsive authenticated browser inspection | Not completed. The local Worker failed closed with unavailable security configuration and displayed only the neutral session shell; no valid provider-backed browser session is issued in this milestone. The CSV panel uses a single-column layout below 48rem and two columns at/above 48rem; component regressions cover the controls, but a live authenticated mobile/desktop visual check remains for architect inspection. |
+| Import/export UI regressions | Passed: invalid-row counts and guidance, file-change clearing, delayed confirmation with a committed batch and lost response, blocked file replacement/new preview, exam-scope switching, same-ID/original-scope recovery with one batch, expiry recovery, permission denial messaging, stale response after exam change, two-page cursor download, exact v1 template with current taxonomy, and pre-upload oversized-file rejection. |
+| Authenticated browser workflow | Passed in headless Chrome 156 against an isolated HTTPS local Worker and D1 fixture. A synthetic Global Admin session created the exam taxonomy and a published synthetic question through protected APIs. In the actual workspace, the v1 CSV preview validated one row, confirmation created one sealed draft, and published page 1 downloaded. No test-session endpoint or provider-backed login was added. |
+| Responsive authenticated browser inspection | Passed with the authenticated workspace at desktop 1280×900 and mobile 390×844. Desktop showed the import/export controls in a two-column grid (document width 1265 CSS px including the scrollbar, with no horizontal overflow); mobile showed a single-column grid at 390 CSS px with no horizontal overflow. Both views retained the selected scope and confirmed draft result. The isolated D1 fixture, temporary session, HTTPS certificate and browser profile were removed after inspection. |
 | `git diff --check` | Passed. |
 | Ubuntu GitHub Actions | Passed for implementation commit `2ff31f8067f94514069f0c88bd8f750e86423d90` on [PR #10](https://github.com/Pdey2022/certpath/pull/10): [workflow run](https://github.com/Pdey2022/certpath/actions/runs/43030529753). This record-only follow-up is separately checked before architect review. |
 
@@ -82,8 +88,9 @@ added.
 ## Limitations
 
 - Provider-backed sign-in and live session issuance remain unimplemented.
-  Browser-level authenticated visual inspection requires an independently
-  provisioned authorized staff session and configured local security policy.
+  The authenticated browser verification used only a temporary synthetic
+  session, explicit local MFA/CSRF configuration and isolated local D1 state;
+  it does not demonstrate provider-backed authentication or production policy.
 - The template can include a synthetic data row only when the selected version
   has an available domain and topic; otherwise it safely provides the exact
   header and explains the taxonomy prerequisite.

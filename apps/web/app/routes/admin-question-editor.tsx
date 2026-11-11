@@ -1377,18 +1377,15 @@ export default function AdminQuestionEditor() {
               )}
             </section>
 
-            {certificationId && examVersionId && (
+            {certifications.items.length > 0 && (
               <ProtectedCsvTools
-                key={`${certificationId}:${examVersionId}`}
                 certificationId={certificationId}
                 certificationName={
-                  certifications.items.find((item) => item.id === certificationId)?.displayName ??
-                  "Selected certification"
+                  certifications.items.find((item) => item.id === certificationId)?.displayName ?? ""
                 }
                 examVersionId={examVersionId}
                 examVersionName={
-                  versions.items.find((item) => item.id === examVersionId)?.title ??
-                  "Selected exam version"
+                  versions.items.find((item) => item.id === examVersionId)?.title ?? ""
                 }
               />
             )}

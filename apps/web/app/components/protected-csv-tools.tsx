@@ -40,6 +40,23 @@ type PreviewState =
   | { kind: "valid"; value: ImportPreview }
   | { kind: "invalid"; summary: ImportPreviewSummary; issues: Array<{ path: string; code: string }> };
 
+type PendingConfirmation = {
+  importId: string;
+  certificationId: string;
+  certificationName: string;
+  examVersionId: string;
+  examVersionName: string;
+  expiresAt: number;
+  fileName: string;
+  state: "in-flight" | "unknown";
+};
+
+type ConfirmedImport = {
+  certificationName: string;
+  examVersionName: string;
+  outcome: ImportConfirmation;
+};
+
 function csvCell(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
@@ -174,9 +191,8 @@ export function ProtectedCsvTools({
   const [previewIssues, setPreviewIssues] = useState<Array<{ path: string; code: string }>>([]);
   const [templateBusy, setTemplateBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [confirmBusy, setConfirmBusy] = useState(false);
-  const [confirmRetry, setConfirmRetry] = useState(false);
-  const [confirmed, setConfirmed] = useState<ImportConfirmation | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+  const [confirmed, setConfirmed] = useState<ConfirmedImport | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportPage, setExportPage] = useState(1);
   const [exportCursor, setExportCursor] = useState<string | null>(null);
@@ -185,16 +201,24 @@ export function ProtectedCsvTools({
   const [status, setStatus] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const previewRequest = useRef(0);
-  const confirmationRequest = useRef(0);
   const templateRequest = useRef(0);
   const exportRequest = useRef(0);
   const scope = `${certificationId}:${examVersionId}`;
   const activeScope = useRef(scope);
+  const pendingConfirmationRef = useRef<PendingConfirmation | null>(null);
+
+  function updatePendingConfirmation(value: PendingConfirmation | null) {
+    pendingConfirmationRef.current = value;
+    setPendingConfirmation(value);
+  }
+
+  function getPendingConfirmation(): PendingConfirmation | null {
+    return pendingConfirmationRef.current;
+  }
 
   useEffect(() => {
     activeScope.current = scope;
     previewRequest.current += 1;
-    confirmationRequest.current += 1;
     templateRequest.current += 1;
     exportRequest.current += 1;
     if (fileInput.current) fileInput.current.value = "";
@@ -204,17 +228,15 @@ export function ProtectedCsvTools({
     setPreviewIssues([]);
     setTemplateBusy(false);
     setPreviewBusy(false);
-    setConfirmBusy(false);
     setExportBusy(false);
-    setConfirmed(null);
     setExportPage(1);
     setExportCursor(null);
     setHasMoreExport(false);
+    setConfirmed(null);
     setError("");
     setStatus("");
     return () => {
       previewRequest.current += 1;
-      confirmationRequest.current += 1;
       templateRequest.current += 1;
       exportRequest.current += 1;
     };
@@ -225,16 +247,13 @@ export function ProtectedCsvTools({
   }
 
   function selectFile(event: ChangeEvent<HTMLInputElement>) {
+    if (pendingConfirmationRef.current) return;
     previewRequest.current += 1;
-    confirmationRequest.current += 1;
     setFile(event.currentTarget.files?.[0] ?? null);
     setPreview(null);
     setPreviewSummary(null);
     setPreviewIssues([]);
-    setConfirmed(null);
-    setConfirmRetry(false);
     setPreviewBusy(false);
-    setConfirmBusy(false);
     setError("");
     setStatus("");
   }
@@ -274,15 +293,12 @@ export function ProtectedCsvTools({
   }
 
   async function runPreview() {
-    if (!file) return;
+    if (!file || pendingConfirmationRef.current || !certificationId || !examVersionId) return;
     const request = ++previewRequest.current;
     const expectedScope = scope;
-    confirmationRequest.current += 1;
     setPreview(null);
     setPreviewIssues([]);
     setPreviewSummary(null);
-    setConfirmed(null);
-    setConfirmRetry(false);
     setPreviewBusy(true);
     setError("");
     setStatus("");
@@ -317,35 +333,82 @@ export function ProtectedCsvTools({
   }
 
   async function confirmPreview() {
-    if (preview?.kind !== "valid" || confirmed || confirmBusy) return;
-    const request = ++confirmationRequest.current;
-    const importId = preview.value.importId;
-    setConfirmBusy(true);
-    setConfirmRetry(false);
+    if (preview?.kind !== "valid" || pendingConfirmationRef.current || confirmed) return;
+    const pending: PendingConfirmation = {
+      importId: preview.value.importId,
+      certificationId,
+      certificationName,
+      examVersionId,
+      examVersionName,
+      expiresAt: preview.value.expiresAt,
+      fileName: file?.name ?? "selected CSV",
+      state: "in-flight",
+    };
+    updatePendingConfirmation(pending);
     setError("");
     setStatus("");
     try {
-      const outcome = await confirmQuestionImport(certificationId, importId);
-      if (!isCurrent(request, confirmationRequest.current)) return;
-      setConfirmed(outcome);
-      setStatus(`Import confirmed. ${outcome.questionIds.length} sealed draft question(s) were created for review; none were published.`);
+      const outcome = await confirmQuestionImport(pending.certificationId, pending.importId);
+      if (getPendingConfirmation()?.importId !== pending.importId) return;
+      updatePendingConfirmation(null);
+      setPreview(null);
+      setPreviewSummary(null);
+      setPreviewIssues([]);
+      setConfirmed({
+        certificationName: pending.certificationName,
+        examVersionName: pending.examVersionName,
+        outcome,
+      });
+      setStatus(`Import confirmed for ${pending.certificationName} · ${pending.examVersionName}. ${outcome.questionIds.length} sealed draft question(s) were created for review; none were published.`);
     } catch (cause) {
-      if (!isCurrent(request, confirmationRequest.current)) return;
       if (cause instanceof ProtectedApiError && cause.status === 409) {
+        if (getPendingConfirmation()?.importId === pending.importId) {
+          updatePendingConfirmation(null);
+        }
         setPreview(null);
         setPreviewSummary(null);
         setPreviewIssues([]);
         setError("This preview expired or is no longer available. Preview the selected file again.");
       } else {
-        setError(
-          cause instanceof ProtectedApiError && (cause.status === 0 || cause.status === 503)
-            ? "The confirmation response was not received. Retry the same preview ID; the server makes confirmation idempotent."
-            : apiErrorMessage(cause),
-        );
-        setConfirmRetry(cause instanceof ProtectedApiError && (cause.status === 0 || cause.status === 503));
+        if (getPendingConfirmation()?.importId === pending.importId) {
+          updatePendingConfirmation({ ...pending, state: "unknown" });
+        }
+        setError("The confirmation outcome is unknown. The original preview and exam scope are retained; retry that same preview ID. The server makes confirmation idempotent.");
       }
-    } finally {
-      if (isCurrent(request, confirmationRequest.current)) setConfirmBusy(false);
+    }
+  }
+
+  async function retryPendingConfirmation() {
+    const pending = getPendingConfirmation();
+    if (!pending || pending.state !== "unknown") return;
+    updatePendingConfirmation({ ...pending, state: "in-flight" });
+    setError("");
+    setStatus("");
+    try {
+      const outcome = await confirmQuestionImport(pending.certificationId, pending.importId);
+      if (getPendingConfirmation()?.importId !== pending.importId) return;
+      updatePendingConfirmation(null);
+      setPreview(null);
+      setPreviewSummary(null);
+      setPreviewIssues([]);
+      setConfirmed({
+        certificationName: pending.certificationName,
+        examVersionName: pending.examVersionName,
+        outcome,
+      });
+      setStatus(`Import confirmed for ${pending.certificationName} · ${pending.examVersionName}. ${outcome.questionIds.length} sealed draft question(s) were created for review; none were published.`);
+    } catch (cause) {
+      if (getPendingConfirmation()?.importId !== pending.importId) return;
+      if (cause instanceof ProtectedApiError && cause.status === 409) {
+        updatePendingConfirmation(null);
+        setPreview(null);
+        setPreviewSummary(null);
+        setPreviewIssues([]);
+        setError("This preview expired or is no longer available. Preview the file again under its authorized exam scope.");
+      } else {
+        updatePendingConfirmation({ ...pending, state: "unknown" });
+        setError("The confirmation outcome is still unknown. Retry using the retained original preview ID and exam scope.");
+      }
     }
   }
 
@@ -390,6 +453,33 @@ export function ProtectedCsvTools({
           </p>
         </div>
       </div>
+      {pendingConfirmation && (
+        <div className="protected-csv-confirmation" role="status" aria-live="polite">
+          <p>
+            {pendingConfirmation.state === "in-flight"
+              ? "Confirmation is in progress"
+              : "Confirmation outcome is unknown"}
+            {" for "}
+            <strong>{pendingConfirmation.certificationName} · {pendingConfirmation.examVersionName}</strong>
+            {" (file: "}{pendingConfirmation.fileName}{"). "}
+            {pendingConfirmation.state === "unknown"
+              ? `Preview ${pendingConfirmation.importId} is retained until ${new Date(pendingConfirmation.expiresAt).toLocaleString()}.`
+              : "Keep this confirmation; changing files or starting another preview is disabled until the result is known."}
+          </p>
+          {pendingConfirmation.state === "unknown" && (
+            <button
+              className="button-primary"
+              type="button"
+              onClick={() => void retryPendingConfirmation()}
+            >
+              Retry confirmation for {pendingConfirmation.examVersionName}
+            </button>
+          )}
+        </div>
+      )}
+      {!certificationId || !examVersionId ? (
+        <p>Select an authorized certification and exam version to preview or export CSV content.</p>
+      ) : (
       <div className="protected-csv-tools-grid">
         <section aria-labelledby="protected-csv-import-title">
           <h3 id="protected-csv-import-title">Import new drafts</h3>
@@ -400,7 +490,7 @@ export function ProtectedCsvTools({
           <button
             className="button-secondary"
             type="button"
-            disabled={templateBusy}
+            disabled={templateBusy || !examVersionId}
             onClick={() => void downloadTemplate()}
           >
             {templateBusy ? "Preparing template…" : "Download exact v1 CSV template"}
@@ -421,6 +511,7 @@ export function ProtectedCsvTools({
               ref={fileInput}
               type="file"
               accept=".csv,text/csv"
+              disabled={pendingConfirmation !== null}
               onChange={selectFile}
             />
           </label>
@@ -428,7 +519,7 @@ export function ProtectedCsvTools({
           <button
             className="button-primary"
             type="button"
-            disabled={!file || previewBusy}
+            disabled={!file || previewBusy || pendingConfirmation !== null}
             onClick={() => void runPreview()}
           >
             {previewBusy ? "Validating CSV…" : "Preview selected CSV"}
@@ -454,20 +545,17 @@ export function ProtectedCsvTools({
               <button
                 className="button-primary"
                 type="button"
-                disabled={confirmBusy || confirmed !== null}
+                disabled={pendingConfirmation !== null || confirmed !== null}
                 onClick={() => void confirmPreview()}
               >
-                {confirmBusy
-                  ? "Confirming…"
-                  : confirmRetry
-                    ? "Retry same preview"
-                    : "Confirm draft-only import"}
+                Confirm draft-only import
               </button>
             </div>
           )}
           {confirmed && (
             <p className="protected-csv-confirmation" role="status">
-              Created {confirmed.questionKeys.length} sealed draft(s): {confirmed.questionKeys.join(", ")}.
+              Confirmed for {confirmed.certificationName} · {confirmed.examVersionName}.
+              Created {confirmed.outcome.questionKeys.length} sealed draft(s): {confirmed.outcome.questionKeys.join(", ")}.
               They are not published.
             </p>
           )}
@@ -499,6 +587,7 @@ export function ProtectedCsvTools({
           </p>
         </section>
       </div>
+      )}
       {error && <p className="protected-editor-status protected-editor-status--error" role="alert">{error}</p>}
       {status && <p className="protected-editor-status" role="status" aria-live="polite">{status}</p>}
     </section>
