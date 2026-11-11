@@ -85,7 +85,7 @@ No dependency was added for this milestone.
 | Authenticated Worker/D1 browser walkthrough | Passed using two isolated synthetic active sessions for the same learner. In the first browser, started a two-question attempt, submitted option A on question 1, and used Save & exit. In a separate Edge profile, resumed the same attempt. The API summary and detail both reported the same attempt, version 2, position 1, and one saved answer (option A); the UI restored question 2 of 2. |
 | Authenticated responsive browser check | Passed on the resumed attempt at mobile 390×844 and desktop 1280×900. The question and controls were present at both sizes; measured document width did not exceed the viewport. |
 | `git diff --check` | Passed after handoff authoring; staged diff will be checked again before commit. |
-| Ubuntu GitHub Actions | The earlier pass on the original implementation does not cover this correction. The pushed correction must pass on its exact final SHA before architect review; the final SHA and run are reported with the PR. |
+| Ubuntu GitHub Actions | Passed for source correction SHA `63724f9d1343ccee74661e2087df591f48008797` in [run 43050428898](https://github.com/Pdey2022/certpath/actions/runs/43050428898). Any subsequent handoff-only commit is separately verified; its exact SHA and run are reported with the PR. |
 
 No credentials, personal data or real question banks were added.
 
