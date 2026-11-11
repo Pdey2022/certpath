@@ -29,10 +29,19 @@ provisioning. The existing browser admin remains explicitly synthetic.
   request URL origin to match it, and an HMAC-SHA-256 CSRF token bound to the
   session digest and origin. `GET /csrf` provides a same-origin-only,
   session-bound token for a future UI; no permissive CORS is enabled.
-- JSON request bodies are capped at 32 KiB and CSV at the existing 256 KiB
-  import limit. The byte cap is enforced while reading the stream; declared
-  `Content-Length` is only an early check. UTF-8 decoding is fatal. Shared
-  strict Zod request and response schemas reject unexpected fields.
+- JSON request bodies use streaming route-specific limits: 24 KiB for
+  non-question mutations and 256 KiB for question creation/correction, derived
+  from maximum schema field lengths, six-byte-per-code-unit JSON escaping,
+  UTF-8 expansion and explicit overhead. CSV retains the existing 256 KiB
+  import limit. Declared `Content-Length` is only an early check; the stream
+  byte count is authoritative. UTF-8 decoding is fatal. Shared strict Zod
+  schemas reject unexpected fields.
+- Expected duplicate version/domain/topic/question keys are handled with
+  targeted SQLite `ON CONFLICT(key-columns) DO NOTHING` clauses in the
+  guarded inserts. Zero returned rows become a sanitized 409; unrelated
+  uniqueness/check/FK failures and trigger/infrastructure errors still reach
+  the generic sanitized 503 handler. This is safe under concurrent requests
+  and does not rely on preflight reads or broad error-message matching.
 - All content responses, including CSV and errors, are private/no-store and
   noindex. Errors are mapped to stable status/code shapes. Unexpected D1 and
   runtime failures return a generic 503, and logs contain only a request ID.
@@ -63,6 +72,7 @@ session issuance, role-change, bootstrap, test-session or learner endpoints.
 
 - `apps/api/src/index.ts`
 - `apps/api/src/protected-content.ts`
+- `apps/api/src/security/content.ts`
 - `apps/api/test/factories.ts`
 - `apps/api/test/protected-content.test.ts`
 - `docs/build-plan.md`
@@ -77,15 +87,17 @@ Windows verification command and outcome:
 
 | Command | Result |
 |---|---|
-| `Set-Location apps\api; npx vitest run --config vitest.config.ts test/protected-content.test.ts` | Passed: 10 protected HTTP integration tests on isolated Worker/D1. |
-| `npm run verify` | Passed on Windows: workspace TypeScript checks; API health test; 52 API Worker/D1 tests across 8 files; 13 web tests including public SEO/prototype tests; client and Cloudflare Worker SSR production builds. |
-| Ubuntu GitHub Actions | Passed for implementation commit `5c8f3fff8d0a396e36ab401d43d58f0316973de7`: [CI run 42896823869](https://github.com/Pdey2022/certpath/actions/runs/42896823869). |
+| `Set-Location apps\api; npx vitest run --config vitest.config.ts test/protected-content.test.ts` | Passed: 12 protected HTTP integration tests on isolated Worker/D1, including duplicate-key and maximum-content regressions. |
+| `npm run verify` | Passed on Windows: workspace TypeScript checks; API health test; 54 API Worker/D1 tests across 8 files; 13 web tests including public SEO/prototype tests; client and Cloudflare Worker SSR production builds. |
+| Ubuntu GitHub Actions | Pending for the final correction commit. The earlier implementation result was [CI run 42897215572](https://github.com/Pdey2022/certpath/actions/runs/42897215572) on `556c3bb11bc4dcaaa8bf66a2569425ef84d319ce`; it does not validate this correction. |
 
 The HTTP integration tests cover missing/malformed/expired/revoked/disabled
 sessions, forged client authority, missing/invalid/stale/unsupported MFA,
 assigned/unassigned Manager access, role/session/assignment rechecks, CSRF and
 Origin failures, content types, actual chunked body limits, scoped resource
 IDs, draft/review/publish/correction/retirement and stale conflicts,
+sequential/concurrent duplicate key conflicts, maximum-length eight-option
+multibyte/escaped question bodies, route-specific chunked body limits,
 idempotent/expired imports, scoped exports, private response headers,
 sanitized D1 failures, and unchanged health behavior. Test session creation
 uses the isolated test-only factories; session revocation and assignment

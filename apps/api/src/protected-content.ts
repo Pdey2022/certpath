@@ -79,7 +79,8 @@ type ProtectedContext = Context<{
 }>;
 
 const SESSION_COOKIE = "certpath_session";
-const JSON_BODY_MAX_BYTES = 32 * 1024;
+const SMALL_JSON_BODY_MAX_BYTES = 24 * 1024;
+const QUESTION_JSON_BODY_MAX_BYTES = 256 * 1024;
 const CSV_BODY_MAX_BYTES = QUESTION_IMPORT_MAX_BYTES;
 
 function errorResponse(
@@ -304,11 +305,12 @@ function acceptsContentType(context: ProtectedContext, type: "json" | "csv"): bo
 async function readJsonBody<T>(
   context: ProtectedContext,
   schema: { safeParse: (input: unknown) => { success: true; data: T } | { success: false; error: { issues: Array<{ path: PropertyKey[]; code: string }> } } },
+  maximumBytes = SMALL_JSON_BODY_MAX_BYTES,
 ): Promise<{ value: T } | { response: Response }> {
   if (!acceptsContentType(context, "json")) {
     return { response: errorResponse(context, 400, "unsupported_media_type") };
   }
-  const body = await readBoundedBytes(context, JSON_BODY_MAX_BYTES);
+  const body = await readBoundedBytes(context, maximumBytes);
   if ("response" in body) return body;
   let value: unknown;
   try {
@@ -647,7 +649,11 @@ protectedApi.post(
     if (!(await examVersionExists(context, certificationId, examVersionId))) {
       return errorResponse(context, 404, "not_found");
     }
-    const parsed = await readJsonBody(context, createQuestionRequestSchema);
+    const parsed = await readJsonBody(
+      context,
+      createQuestionRequestSchema,
+      QUESTION_JSON_BODY_MAX_BYTES,
+    );
     if ("response" in parsed) return parsed.response;
     const result = await createDraftQuestion(
       context.env.DB,
@@ -678,7 +684,11 @@ protectedApi.post(
     if (!(await questionIdentityExists(context, certificationId, questionId))) {
       return errorResponse(context, 404, "not_found");
     }
-    const parsed = await readJsonBody(context, createQuestionRevisionRequestSchema);
+    const parsed = await readJsonBody(
+      context,
+      createQuestionRevisionRequestSchema,
+      QUESTION_JSON_BODY_MAX_BYTES,
+    );
     if ("response" in parsed) return parsed.response;
     const result = await createQuestionRevision(
       context.env.DB,

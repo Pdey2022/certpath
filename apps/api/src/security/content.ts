@@ -386,6 +386,7 @@ export async function createExamVersion(
        SELECT ?, certification.id, ?, ?, ?, ?, ?, ?, ?, ?, ?
        FROM certifications AS certification
        WHERE certification.id = ? AND ${guard.sql}
+       ON CONFLICT(certification_id, version_key) DO NOTHING
        RETURNING id`,
     )
     .bind(
@@ -461,6 +462,7 @@ export async function createDomain(
        FROM exam_versions AS version
        WHERE version.id = ? AND version.certification_id = ?
          AND ${guard.sql}
+       ON CONFLICT(exam_version_id, domain_key) DO NOTHING
        RETURNING id`,
     )
     .bind(
@@ -539,6 +541,7 @@ export async function createTopic(
        FROM domains AS domain
        WHERE domain.id = ? AND domain.exam_version_id = ?
          AND domain.certification_id = ? AND ${guard.sql}
+       ON CONFLICT(domain_id, topic_key) DO NOTHING
        RETURNING id`,
     )
     .bind(
@@ -645,6 +648,7 @@ async function createQuestionWithRevision(
          )
          AND ${destinationGuard.sql}
          ${sourceExistsSql}
+       ON CONFLICT(certification_id, question_key) DO NOTHING
        RETURNING id`,
     )
     .bind(

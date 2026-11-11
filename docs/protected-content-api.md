@@ -85,7 +85,7 @@ identity.
 | 401 | `unauthenticated` | Missing, malformed, expired, revoked or disabled-account session. |
 | 403 | `forbidden` | Authenticated non-staff or staff MFA assurance is missing, unsupported or stale. |
 | 404 | `not_found` | Resource is absent or not visible in the authorized certification scope. |
-| 409 | `conflict` | Stale lock/pointer, duplicate, invalid workflow transition, expired preview or import replay conflict. Existing confirmed imports return their prior successful outcome. |
+| 409 | `conflict` | Stale lock/pointer, duplicate exam-version/domain/topic/question key, invalid workflow transition, expired preview or import replay conflict. Expected key collisions use targeted SQLite conflict clauses in the same guarded insert; they are not classified by parsing arbitrary database errors. Existing confirmed imports return their prior successful outcome. |
 | 503 | `service_unavailable` | Required security configuration is absent/invalid or D1/runtime processing failed. The response is sanitized. |
 
 Validation responses may include stable field-level schema issue paths and
@@ -103,9 +103,26 @@ secret values in the repository or return them. `PUBLIC_SITE_ORIGIN` must be
 one exact HTTPS origin (scheme, hostname and optional port only), not a path,
 wildcard or comma-separated list.
 
-JSON body maximum is 32 KiB. CSV is limited to 256 KiB by the existing import
-contract. Query strings are bounded and strictly parsed. Chunked and
-content-length-free bodies are subject to the same streaming limits.
+JSON limits are route-specific and enforced while streaming, before JSON parsing:
+
+- Exam-version, domain, topic, review, publication, retirement, and other
+  non-question JSON mutations: 24 KiB. The largest of these schemas is a
+  3,000-code-unit review note; worst-case JSON escaping uses at most six bytes
+  per code unit (18,000 bytes), leaving room for the rest of the request and
+  JSON structure.
+- Question draft creation and correction: 256 KiB. The schema allows at most
+  37,576 UTF-16 code units across question key, stem, source/licence
+  references, and eight options' keys, text and explanations. Escaping every
+  code unit as a six-byte JSON escape is at most 225,456 bytes. The two
+  maximum-length body IDs add at most 1,536 bytes; JSON property/array syntax
+  and numeric metadata remain below 1 KiB, leaving over 34 KiB of overhead.
+  UTF-8 multibyte characters are no larger than this escaped bound.
+- CSV import: 256 KiB, as defined by the existing import contract.
+
+Chunked and content-length-free requests use the same streaming caps. Declared
+`Content-Length` is an early-rejection hint only; the stream byte count remains
+authoritative. Oversized bodies return 413 before parsing and cannot create
+content or audit records. Query strings are bounded and strictly parsed.
 
 ## Boundaries
 

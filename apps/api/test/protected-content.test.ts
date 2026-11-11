@@ -511,6 +511,437 @@ describe("protected content HTTP boundary", () => {
     assertPrivate(chunked);
   });
 
+  it("returns atomic private conflicts for sequential and concurrent duplicate keys", async () => {
+    const actor = await createActor();
+    const examVersionsPath = `${apiRoot}/certifications/${actor.certificationId}/exam-versions`;
+    const versionKey = `duplicate-version-${crypto.randomUUID()}`;
+    const versionBody = JSON.stringify({
+      versionKey,
+      title: "Synthetic duplicate version",
+      syllabusReference: "Synthetic syllabus",
+    });
+    const firstVersion = await call(actor, examVersionsPath, {
+      method: "POST",
+      body: versionBody,
+    });
+    expect(firstVersion.status).toBe(201);
+    const versionId = ((await firstVersion.json()) as { id: string }).id;
+
+    const duplicateVersion = await call(actor, examVersionsPath, {
+      method: "POST",
+      body: versionBody,
+    });
+    expect(duplicateVersion.status).toBe(409);
+    expect(await duplicateVersion.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    assertPrivate(duplicateVersion);
+    const versionConflictAuditCount = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE certification_id = ? AND action = 'exam_version_created'`,
+      )
+      .bind(actor.certificationId)
+      .first<{ count: number }>();
+    expect(versionConflictAuditCount?.count).toBe(1);
+
+    const concurrentVersionKey = `concurrent-version-${crypto.randomUUID()}`;
+    const concurrentVersionBody = JSON.stringify({
+      versionKey: concurrentVersionKey,
+      title: "Synthetic concurrent version",
+      syllabusReference: "Synthetic syllabus",
+    });
+    const concurrentVersions = await Promise.all([
+      call(actor, examVersionsPath, {
+        method: "POST",
+        body: concurrentVersionBody,
+      }),
+      call(actor, examVersionsPath, {
+        method: "POST",
+        body: concurrentVersionBody,
+      }),
+    ]);
+    expect(concurrentVersions.map((response) => response.status).sort()).toEqual([201, 409]);
+    for (const response of concurrentVersions) {
+      assertPrivate(response);
+      expect(await response.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    }
+    const concurrentVersionState = await database
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM exam_versions
+            WHERE certification_id = ? AND version_key = ?) AS versions,
+           (SELECT COUNT(*) FROM audit_events
+            WHERE certification_id = ? AND action = 'exam_version_created'
+              AND subject_id IN (
+                SELECT id FROM exam_versions
+                WHERE certification_id = ? AND version_key = ?
+              )) AS audits`,
+      )
+      .bind(
+        actor.certificationId,
+        concurrentVersionKey,
+        actor.certificationId,
+        actor.certificationId,
+        concurrentVersionKey,
+      )
+      .first<{ versions: number; audits: number }>();
+    expect(concurrentVersionState).toEqual({ versions: 1, audits: 1 });
+
+    const versionPathValue = versionPath(actor, versionId);
+    const domainKey = `duplicate-domain-${crypto.randomUUID()}`;
+    const domainBody = JSON.stringify({
+      domainKey,
+      title: "Synthetic duplicate domain",
+      meaning: "Synthetic meaning",
+      order: 0,
+    });
+    const domainsPath = `${versionPathValue}/domains`;
+    const firstDomain = await call(actor, domainsPath, {
+      method: "POST",
+      body: domainBody,
+    });
+    expect(firstDomain.status).toBe(201);
+    const domainId = ((await firstDomain.json()) as { id: string }).id;
+    const duplicateDomain = await call(actor, domainsPath, {
+      method: "POST",
+      body: domainBody,
+    });
+    expect(duplicateDomain.status).toBe(409);
+    expect(await duplicateDomain.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    assertPrivate(duplicateDomain);
+    const domainAuditCount = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE certification_id = ? AND action = 'domain_created'`,
+      )
+      .bind(actor.certificationId)
+      .first<{ count: number }>();
+    expect(domainAuditCount?.count).toBe(1);
+
+    const concurrentDomainKey = `concurrent-domain-${crypto.randomUUID()}`;
+    const concurrentDomainBody = JSON.stringify({
+      domainKey: concurrentDomainKey,
+      title: "Synthetic concurrent domain",
+      meaning: "Synthetic meaning",
+      order: 1,
+    });
+    const concurrentDomains = await Promise.all([
+      call(actor, domainsPath, { method: "POST", body: concurrentDomainBody }),
+      call(actor, domainsPath, { method: "POST", body: concurrentDomainBody }),
+    ]);
+    expect(concurrentDomains.map((response) => response.status).sort()).toEqual([201, 409]);
+    for (const response of concurrentDomains) {
+      assertPrivate(response);
+      expect(await response.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    }
+    const concurrentDomainState = await database
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM domains
+            WHERE exam_version_id = ? AND domain_key = ?) AS domains,
+           (SELECT COUNT(*) FROM audit_events
+            WHERE certification_id = ? AND action = 'domain_created'
+              AND subject_id IN (
+                SELECT id FROM domains
+                WHERE exam_version_id = ? AND domain_key = ?
+              )) AS audits`,
+      )
+      .bind(
+        versionId,
+        concurrentDomainKey,
+        actor.certificationId,
+        versionId,
+        concurrentDomainKey,
+      )
+      .first<{ domains: number; audits: number }>();
+    expect(concurrentDomainState).toEqual({ domains: 1, audits: 1 });
+
+    const topicsPath = `${domainsPath}/${domainId}/topics`;
+    const topicKey = `duplicate-topic-${crypto.randomUUID()}`;
+    const topicBody = JSON.stringify({
+      topicKey,
+      title: "Synthetic duplicate topic",
+      meaning: "Synthetic meaning",
+      order: 0,
+    });
+    const firstTopic = await call(actor, topicsPath, {
+      method: "POST",
+      body: topicBody,
+    });
+    expect(firstTopic.status).toBe(201);
+    const topicId = ((await firstTopic.json()) as { id: string }).id;
+    const duplicateTopic = await call(actor, topicsPath, {
+      method: "POST",
+      body: topicBody,
+    });
+    expect(duplicateTopic.status).toBe(409);
+    expect(await duplicateTopic.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    assertPrivate(duplicateTopic);
+    const topicAuditCount = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE certification_id = ? AND action = 'topic_created'`,
+      )
+      .bind(actor.certificationId)
+      .first<{ count: number }>();
+    expect(topicAuditCount?.count).toBe(1);
+
+    const concurrentTopicKey = `concurrent-topic-${crypto.randomUUID()}`;
+    const concurrentTopicBody = JSON.stringify({
+      topicKey: concurrentTopicKey,
+      title: "Synthetic concurrent topic",
+      meaning: "Synthetic meaning",
+      order: 1,
+    });
+    const concurrentTopics = await Promise.all([
+      call(actor, topicsPath, { method: "POST", body: concurrentTopicBody }),
+      call(actor, topicsPath, { method: "POST", body: concurrentTopicBody }),
+    ]);
+    expect(concurrentTopics.map((response) => response.status).sort()).toEqual([201, 409]);
+    for (const response of concurrentTopics) {
+      assertPrivate(response);
+      expect(await response.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    }
+    const concurrentTopicState = await database
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM topics
+            WHERE domain_id = ? AND topic_key = ?) AS topics,
+           (SELECT COUNT(*) FROM audit_events
+            WHERE certification_id = ? AND action = 'topic_created'
+              AND subject_id IN (
+                SELECT id FROM topics
+                WHERE domain_id = ? AND topic_key = ?
+              )) AS audits`,
+      )
+      .bind(
+        domainId,
+        concurrentTopicKey,
+        actor.certificationId,
+        domainId,
+        concurrentTopicKey,
+      )
+      .first<{ topics: number; audits: number }>();
+    expect(concurrentTopicState).toEqual({ topics: 1, audits: 1 });
+
+    const questionPath = `${versionPathValue}/questions`;
+    const questionKey = `duplicate-question-${crypto.randomUUID()}`;
+    const questionBody = JSON.stringify({
+      questionKey,
+      domainId,
+      topicId,
+      content: validQuestionContent,
+    });
+    const firstQuestion = await call(actor, questionPath, {
+      method: "POST",
+      body: questionBody,
+    });
+    expect(firstQuestion.status).toBe(201);
+    const questionId = ((await firstQuestion.json()) as { questionId: string }).questionId;
+    const duplicateQuestion = await call(actor, questionPath, {
+      method: "POST",
+      body: questionBody,
+    });
+    expect(duplicateQuestion.status).toBe(409);
+    expect(await duplicateQuestion.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    assertPrivate(duplicateQuestion);
+    const questionConflictState = await database
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM questions
+            WHERE certification_id = ? AND question_key = ?) AS questions,
+           (SELECT COUNT(*) FROM question_revisions
+            WHERE question_id = ?) AS revisions,
+           (SELECT COUNT(*) FROM audit_events
+            WHERE certification_id = ? AND action = 'question_created'
+              AND subject_id = ?) AS audits`,
+      )
+      .bind(
+        actor.certificationId,
+        questionKey,
+        questionId,
+        actor.certificationId,
+        questionId,
+      )
+      .first<{ questions: number; revisions: number; audits: number }>();
+    expect(questionConflictState).toEqual({ questions: 1, revisions: 1, audits: 1 });
+
+    const concurrentQuestionKey = `concurrent-question-${crypto.randomUUID()}`;
+    const concurrentQuestionBody = JSON.stringify({
+      questionKey: concurrentQuestionKey,
+      domainId,
+      topicId,
+      content: validQuestionContent,
+    });
+    const concurrentQuestions = await Promise.all([
+      call(actor, questionPath, { method: "POST", body: concurrentQuestionBody }),
+      call(actor, questionPath, { method: "POST", body: concurrentQuestionBody }),
+    ]);
+    expect(concurrentQuestions.map((response) => response.status).sort()).toEqual([201, 409]);
+    for (const response of concurrentQuestions) {
+      assertPrivate(response);
+      expect(await response.text()).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    }
+    const concurrentQuestionCount = await database
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM questions
+            WHERE certification_id = ? AND question_key = ?) AS questions,
+           (SELECT COUNT(*) FROM question_revisions AS revision
+            JOIN questions AS question ON question.id = revision.question_id
+            WHERE question.certification_id = ? AND question.question_key = ?) AS revisions,
+           (SELECT COUNT(*) FROM audit_events
+            WHERE certification_id = ? AND action = 'question_created'
+              AND subject_id IN (
+                SELECT id FROM questions
+                WHERE certification_id = ? AND question_key = ?
+              )) AS audits`,
+      )
+      .bind(
+        actor.certificationId,
+        concurrentQuestionKey,
+        actor.certificationId,
+        concurrentQuestionKey,
+        actor.certificationId,
+        actor.certificationId,
+        concurrentQuestionKey,
+      )
+      .first<{ questions: number; revisions: number; audits: number }>();
+    expect(concurrentQuestionCount).toEqual({ questions: 1, revisions: 1, audits: 1 });
+  });
+
+  it("accepts maximum-length eight-option content and rejects oversized streamed JSON", async () => {
+    const actor = await createActor();
+    const versionResponse = await call(
+      actor,
+      `${apiRoot}/certifications/${actor.certificationId}/exam-versions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          versionKey: `max-content-${crypto.randomUUID()}`,
+          title: "Synthetic maximum content version",
+          syllabusReference: "Synthetic syllabus",
+        }),
+      },
+    );
+    const versionId = ((await versionResponse.json()) as { id: string }).id;
+    const versionPathValue = versionPath(actor, versionId);
+    const domainResponse = await call(actor, `${versionPathValue}/domains`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainKey: `max-domain-${crypto.randomUUID()}`,
+        title: "Synthetic maximum content domain",
+        meaning: "Synthetic meaning",
+        order: 0,
+      }),
+    });
+    const domainId = ((await domainResponse.json()) as { id: string }).id;
+    const topicResponse = await call(
+      actor,
+      `${versionPathValue}/domains/${domainId}/topics`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          topicKey: `max-topic-${crypto.randomUUID()}`,
+          title: "Synthetic maximum content topic",
+          meaning: "Synthetic meaning",
+          order: 0,
+        }),
+      },
+    );
+    const topicId = ((await topicResponse.json()) as { id: string }).id;
+    const maxLengthString = (maxCodeUnits: number) =>
+      `${"😀".repeat(maxCodeUnits / 2 - 1)}\u0001\u0002`;
+    const content = {
+      stem: maxLengthString(4000),
+      difficulty: "hard",
+      sourceReference: maxLengthString(1000),
+      licenseReference: maxLengthString(200),
+      options: Array.from({ length: 8 }, (_, index) => ({
+        key: `OPTION-${index + 1}`,
+        text: maxLengthString(1000),
+        correct: index === 0,
+        explanation: maxLengthString(3000),
+      })),
+    };
+    const questionKey = `maximum-question-${crypto.randomUUID()}`;
+    const questionRequest = {
+      questionKey,
+      domainId,
+      topicId,
+      content,
+    };
+    const questionBody = JSON.stringify(questionRequest);
+    expect(new TextEncoder().encode(questionBody).byteLength).toBeGreaterThan(32 * 1024);
+    expect(new TextEncoder().encode(questionBody).byteLength).toBeLessThanOrEqual(256 * 1024);
+    const question = await call(actor, `${versionPathValue}/questions`, {
+      method: "POST",
+      body: questionBody,
+    });
+    expect(question.status).toBe(201);
+    const created = (await question.json()) as {
+      questionId: string;
+      revisionNumber: number;
+    };
+    expect(created.revisionNumber).toBe(1);
+
+    const correctionBody = JSON.stringify({
+      domainId,
+      topicId,
+      expectedLockVersion: 1,
+      content,
+    });
+    expect(new TextEncoder().encode(correctionBody).byteLength).toBeGreaterThan(32 * 1024);
+    const correction = await call(
+      actor,
+      `${versionPathValue}/questions/${created.questionId}/revisions`,
+      { method: "POST", body: correctionBody },
+    );
+    expect(correction.status).toBe(201);
+    expect(await correction.json()).toMatchObject({ revisionNumber: 2 });
+
+    const oversizedQuestionKey = `oversized-question-${crypto.randomUUID()}`;
+    const oversizedBody = JSON.stringify({
+      ...questionRequest,
+      questionKey: oversizedQuestionKey,
+      padding: "x".repeat(256 * 1024),
+    });
+    const chunked = await api.fetch(
+      new Request(
+        requestUrl(`${versionPathValue}/questions`),
+        {
+          method: "POST",
+          headers: {
+            Cookie: `certpath_session=${actor.rawToken}`,
+            Origin: origin,
+            "X-CSRF-Token": actor.csrfToken ?? (await getCsrf(actor)),
+            "Content-Type": "application/json",
+          },
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              const bytes = new TextEncoder().encode(oversizedBody);
+              for (let offset = 0; offset < bytes.byteLength; offset += 32 * 1024) {
+                controller.enqueue(bytes.slice(offset, offset + 32 * 1024));
+              }
+              controller.close();
+            },
+          }),
+          duplex: "half",
+        } as RequestInit,
+      ),
+      actor.bindings,
+    );
+    expect(chunked.status).toBe(413);
+    assertPrivate(chunked);
+    const noOversizedQuestion = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM questions
+         WHERE certification_id = ? AND question_key = ?`,
+      )
+        .bind(actor.certificationId, oversizedQuestionKey)
+      .first<{ count: number }>();
+    expect(noOversizedQuestion?.count).toBe(0);
+  });
+
   it("creates, reads, corrects, reviews, publishes, supersedes and retires scoped content", async () => {
     const actor = await createActor();
     const createVersion = await call(
