@@ -913,7 +913,8 @@ td {
 
 .protected-editor-selectors,
 .protected-question-picker,
-.protected-question-editor {
+.protected-question-editor,
+.protected-csv-tools {
   margin-block: 1.25rem;
   padding: clamp(1rem, 3vw, 1.5rem);
   border: 1px solid #dce1e8;
@@ -973,6 +974,57 @@ td {
 .protected-editor-section-heading p {
   margin-block: 0.35rem;
   color: #526078;
+}
+
+.protected-csv-tools h3 {
+  margin-block: 0.25rem 0.6rem;
+}
+
+.protected-csv-tools-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.25rem;
+}
+
+.protected-csv-tools-grid > section {
+  min-width: 0;
+  padding-top: 1rem;
+  border-top: 1px solid #e0e5eb;
+  overflow-wrap: anywhere;
+}
+
+.protected-csv-file,
+.protected-csv-template {
+  display: grid;
+  gap: 0.5rem;
+  margin-block: 1rem;
+  font-weight: 650;
+}
+
+.protected-csv-template summary {
+  cursor: pointer;
+}
+
+.protected-csv-template textarea {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace !important;
+  font-size: 0.8rem !important;
+}
+
+.protected-csv-summary,
+.protected-csv-confirmation {
+  margin-block: 1rem;
+  padding: 0.75rem;
+  border-left: 0.25rem solid #006c70;
+  border-radius: 0.3rem;
+  background: #eaf5f3;
+  overflow-wrap: anywhere;
+}
+
+.protected-csv-issues {
+  max-height: 16rem;
+  overflow: auto;
+  padding-left: 1.4rem;
+  overflow-wrap: anywhere;
 }
 
 .protected-question-search {
@@ -1174,6 +1226,10 @@ td {
   .protected-editor-selectors {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     align-items: end;
+  }
+
+  .protected-csv-tools-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .protected-question-search {

@@ -9,6 +9,9 @@ import {
   domainListResponseSchema,
   emptyMutationRequestSchema,
   examVersionListResponseSchema,
+  importConfirmationResponseSchema,
+  importPreviewResponseSchema,
+  importPreviewSummarySchema,
   pointerVersionResponseSchema,
   publishQuestionRequestSchema,
   questionPublicationResponseSchema,
@@ -44,12 +47,16 @@ export type QuestionContent = z.infer<
   typeof createQuestionRequestSchema
 >["content"];
 export type QuestionPage = z.infer<typeof questionListResponseSchema>;
+export type ImportPreview = z.infer<typeof importPreviewResponseSchema>;
+export type ImportPreviewSummary = z.infer<typeof importPreviewSummarySchema>;
+export type ImportConfirmation = z.infer<typeof importConfirmationResponseSchema>;
 
 export class ProtectedApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     readonly issues: Array<{ path: string; code: string }> = [],
+    readonly summary?: ImportPreviewSummary,
   ) {
     super(code);
   }
@@ -89,6 +96,7 @@ async function requestJson<T>(
       error?: {
         code?: unknown;
         issues?: unknown;
+        summary?: unknown;
       };
     };
     const code =
@@ -104,7 +112,13 @@ async function requestJson<T>(
             typeof issue.code === "string",
         )
       : [];
-    throw new ProtectedApiError(response.status, code, issues);
+    const parsedSummary = importPreviewSummarySchema.safeParse(error.error?.summary);
+    throw new ProtectedApiError(
+      response.status,
+      code,
+      issues,
+      parsedSummary.success ? parsedSummary.data : undefined,
+    );
   }
 
   try {
@@ -326,4 +340,95 @@ export function retirePublication(
 ) {
   const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/questions/${safeId(questionId)}/retire`;
   return postJson(path, input, retireQuestionRequestSchema, pointerVersionResponseSchema);
+}
+
+export async function previewQuestionImport(
+  certificationId: string,
+  examVersionId: string,
+  file: File,
+): Promise<ImportPreview> {
+  const csrfToken = await getCsrfToken();
+  const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/import-previews`;
+  return requestJson(
+    path,
+    importPreviewResponseSchema,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/csv",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: file,
+    },
+  );
+}
+
+export function confirmQuestionImport(
+  certificationId: string,
+  importId: string,
+): Promise<ImportConfirmation> {
+  const path = `/certifications/${safeId(certificationId)}/import-previews/${safeId(importId)}/confirm`;
+  return postJson(
+    path,
+    {},
+    emptyMutationRequestSchema,
+    importConfirmationResponseSchema,
+  );
+}
+
+export async function exportPublishedQuestionPage(
+  certificationId: string,
+  examVersionId: string,
+  cursor?: string,
+): Promise<{ csv: string; nextCursor: string | null }> {
+  const query = new URLSearchParams({ limit: "100" });
+  if (cursor) query.set("cursor", cursor);
+  let response: Response;
+  try {
+    response = await fetch(
+      `${apiRoot}/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/export?${query}`,
+      {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "text/csv" },
+      },
+    );
+  } catch {
+    throw new ProtectedApiError(0, "network_error");
+  }
+  if (!response.ok) {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new ProtectedApiError(503, "service_unavailable");
+    }
+    const error = body as {
+      error?: {
+        code?: unknown;
+        issues?: unknown;
+      };
+    };
+    const code =
+      typeof error.error?.code === "string"
+        ? error.error.code
+        : "service_unavailable";
+    const issues = Array.isArray(error.error?.issues)
+      ? error.error.issues.filter(
+          (issue): issue is { path: string; code: string } =>
+            issue !== null &&
+            typeof issue === "object" &&
+            typeof issue.path === "string" &&
+            typeof issue.code === "string",
+        )
+      : [];
+    throw new ProtectedApiError(response.status, code, issues);
+  }
+  if (!response.headers.get("Content-Type")?.startsWith("text/csv")) {
+    throw new ProtectedApiError(503, "service_unavailable");
+  }
+  return {
+    csv: await response.text(),
+    nextCursor: response.headers.get("X-Export-Next-Cursor"),
+  };
 }

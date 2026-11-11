@@ -32,16 +32,19 @@ synthetic prototype remains separate.
 - Every protected response, including errors and CSV, is
   `Cache-Control: private, no-store, max-age=0` and
   `X-Robots-Tag: noindex, nofollow`. Errors have the shape
-  `{"error":{"code":"...","requestId":"..."}}`; they never contain SQL,
-  exception messages, cookies, tokens, stems, explanations or answer keys.
+  `{"error":{"code":"...","requestId":"..."}}`; import validation errors may
+  additionally include safe row/column issue codes and parsed/valid/invalid
+  counts. Errors never contain SQL, exception messages, cookies, tokens,
+  stems, explanations or answer keys.
 - Mutations require an exact `Origin` match to `PUBLIC_SITE_ORIGIN` and a
   request URL origin equal to `PUBLIC_SITE_ORIGIN`, plus a session-bound
   `X-CSRF-Token`. The signed session-bound token is an HMAC-SHA-256 of
   the session digest, configured origin and version, signed by the
   `CSRF_HMAC_SECRET`; compare signatures without early-exit string checks.
   `GET /csrf` returns the token only to the authenticated same-origin browser
-  and is not CORS-enabled. A future UI obtains it with same-origin `fetch`,
-  keeps it in memory, and sends it in the header for each mutation. No
+  and is not CORS-enabled. The protected staff workspace obtains it with
+  same-origin `fetch`, keeps it in memory, and sends it in the header for each
+  mutation. No
   arbitrary origins, return URLs or permissive CORS are supported.
 - Future session issuance, after separate provider approval, must set the
   random opaque value only in a `Secure; HttpOnly; SameSite=Lax; Path=/api`
@@ -75,7 +78,7 @@ define scope.
 | `POST /certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/revisions/:revisionId/review` | Strict JSON: `decision` (`approved` or `rejected`), `notes`. | `201 {"reviewId":"..."}` |
 | `POST /certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/publish` | Strict JSON: `revisionId`, `expectedPointerVersion` (positive integer or null for first publication). Revision must match certification, version and question. | `200 {"pointerVersion":1}` |
 | `POST /certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/retire` | Strict JSON: positive `expectedPointerVersion`. | `200 {"pointerVersion":2}` |
-| `POST /certifications/:certificationId/exam-versions/:examVersionId/import-previews` | `text/csv`, at most 256 KiB; same authorized scope/version as path. | `201` with the existing import preview result and row-specific validation summary. No questions/publications are created. |
+| `POST /certifications/:certificationId/exam-versions/:examVersionId/import-previews` | `text/csv`, at most 256 KiB; same authorized scope/version as path. | `201` with import ID, format, expiry and row counts. Invalid input returns row/column issue codes and row counts in the private error response. No questions/publications are created. |
 | `POST /certifications/:certificationId/import-previews/:importId/confirm` | Strict JSON `{}`; the path certification must match the preview, which is bound to the same actor and certification. | `200` with the established idempotent confirmed draft IDs. |
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/export?cursor=...&limit=1..100` | No body; strict query allowlist. | `200 text/csv` with the export CSV and `X-Export-Next-Cursor` when another page exists. |
 
