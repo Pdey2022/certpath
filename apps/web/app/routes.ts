@@ -4,6 +4,7 @@ export default [
   index("routes/home.tsx"),
   route("exams", "routes/exams.tsx"),
   route("app/practice/live", "routes/learner-practice.tsx"),
+  route("app/mock/live", "routes/learner-timed-mock.tsx"),
   route("app/*", "routes/learner.tsx"),
   route("admin/question-editor", "routes/admin-question-editor.tsx"),
   route("admin/*", "routes/admin.tsx"),

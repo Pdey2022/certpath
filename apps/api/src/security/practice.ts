@@ -27,6 +27,9 @@ interface ScopeRow {
   exam_version_title: string;
   domain_id: string | null;
   domain_title: string | null;
+  mock_profile_version: number | null;
+  mock_duration_seconds: number | null;
+  mock_question_count: number | null;
 }
 
 interface AttemptRow {
@@ -120,7 +123,10 @@ export async function listPracticeScopes(
               certification.display_name AS certification_name,
               version.id AS exam_version_id,
               version.version_key, version.title AS exam_version_title,
-              domain.id AS domain_id, domain.title AS domain_title
+              domain.id AS domain_id, domain.title AS domain_title,
+              mock_profile.profile_version AS mock_profile_version,
+              mock_profile.duration_seconds AS mock_duration_seconds,
+              mock_profile.question_count AS mock_question_count
        FROM learner_access_grants AS access_grant
        JOIN certifications AS certification
          ON certification.id = access_grant.certification_id
@@ -129,6 +135,10 @@ export async function listPracticeScopes(
        LEFT JOIN domains AS domain
          ON domain.certification_id = version.certification_id
         AND domain.exam_version_id = version.id
+       LEFT JOIN timed_mock_profiles AS mock_profile
+         ON mock_profile.certification_id = version.certification_id
+        AND mock_profile.exam_version_id = version.id
+        AND mock_profile.active = 1
        WHERE access_grant.user_id = ?
          AND access_grant.feature = 'standard'
          AND access_grant.revoked_at IS NULL
@@ -166,6 +176,18 @@ export async function listPracticeScopes(
         examVersionId: row.exam_version_id,
         versionKey: row.version_key,
         examVersionTitle: row.exam_version_title,
+        ...(row.mock_profile_version !== null &&
+        row.mock_duration_seconds !== null &&
+        row.mock_question_count !== null
+          ? {
+              mockProfile: {
+                version: row.mock_profile_version,
+                durationSeconds: row.mock_duration_seconds,
+                questionCount: row.mock_question_count,
+                navigation: "reviewable" as const,
+              },
+            }
+          : {}),
         domains: [],
       };
       scopes.set(key, scope);

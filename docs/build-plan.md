@@ -62,7 +62,7 @@ Acceptance for the remaining identity and admin workflows: cross-user and unauth
 
 ## Milestone 3 — Standard learning engine
 
-Deliver learner persistence in separately reviewed slices. Milestone 3A implements only untimed single-choice practice; notes, bookmarks, reports, timed mocks, adaptive exams, grant-management workflows and production provisioning remain later work.
+Deliver learner persistence in separately reviewed slices. Milestones 3A and 3B implement untimed practice and fixed-format Standard timed mocks. Notes, bookmarks, reports, adaptive exams, grant-management workflows and production provisioning remain later work.
 
 ### Milestone 3A — untimed learner practice
 
@@ -77,6 +77,31 @@ is separate from the browser-storage prototype. Responsive browser inspection
 used synthetic protected-API responses; it did not imply provider-backed or
 live session issuance. See the [Milestone 3A handoff](reviews/milestone-3a.md)
 for actual verification and limitations.
+
+### Milestone 3B — Standard timed mock exams
+
+Add a fixed-format, versioned mock profile for each certification/exam version.
+The approved local profile is 15 minutes and 10 published single-choice
+questions with reviewable navigation. The server validates profile bounds,
+selects and snapshots exact sealed revisions and option order at start, and
+sets an immutable deadline from its clock. Client input cannot set duration,
+question count, deadline, score, or answer-key data.
+
+Use the existing opaque session cookie and exact-certification Standard grant
+for every start, list, resume, answer, position, submit, and result read.
+Answers and navigation commands require request IDs and expected attempt
+versions. Active responses omit correct keys and explanations. The server
+rejects answer writes at or after the deadline, finalizes from acknowledged
+answers on submission or the next authorized read after expiry, and returns
+the single persisted result on retries. A completed attempt is immutable.
+Leaving or reauthenticating does not pause the deadline.
+
+The current conservative Standard-expiry behavior remains: an expired grant
+blocks attempt access even if the timer has expired. This is separate from mock
+deadline handling and remains a product decision; see the [Milestone 3B
+handoff](reviews/milestone-3b.md) and [timed-mock API contract](timed-mock-api.md).
+Provider-backed sign-in, session issuance, grant-management screens,
+adaptive Pro exams, payments and deployment remain out of scope.
 
 Acceptance for the remaining learning-engine slices: acknowledged answers survive interruption; duplicate answer requests have one effect; server timing applies; content updates preserve attempt snapshots; correct keys are not disclosed prematurely. Save & exit cannot report success on failed persistence; stale writes cannot overwrite later progress; final attempts stay locked. Leaving non-pausable exams does not stop their timer. Reauthentication recovery and access expiry follow explicit policies.
 
