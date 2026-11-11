@@ -74,10 +74,10 @@ routes, deployment, or new API endpoints were added.
 | Import/export UI regressions | Passed: invalid-row counts and guidance, file-change clearing, lost-confirmation retry with the same ID, expiry recovery, permission denial messaging, stale response after exam change, two-page cursor download, exact v1 template with current taxonomy, and pre-upload oversized-file rejection. |
 | Responsive authenticated browser inspection | Not completed. The local Worker failed closed with unavailable security configuration and displayed only the neutral session shell; no valid provider-backed browser session is issued in this milestone. The CSV panel uses a single-column layout below 48rem and two columns at/above 48rem; component regressions cover the controls, but a live authenticated mobile/desktop visual check remains for architect inspection. |
 | `git diff --check` | Passed. |
+| Ubuntu GitHub Actions | Passed for implementation commit `2ff31f8067f94514069f0c88bd8f750e86423d90` on [PR #10](https://github.com/Pdey2022/certpath/pull/10): [workflow run](https://github.com/Pdey2022/certpath/actions/runs/43030529753). This record-only follow-up is separately checked before architect review. |
 
 No secrets, real question banks, personal data or test-session tokens were
-added. GitHub Actions status and final commit are recorded after the draft PR
-checks complete.
+added.
 
 ## Limitations
 
