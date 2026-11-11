@@ -714,6 +714,7 @@ protectedApi.get(
       examVersionId,
       domainId: parsed.value.domainId,
       topicId: parsed.value.topicId,
+      questionId: parsed.value.questionId,
       tokenDigest: principal.tokenDigest,
       now: Date.now(),
       policy: principal.configuration.policy,

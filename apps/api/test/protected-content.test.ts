@@ -1062,6 +1062,22 @@ describe("protected content HTTP boundary", () => {
     };
     expect(listedQuestions.items).toHaveLength(1);
     expect(listedQuestions.nextCursor).toBeTruthy();
+    const exactQuestionSummary = await call(
+      manager,
+      `${scopedVersionPath}/questions?domainId=${domainId}` +
+        `&topicId=${topicId}&questionId=${createdQuestion.questionId}`,
+    );
+    expect(exactQuestionSummary.status).toBe(200);
+    assertPrivate(exactQuestionSummary);
+    expect(await exactQuestionSummary.json()).toMatchObject({
+      items: [{
+        id: createdQuestion.questionId,
+        currentRevisionId: createdQuestion.revisionId,
+        revisionNumber: 1,
+        lockVersion: 1,
+      }],
+      nextCursor: null,
+    });
     const secondQuestionPage = await call(
       manager,
       `${scopedVersionPath}/questions?domainId=${domainId}` +
@@ -1612,6 +1628,10 @@ describe("protected content HTTP boundary", () => {
     });
     expect(firstPublish.status).toBe(200);
     expect(await firstPublish.json()).toEqual({ pointerVersion: 1 });
+    expect(await (await call(manager, correctedPath)).json()).toMatchObject({
+      revisionId: corrected.revisionId,
+      workflowState: "published",
+    });
 
     const replacementResponse = await call(manager, `${questionPath}/revisions`, {
       method: "POST",
@@ -1645,6 +1665,14 @@ describe("protected content HTTP boundary", () => {
     });
     expect(replacePublication.status).toBe(200);
     expect(await replacePublication.json()).toEqual({ pointerVersion: 2 });
+    expect(await (await call(manager, correctedPath)).json()).toMatchObject({
+      revisionId: corrected.revisionId,
+      workflowState: "superseded",
+    });
+    expect(await (await call(manager, replacementPath)).json()).toMatchObject({
+      revisionId: replacement.revisionId,
+      workflowState: "published",
+    });
     const publicationStatus = await call(manager, publicationPath);
     expect(publicationStatus.status).toBe(200);
     expect(await publicationStatus.json()).toEqual({
@@ -1679,6 +1707,10 @@ describe("protected content HTTP boundary", () => {
     expect(retirement.status).toBe(200);
     assertPrivate(retirement);
     expect(await retirement.json()).toEqual({ pointerVersion: 3 });
+    expect(await (await call(manager, replacementPath)).json()).toMatchObject({
+      revisionId: replacement.revisionId,
+      workflowState: "retired",
+    });
     expect(await (await call(manager, publicationPath)).json()).toMatchObject({
       publication: {
         revisionId: replacement.revisionId,

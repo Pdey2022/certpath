@@ -141,6 +141,7 @@ export default function AdminQuestionEditor() {
   const [reviewNotes, setReviewNotes] = useState("");
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [workflowConflict, setWorkflowConflict] = useState<"revision" | "publication" | null>(null);
+  const [workflowRefreshAvailable, setWorkflowRefreshAvailable] = useState(false);
   const [workflowConfirmation, setWorkflowConfirmation] = useState<WorkflowConfirmation | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [error, setError] = useState("");
@@ -197,6 +198,7 @@ export default function AdminQuestionEditor() {
     requests.current.workflow += 1;
     setSaving(false);
     setWorkflowBusy(false);
+    setWorkflowRefreshAvailable(false);
     setWorkflowConfirmation(null);
     return formGeneration.current;
   }
@@ -840,6 +842,7 @@ export default function AdminQuestionEditor() {
     requests.current.workflow += 1;
     setWorkflowBusy(false);
     setWorkflowConflict(null);
+    setWorkflowRefreshAvailable(false);
     setWorkflowConfirmation(null);
     setReviewNotes("");
     setLatestRevision(null);
@@ -925,7 +928,11 @@ export default function AdminQuestionEditor() {
     expectedRevisionId: string,
     request: number,
   ) {
-    const [page, detail, publicationStatus] = await Promise.all([
+    const affectedQuestion = questions.items.find(
+      (question) => question.id === expectedQuestionId,
+    );
+    if (!affectedQuestion) throw new Error("The selected question summary is unavailable.");
+    const [page, detail, publicationStatus, questionPage] = await Promise.all([
       listQuestionRevisions(
         scope.certificationId,
         scope.examVersionId,
@@ -942,11 +949,21 @@ export default function AdminQuestionEditor() {
         scope.examVersionId,
         expectedQuestionId,
       ),
+      listQuestions({
+        ...scope,
+        questionId: affectedQuestion.id,
+      }),
     ]);
     if (
       request !== requests.current.workflow ||
       !workflowMatches(generation, scope, expectedQuestionId, expectedRevisionId)
     ) return false;
+    const refreshedQuestion = questionPage.items.find(
+      (question) => question.id === expectedQuestionId,
+    );
+    if (!refreshedQuestion) {
+      throw new Error("The selected question summary could not be refreshed.");
+    }
     setRevisions({
       ...page,
       items: page.items.some((item) => item.id === expectedRevisionId)
@@ -963,11 +980,17 @@ export default function AdminQuestionEditor() {
     });
     setSelectedRevision(detail);
     setPublication(publicationStatus.publication);
+    setQuestions((current) => ({
+      ...current,
+      items: current.items.map((question) =>
+        question.id === expectedQuestionId ? refreshedQuestion : question,
+      ),
+    }));
     return true;
   }
 
-  async function refreshWorkflowConflict() {
-    if (!workflowConflict || !questionId || !selectedRevision) return;
+  async function refreshWorkflowState() {
+    if ((!workflowConflict && !workflowRefreshAvailable) || !questionId || !selectedRevision) return;
     const expectedQuestionId = questionId;
     const expectedRevisionId = selectedRevision.revisionId;
     const scope = { ...scopeRef.current };
@@ -975,6 +998,7 @@ export default function AdminQuestionEditor() {
     const request = ++requests.current.workflow;
     setWorkflowBusy(true);
     setError("");
+    setStatus("");
     try {
       const refreshed = await refreshWorkflowData(
         generation,
@@ -985,6 +1009,7 @@ export default function AdminQuestionEditor() {
       );
       if (!refreshed) return;
       setWorkflowConflict(null);
+      setWorkflowRefreshAvailable(false);
       setStatus("Workflow state refreshed. Review it and deliberately choose an action again.");
     } catch (cause) {
       if (
@@ -1122,6 +1147,7 @@ export default function AdminQuestionEditor() {
     setWorkflowConflict(null);
     setError("");
     setStatus("");
+    let mutationSaved = false;
     try {
       if (confirmation.kind === "publish") {
         const currentPointerVersion = publication?.pointerVersion ?? null;
@@ -1155,27 +1181,25 @@ export default function AdminQuestionEditor() {
           { expectedPointerVersion: confirmation.expectedPointerVersion },
         );
       }
+      mutationSaved = true;
       if (!workflowMatches(
         generation,
         scope,
         confirmation.questionId,
         confirmation.revisionId,
       )) return;
-      const publicationStatus = await getQuestionPublication(
-        scope.certificationId,
-        scope.examVersionId,
+      const refreshed = await refreshWorkflowData(
+        generation,
+        scope,
         confirmation.questionId,
+        confirmation.revisionId,
+        request,
       );
-      if (!workflowMatches(
-        generation,
-        scope,
-        confirmation.questionId,
-        confirmation.revisionId,
-      )) return;
-      setPublication(publicationStatus.publication);
+      if (!refreshed) return;
+      setWorkflowRefreshAvailable(false);
       setStatus(
         confirmation.kind === "publish"
-          ? `Revision ${selectedRevision.revisionNumber} is published.`
+          ? `Revision ${selectedRevision.revisionNumber} is published. The revision, history, publication pointer, and question summary are refreshed.`
           : "The question was retired from future selection. Its publication and revision history are preserved.",
       );
     } catch (cause) {
@@ -1185,7 +1209,15 @@ export default function AdminQuestionEditor() {
         confirmation.questionId,
         confirmation.revisionId,
       )) return;
-      if (cause instanceof ProtectedApiError && cause.status === 409) {
+      if (mutationSaved) {
+        setWorkflowRefreshAvailable(true);
+        setError("");
+        setStatus(
+          confirmation.kind === "publish"
+            ? "Publication was saved, but the editor could not refresh its revision, history, publication pointer, and question summary. Refresh the saved workflow state; do not resubmit the publication."
+            : "Retirement was saved, but the editor could not refresh its revision, history, publication pointer, and question summary. Refresh the saved workflow state; do not resubmit the retirement.",
+        );
+      } else if (cause instanceof ProtectedApiError && cause.status === 409) {
         setWorkflowConflict("publication");
         setError("Publication changed since it was loaded. Your question fields and review notes are preserved; refresh publication state before choosing an action again.");
       } else {
@@ -1465,7 +1497,7 @@ export default function AdminQuestionEditor() {
                       <button
                         className="button-primary"
                         type="button"
-                        disabled={workflowBusy || saving || savedRevisionHasUnsavedEdits}
+                        disabled={workflowBusy || workflowRefreshAvailable || saving || savedRevisionHasUnsavedEdits}
                         onClick={() => void submitSelectedForReview()}
                       >
                         {workflowBusy ? "Updating workflow…" : "Submit saved revision for review"}
@@ -1500,14 +1532,14 @@ export default function AdminQuestionEditor() {
                           <button
                             className="button-primary"
                             type="submit"
-                            disabled={workflowBusy || !reviewNotes.trim()}
+                            disabled={workflowBusy || workflowRefreshAvailable || !reviewNotes.trim()}
                           >
                             Approve exact revision
                           </button>
                           <button
                             className="button-secondary"
                             type="button"
-                            disabled={workflowBusy || !reviewNotes.trim()}
+                            disabled={workflowBusy || workflowRefreshAvailable || !reviewNotes.trim()}
                             onClick={() => void recordSelectedReview("rejected")}
                           >
                             Reject exact revision
@@ -1522,7 +1554,7 @@ export default function AdminQuestionEditor() {
                         <button
                           className="button-primary"
                           type="button"
-                          disabled={workflowBusy}
+                          disabled={workflowBusy || workflowRefreshAvailable}
                           onClick={requestPublishConfirmation}
                         >
                           {publication?.state === "published"
@@ -1534,7 +1566,7 @@ export default function AdminQuestionEditor() {
                       <button
                         className="button-secondary"
                         type="button"
-                        disabled={workflowBusy}
+                        disabled={workflowBusy || workflowRefreshAvailable}
                         onClick={requestRetireConfirmation}
                       >
                         Retire published question
@@ -1556,7 +1588,7 @@ export default function AdminQuestionEditor() {
                           <button
                             className="button-primary"
                             type="button"
-                            disabled={workflowBusy}
+                            disabled={workflowBusy || workflowRefreshAvailable}
                             onClick={() => void performWorkflowConfirmation(workflowConfirmation)}
                           >
                             Confirm {workflowConfirmation.kind === "publish" ? "replacement" : "retirement"}
@@ -1572,21 +1604,27 @@ export default function AdminQuestionEditor() {
                         </div>
                       </div>
                     )}
-                    {workflowConflict && (
+                    {(workflowConflict || workflowRefreshAvailable) && (
                       <div className="protected-workflow-conflict" role="alert">
                         <p>
-                          {workflowConflict === "revision"
-                            ? "Review state changed on the server."
-                            : "Publication state changed on the server."}{" "}
-                          Refresh before choosing an action again. Your question fields and review notes are retained.
+                          {workflowRefreshAvailable
+                            ? "The change was saved, but its latest state could not be loaded. Your question fields and review notes are retained."
+                            : workflowConflict === "revision"
+                              ? "Review state changed on the server. Your question fields and review notes are retained."
+                              : "Publication state changed on the server. Your question fields and review notes are retained."}{" "}
+                          {workflowRefreshAvailable
+                            ? "Refresh the saved state; this will not resubmit the mutation."
+                            : "Refresh before choosing an action again."}
                         </p>
                         <button
                           className="button-secondary"
                           type="button"
                           disabled={workflowBusy}
-                          onClick={() => void refreshWorkflowConflict()}
+                          onClick={() => void refreshWorkflowState()}
                         >
-                          Refresh workflow and publication state
+                          {workflowRefreshAvailable
+                            ? "Refresh saved workflow state"
+                            : "Refresh workflow and publication state"}
                         </button>
                       </div>
                     )}

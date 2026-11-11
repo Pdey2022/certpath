@@ -15,6 +15,7 @@ export interface QuestionPageInput extends ContentPageInput {
   examVersionId: string;
   domainId: string;
   topicId: string;
+  questionId?: string;
   search?: string;
 }
 
@@ -259,6 +260,7 @@ export async function listQuestions(
          AND revision.exam_version_id = ?
          AND revision.domain_id = ?
          AND revision.topic_id = ?
+         AND (? IS NULL OR question.id = ?)
          AND ${guard.sql}
          AND (? IS NULL OR question.question_key LIKE ? ESCAPE '\\'
               OR revision.stem LIKE ? ESCAPE '\\')
@@ -270,6 +272,8 @@ export async function listQuestions(
       input.examVersionId,
       input.domainId,
       input.topicId,
+      input.questionId ?? null,
+      input.questionId ?? null,
       ...guard.values,
       search ? `%${search}%` : null,
       search ? `%${search}%` : null,

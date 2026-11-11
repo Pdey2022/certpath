@@ -130,6 +130,7 @@ export const questionPageQuerySchema = z
     ...contentPageQueryFields,
     domainId: id,
     topicId: id,
+    questionId: id.optional(),
     search: z.string().trim().min(1).max(100).optional(),
   })
   .strict();

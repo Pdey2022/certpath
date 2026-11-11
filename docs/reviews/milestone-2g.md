@@ -28,6 +28,17 @@ sign-in, session issuance, import/export UI, learner features or deployment.
   affected revision or pointer and requires a deliberate retry; it never
   retries a stale transition automatically. Request identity checks prevent
   late responses from changing another selected question.
+- After successful publication, replacement or retirement, the editor reuses
+  the guarded workflow refresh to reload the exact selected revision, bounded
+  revision history, publication pointer and the affected question summary.
+  The summary uses an optional exact `questionId` filter on the existing
+  bounded, scope-guarded question list rather than an unbounded search. The
+  response is applied only if the question, revision, scope and request
+  identity still match; refreshes do not replace form fields or review notes.
+- If the mutation succeeds but any part of that refresh fails, the UI states
+  that the change was saved and offers a separate “Refresh saved workflow
+  state” action. Workflow mutations stay disabled until recovery succeeds, so
+  this action cannot accidentally resubmit the successful mutation.
 - No dependencies or provider configuration were added. The existing neutral
   server-rendered shell, private/no-store responses and non-indexing controls
   remain in place.
@@ -50,11 +61,11 @@ sign-in, session issuance, import/export UI, learner features or deployment.
 
 | Check | Result |
 |---|---|
-| `npm run verify` | Passed: typechecks; API health test; 56 API tests across 8 files; 24 web tests; client and SSR production builds. |
-| Worker/D1 review-publication regression | Passed within the API suite: assigned Manager rejection/correction, exact-revision approval, publication and replacement, stale pointer conflict, retirement/history preservation, exact status read and unassigned Manager denial. |
-| Editor workflow and race tests | Passed within the web suite: submit/review/publish/retire actions, preserved review notes on conflict, explicit refresh/retry, publication conflict recovery and a late response after switching questions. |
+| `npm run verify` | Passed: typechecks; API health test; 56 API tests across 8 files; 26 web tests; client and SSR production builds. |
+| Worker/D1 review-publication regression | Passed within the API suite: assigned Manager rejection/correction, exact-revision approval, publication/replacement/retirement and assertions that D1 reports the exact revision as `published`, the replaced revision as `superseded`, and the retired revision as `retired`; also covers the exact question-summary filter, stale pointer conflict, history preservation, exact status read and unassigned Manager denial. |
+| Editor workflow and race tests | Passed within the web suite: after publish/replacement/retirement, exact revision, revision history, pointer and affected question summary reflect the D1 event states. A successful retirement followed by a failed refresh preserves unsaved fields and review notes, offers refresh-only recovery, and does not resubmit. A late publication refresh is discarded after selection changes. |
 | Authenticated browser layout | Passed using an assigned synthetic Manager session and synthetic content in an isolated local Worker/D1 fixture. At 1280×900, review notes and enabled approval/rejection actions were visible. At 390×844, the published revision and retirement action were visible, with no horizontal overflow. Retirement confirmation appeared and was canceled; no browser action changed fixture content. |
-| Ubuntu GitHub Actions | Passed on implementation commit `d6a8790a90f2a2dfd92965a29ea54ea867dcf3b4`: [CI run](https://github.com/Pdey2022/certpath/actions/runs/43024110701). |
+| Ubuntu GitHub Actions | Passed on implementation commit `d6a8790a90f2a2dfd92965a29ea54ea867dcf3b4`: [CI run](https://github.com/Pdey2022/certpath/actions/runs/43024110701). The post-review refresh correction is awaiting CI on its final PR commit. |
 
 The browser check used an explicitly configured local MFA policy and a
 temporary localhost certificate. Both the certificate trust entry and

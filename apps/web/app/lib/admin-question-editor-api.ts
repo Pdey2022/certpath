@@ -176,6 +176,7 @@ export async function listQuestions(
     examVersionId: string;
     domainId: string;
     topicId: string;
+    questionId?: string;
     search?: string;
     cursor?: string;
   },
@@ -183,6 +184,7 @@ export async function listQuestions(
   const params = questionPageQuerySchema.parse({
     domainId: input.domainId,
     topicId: input.topicId,
+    ...(input.questionId ? { questionId: input.questionId } : {}),
     ...(input.search ? { search: input.search } : {}),
     ...(input.cursor ? { cursor: input.cursor } : {}),
     limit: String(pageSize),
@@ -192,6 +194,7 @@ export async function listQuestions(
     topicId: params.topicId,
     limit: String(params.limit),
   });
+  if (params.questionId) query.set("questionId", params.questionId);
   if (params.search) query.set("search", params.search);
   if (params.cursor) query.set("cursor", params.cursor);
   const path = `/certifications/${safeId(input.certificationId)}/exam-versions/${safeId(input.examVersionId)}/questions?${query}`;
