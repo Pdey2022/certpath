@@ -12,7 +12,15 @@
 	},
 	"vars": {
 		"INDEXING_ENABLED": "false",
-		"PUBLIC_SITE_ORIGIN": ""
+		"PUBLIC_SITE_ORIGIN": "",
+		"STAFF_MFA_MAX_AGE_MS": "300000",
+		"STAFF_MFA_ALLOWED_METHODS": "totp",
+		"COGNITO_SANDBOX_ENABLED": "false",
+		"COGNITO_ISSUER": "",
+		"COGNITO_DOMAIN": "",
+		"COGNITO_CALLBACK_URL": "",
+		"COGNITO_LEARNER_CLIENT_ID": "",
+		"COGNITO_STAFF_CLIENT_ID": ""
 	},
 	"d1_databases": [
 		{
