@@ -13,6 +13,7 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
           </Link>
           <nav className="public-nav" aria-label="Public navigation">
             <Link to="/exams">Exams</Link>
+            <Link to="/sign-in">Learner sign in</Link>
             <Link to="/app">Learner preview</Link>
           </nav>
         </div>

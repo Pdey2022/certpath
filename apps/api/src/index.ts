@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { healthResponseSchema } from "@certpath/contracts";
 import { protectedContentApi } from "./protected-content.ts";
 import { learnerPracticeApi } from "./learner-practice.ts";
+import { createCognitoLearnerSandboxApi } from "./cognito-learner-sandbox.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 
 type ApiBindings = {
@@ -10,15 +11,31 @@ type ApiBindings = {
   STAFF_MFA_MAX_AGE_MS?: string;
   STAFF_MFA_ALLOWED_METHODS?: string;
   CSRF_HMAC_SECRET?: string;
+  COGNITO_LEARNER_SANDBOX_ENABLED?: string;
+  COGNITO_LEARNER_ALLOWED_CLIENT_IPS?: string;
+  COGNITO_LEARNER_ISSUER?: string;
+  COGNITO_LEARNER_DOMAIN?: string;
+  COGNITO_LEARNER_CALLBACK_URL?: string;
+  COGNITO_LEARNER_CLIENT_ID?: string;
+  COGNITO_LEARNER_TRANSACTION_ENCRYPTION_KEY?: string;
 };
 
-export const api = new Hono<{ Bindings: ApiBindings }>().basePath("/api");
+export function createApi(fetcher: typeof fetch = fetch) {
+  const application = new Hono<{ Bindings: ApiBindings }>().basePath("/api");
 
-api.get("/health", (context) => {
-  const response = healthResponseSchema.parse({ status: "ok" });
-  context.header("Cache-Control", "no-store");
-  return context.json(response);
-});
+  application.get("/health", (context) => {
+    const response = healthResponseSchema.parse({ status: "ok" });
+    context.header("Cache-Control", "no-store");
+    return context.json(response);
+  });
 
-api.route("/admin/content", protectedContentApi);
-api.route("/practice", learnerPracticeApi);
+  application.route(
+    "/auth/cognito",
+    createCognitoLearnerSandboxApi(fetcher),
+  );
+  application.route("/admin/content", protectedContentApi);
+  application.route("/practice", learnerPracticeApi);
+  return application;
+}
+
+export const api = createApi();
