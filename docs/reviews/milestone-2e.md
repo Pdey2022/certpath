@@ -89,7 +89,7 @@ Windows verification command and outcome:
 |---|---|
 | `Set-Location apps\api; npx vitest run --config vitest.config.ts test/protected-content.test.ts` | Passed: 12 protected HTTP integration tests on isolated Worker/D1, including duplicate-key and maximum-content regressions. |
 | `npm run verify` | Passed on Windows: workspace TypeScript checks; API health test; 54 API Worker/D1 tests across 8 files; 13 web tests including public SEO/prototype tests; client and Cloudflare Worker SSR production builds. |
-| Ubuntu GitHub Actions | Pending for the final correction commit. The earlier implementation result was [CI run 42897215572](https://github.com/Pdey2022/certpath/actions/runs/42897215572) on `556c3bb11bc4dcaaa8bf66a2569425ef84d319ce`; it does not validate this correction. |
+| Ubuntu GitHub Actions | Passed for correction commit `4bf61ad3d53b8c5b61d6e7f15368ac960b6f8190`: [CI run 43012257643](https://github.com/Pdey2022/certpath/actions/runs/43012257643). |
 
 The HTTP integration tests cover missing/malformed/expired/revoked/disabled
 sessions, forged client authority, missing/invalid/stale/unsupported MFA,
@@ -101,11 +101,9 @@ multibyte/escaped question bodies, route-specific chunked body limits,
 idempotent/expired imports, scoped exports, private response headers,
 sanitized D1 failures, and unchanged health behavior. Test session creation
 uses the isolated test-only factories; session revocation and assignment
-revocation exercise existing security services.
-
-If this handoff is amended after the implementation commit, verify the resulting
-final head independently; a run on an earlier SHA is not evidence for a later
-commit.
+revocation exercise existing security services. The final PR head and its CI
+result are reported separately if this handoff itself changes after the
+correction commit.
 
 ## Configuration and limitations
 
