@@ -942,6 +942,271 @@ describe("protected content HTTP boundary", () => {
     expect(noOversizedQuestion?.count).toBe(0);
   });
 
+  it("supports scoped editor reads and Manager draft corrections through Worker/D1", async () => {
+    const manager = await createActor({ role: "manager" });
+    const unassigned = await createActor({ role: "manager", assigned: false });
+    const versionsPath = `${apiRoot}/certifications/${manager.certificationId}/exam-versions`;
+    const certificationPage = await call(
+      manager,
+      `${apiRoot}/certifications?limit=1`,
+    );
+    expect(certificationPage.status).toBe(200);
+    assertPrivate(certificationPage);
+    const certifications = (await certificationPage.json()) as {
+      items: Array<{ id: string }>;
+      nextCursor: string | null;
+    };
+    expect(certifications.items.map(({ id }) => id)).toContain(manager.certificationId);
+    expect(certifications.items.map(({ id }) => id)).not.toContain(unassigned.certificationId);
+
+    const versionResponse = await call(manager, versionsPath, {
+      method: "POST",
+      body: JSON.stringify({
+        versionKey: `editor-${crypto.randomUUID()}`,
+        title: "Synthetic editor version",
+        syllabusReference: "Synthetic syllabus",
+      }),
+    });
+    expect(versionResponse.status).toBe(201);
+    const versionId = ((await versionResponse.json()) as { id: string }).id;
+    const versionsPage = await call(
+      manager,
+      `${apiRoot}/certifications/${manager.certificationId}/exam-versions?limit=1`,
+    );
+    expect(versionsPage.status).toBe(200);
+    assertPrivate(versionsPage);
+    expect(
+      ((await versionsPage.json()) as { items: Array<{ id: string }> }).items.map(({ id }) => id),
+    ).toContain(versionId);
+
+    const scopedVersionPath = versionPath(manager, versionId);
+    const domainResponse = await call(manager, `${scopedVersionPath}/domains`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainKey: `editor-domain-${crypto.randomUUID()}`,
+        title: "Synthetic editor domain",
+        meaning: "Synthetic stable domain meaning",
+        order: 0,
+      }),
+    });
+    expect(domainResponse.status).toBe(201);
+    const domainId = ((await domainResponse.json()) as { id: string }).id;
+    const domainPage = await call(manager, `${scopedVersionPath}/domains?limit=1`);
+    expect(domainPage.status).toBe(200);
+    assertPrivate(domainPage);
+    expect(
+      ((await domainPage.json()) as { items: Array<{ id: string }> }).items.map(({ id }) => id),
+    ).toContain(domainId);
+
+    const topicResponse = await call(
+      manager,
+      `${scopedVersionPath}/domains/${domainId}/topics`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          topicKey: `editor-topic-${crypto.randomUUID()}`,
+          title: "Synthetic editor topic",
+          meaning: "Synthetic stable topic meaning",
+          order: 0,
+        }),
+      },
+    );
+    expect(topicResponse.status).toBe(201);
+    const topicId = ((await topicResponse.json()) as { id: string }).id;
+    const topicPage = await call(
+      manager,
+      `${scopedVersionPath}/domains/${domainId}/topics?limit=1`,
+    );
+    expect(topicPage.status).toBe(200);
+    assertPrivate(topicPage);
+    expect(
+      ((await topicPage.json()) as { items: Array<{ id: string }> }).items.map(({ id }) => id),
+    ).toContain(topicId);
+
+    const questionKey = `manager-question-${crypto.randomUUID()}`;
+    const questionResponse = await call(manager, `${scopedVersionPath}/questions`, {
+      method: "POST",
+      body: JSON.stringify({
+        questionKey,
+        domainId,
+        topicId,
+        content: validQuestionContent,
+      }),
+    });
+    expect(questionResponse.status).toBe(201);
+    const createdQuestion = (await questionResponse.json()) as {
+      questionId: string;
+      revisionId: string;
+      revisionNumber: number;
+    };
+    expect(createdQuestion.revisionNumber).toBe(1);
+    const secondQuestionResponse = await call(manager, `${scopedVersionPath}/questions`, {
+      method: "POST",
+      body: JSON.stringify({
+        questionKey: `${questionKey}-second`,
+        domainId,
+        topicId,
+        content: validQuestionContent,
+      }),
+    });
+    expect(secondQuestionResponse.status).toBe(201);
+    const questionListPath =
+      `${scopedVersionPath}/questions?domainId=${domainId}` +
+      `&topicId=${topicId}&limit=1&search=${encodeURIComponent(questionKey)}`;
+    const questionPage = await call(manager, questionListPath);
+    expect(questionPage.status).toBe(200);
+    assertPrivate(questionPage);
+    const listedQuestions = (await questionPage.json()) as {
+      items: Array<{ id: string; currentRevisionId: string }>;
+      nextCursor: string | null;
+    };
+    expect(listedQuestions.items).toHaveLength(1);
+    expect(listedQuestions.nextCursor).toBeTruthy();
+    const secondQuestionPage = await call(
+      manager,
+      `${scopedVersionPath}/questions?domainId=${domainId}` +
+        `&topicId=${topicId}&limit=1&search=${encodeURIComponent(questionKey)}` +
+        `&cursor=${listedQuestions.nextCursor}`,
+    );
+    expect(secondQuestionPage.status).toBe(200);
+    assertPrivate(secondQuestionPage);
+    const secondPage = (await secondQuestionPage.json()) as {
+      items: Array<{ id: string }>;
+      nextCursor: string | null;
+    };
+    expect(secondPage.items).toHaveLength(1);
+    expect(secondPage.items[0]?.id).not.toBe(listedQuestions.items[0]?.id);
+    expect(secondPage.nextCursor).toBeNull();
+
+    const questionPath = `${scopedVersionPath}/questions/${createdQuestion.questionId}`;
+    const revisionsResponse = await call(manager, `${questionPath}/revisions?limit=1`);
+    expect(revisionsResponse.status).toBe(200);
+    assertPrivate(revisionsResponse);
+    expect(
+      ((await revisionsResponse.json()) as { items: Array<{ id: string; revisionNumber: number }> })
+        .items,
+    ).toEqual([{ id: createdQuestion.revisionId, revisionNumber: 1, workflowState: "draft", createdAt: expect.any(Number) }]);
+
+    const firstRevisionPath =
+      `${questionPath}/revisions/${createdQuestion.revisionId}`;
+    const firstRevision = await call(manager, firstRevisionPath);
+    expect(firstRevision.status).toBe(200);
+    const firstBefore = await firstRevision.json() as {
+      revisionNumber: number;
+      stem: string;
+      options: unknown[];
+    };
+    const correctedContent = {
+      ...validQuestionContent,
+      stem: "Which revised control most directly limits unauthorized access?",
+    };
+    const corrected = await call(manager, `${questionPath}/revisions`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainId,
+        topicId,
+        expectedLockVersion: 1,
+        content: correctedContent,
+      }),
+    });
+    expect(corrected.status).toBe(201);
+    assertPrivate(corrected);
+    const createdCorrection = (await corrected.json()) as {
+      revisionId: string;
+      revisionNumber: number;
+    };
+    expect(createdCorrection.revisionNumber).toBe(2);
+    const originalAfter = await call(manager, firstRevisionPath);
+    expect(originalAfter.status).toBe(200);
+    expect(await originalAfter.json()).toMatchObject({
+      revisionNumber: firstBefore.revisionNumber,
+      stem: firstBefore.stem,
+      options: firstBefore.options,
+    });
+    const revisionHistory = await call(manager, `${questionPath}/revisions?limit=2`);
+    expect(revisionHistory.status).toBe(200);
+    expect(
+      ((await revisionHistory.json()) as { items: Array<{ revisionNumber: number }> }).items,
+    ).toHaveLength(2);
+    const staleCorrection = await call(manager, `${questionPath}/revisions`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainId,
+        topicId,
+        expectedLockVersion: 1,
+        content: {
+          ...correctedContent,
+          stem: "Stale manager edit must not be stored.",
+        },
+      }),
+    });
+    expect(staleCorrection.status).toBe(409);
+    assertPrivate(staleCorrection);
+    const historyAfterStaleEdit = await call(manager, `${questionPath}/revisions?limit=10`);
+    expect(
+      ((await historyAfterStaleEdit.json()) as { items: Array<{ revisionNumber: number }> }).items,
+    ).toHaveLength(2);
+
+    const inaccessibleCertifications = await call(
+      unassigned,
+      `${apiRoot}/certifications`,
+    );
+    expect(inaccessibleCertifications.status).toBe(200);
+    assertPrivate(inaccessibleCertifications);
+    expect(
+      ((await inaccessibleCertifications.json()) as { items: Array<{ id: string }> }).items.map(
+        ({ id }) => id,
+      ),
+    ).not.toContain(manager.certificationId);
+    const unassignedQuestionList = await call(
+      unassigned,
+      `${apiRoot}/certifications/${manager.certificationId}/exam-versions/${versionId}/questions?domainId=${domainId}&topicId=${topicId}`,
+    );
+    expect(unassignedQuestionList.status).toBe(404);
+    assertPrivate(unassignedQuestionList);
+    const unassignedRevision = await call(unassigned, firstRevisionPath);
+    expect(unassignedRevision.status).toBe(404);
+    assertPrivate(unassignedRevision);
+    const unassignedCorrection = await call(unassigned, `${questionPath}/revisions`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainId,
+        topicId,
+        expectedLockVersion: 2,
+        content: correctedContent,
+      }),
+    });
+    expect(unassignedCorrection.status).toBe(404);
+    assertPrivate(unassignedCorrection);
+
+    const expiredNow = Date.now() - 10_000;
+    const expired = await createActor({
+      role: "manager",
+      now: expiredNow,
+      expiresAt: expiredNow + 1_000,
+    });
+    const expiredRead = await call(expired, `${apiRoot}/certifications`);
+    expect(expiredRead.status).toBe(401);
+    assertPrivate(expiredRead);
+
+    const csrfDenied = await call(
+      manager,
+      `${scopedVersionPath}/questions`,
+      {
+        method: "POST",
+        csrf: false,
+        body: JSON.stringify({
+          questionKey: `csrf-question-${crypto.randomUUID()}`,
+          domainId,
+          topicId,
+          content: validQuestionContent,
+        }),
+      },
+    );
+    expect(csrfDenied.status).toBe(400);
+    assertPrivate(csrfDenied);
+  });
+
   it("creates, reads, corrects, reviews, publishes, supersedes and retires scoped content", async () => {
     const actor = await createActor();
     const createVersion = await call(

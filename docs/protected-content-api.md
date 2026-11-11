@@ -1,9 +1,10 @@
 # Protected content API contract v1
 
-Status: Milestone 2E server contract. These routes expose the existing
-server-only content/import/export services; they do not implement provider
-login, application-session issuance, or admin UI integration. The synthetic
-prototype remains separate.
+Status: Milestone 2F contract. These routes expose the existing server-only
+content/import/export services. They do not implement provider login or
+application-session issuance. The real editor uses only the scoped reads and
+draft/revision mutations documented here; the synthetic prototype remains
+separate.
 
 ## Trust and request rules
 
@@ -57,6 +58,12 @@ define scope.
 | Method and path | Request | Success |
 |---|---|---|
 | `GET /csrf` | Authenticated session cookie; no body | `200 {"csrfToken":"v1.<signature>"}` |
+| `GET /certifications?cursor=...&limit=1..50` | No body; lists all certifications for Global Admin or assigned certifications for Manager only. | `200 {"items":[{"id":"...","slug":"...","displayName":"..."}],"nextCursor":null}` |
+| `GET /certifications/:certificationId/exam-versions?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with scoped version items `{id,versionKey,title}` and `nextCursor`. |
+| `GET /certifications/:certificationId/exam-versions/:examVersionId/domains?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with scoped domain items `{id,domainKey,title,order}` and `nextCursor`. |
+| `GET /certifications/:certificationId/exam-versions/:examVersionId/domains/:domainId/topics?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with scoped topic items `{id,topicKey,title,order}` and `nextCursor`. |
+| `GET /certifications/:certificationId/exam-versions/:examVersionId/questions?domainId=...&topicId=...&search=...&cursor=...&limit=1..50` | Required taxonomy IDs; optional bounded search (1–100 characters) over question key and stem. Returns only latest revisions in that taxonomy scope. | `200` with question items `{id,questionKey,currentRevisionId,revisionNumber,lockVersion,stem,workflowState}` and `nextCursor`. Stem is a 200-character preview. |
+| `GET /certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/revisions?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with exact revision summaries `{id,revisionNumber,workflowState,createdAt}` and `nextCursor`, newest first. |
 | `POST /certifications/:certificationId/exam-versions` | Strict JSON: `versionKey`, `title`, `syllabusReference`, optional nullable integer `effectiveFrom`, `effectiveUntil`. Server generates ID, operation ID and time. | `201 {"id":"..."}` |
 | `POST /certifications/:certificationId/exam-versions/:examVersionId/domains` | Strict JSON: `domainKey`, `title`, `meaning`, non-negative integer `order`. | `201 {"id":"..."}` |
 | `POST /certifications/:certificationId/exam-versions/:examVersionId/domains/:domainId/topics` | Strict JSON: `topicKey`, `title`, `meaning`, non-negative integer `order`. | `201 {"id":"..."}` |
@@ -71,9 +78,13 @@ define scope.
 | `POST /certifications/:certificationId/import-previews/:importId/confirm` | Strict JSON `{}`; the path certification must match the preview, which is bound to the same actor and certification. | `200` with the established idempotent confirmed draft IDs. |
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/export?cursor=...&limit=1..100` | No body; strict query allowlist. | `200 text/csv` with the export CSV and `X-Export-Next-Cursor` when another page exists. |
 
-General collection/search endpoints, cross-certification copy, lifecycle
-management, login/logout, role changes, bootstrap, test-session creation and
-all learner routes are out of scope. Operation IDs and timestamps are
+General unscoped collection/search endpoints, cross-certification copy,
+lifecycle management, login/logout, role changes, bootstrap, test-session
+creation and all learner routes are out of scope. The question search is
+restricted to the selected authorized taxonomy and bounded to 50 results per
+page. Every list query includes current session, MFA and certification-role/
+assignment predicates in the same primary D1 query; mutations repeat their
+existing service-level authorization. Operation IDs and timestamps are
 generated server-side. No route accepts client-supplied actor or audit
 identity.
 
@@ -129,5 +140,6 @@ content or audit records. Query strings are bounded and strictly parsed.
 The existing internal content, review, publication, import and export services
 remain authoritative for D1 guards and invariants. The HTTP layer adds
 identity resolution, request constraints, transport validation, CSRF and
-error/header policy only. The admin UI continues to use synthetic prototype
-state and must not call these endpoints in this slice.
+error/header policy. Only the separate `/admin/question-editor` route uses
+these APIs in Milestone 2F; the synthetic `/admin/*` preview continues to use
+synthetic state and must not treat its role selector as authority.
