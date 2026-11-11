@@ -1,5 +1,6 @@
 import {
   csrfResponseSchema,
+  learnerDashboardResponseSchema,
   practiceAnswerRequestSchema,
   practiceAttemptListResponseSchema,
   practiceAttemptResponseSchema,
@@ -19,6 +20,7 @@ const apiRoot = "/api/practice";
 export type PracticeScope = z.infer<
   typeof practiceScopeResponseSchema
 >["items"][number];
+export type LearnerDashboard = z.infer<typeof learnerDashboardResponseSchema>;
 export type PracticeAttempt = z.infer<
   typeof practiceAttemptResponseSchema
 >;
@@ -102,6 +104,10 @@ function safeId(value: string): string {
 
 export function listPracticeScopes() {
   return requestJson("/scopes", practiceScopeResponseSchema);
+}
+
+export function getLearnerDashboard() {
+  return requestJson("/dashboard", learnerDashboardResponseSchema);
 }
 
 export function listPracticeAttempts(

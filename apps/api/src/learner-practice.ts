@@ -5,6 +5,7 @@ import {
   practiceAttemptListResponseSchema,
   practiceAttemptResponseSchema,
   practiceScopeResponseSchema,
+  learnerDashboardResponseSchema,
   startPracticeRequestSchema,
   startTimedMockRequestSchema,
   timedMockAnswerRequestSchema,
@@ -29,6 +30,7 @@ import {
   startTimedMock,
   submitTimedMock,
 } from "./security/timed-mocks.ts";
+import { getLearnerDashboard } from "./security/learner-dashboard.ts";
 import {
   constantTimeEqual,
   createCsrfToken,
@@ -255,6 +257,17 @@ api.get("/scopes", async (context) => {
     Date.now(),
   );
   return context.json(practiceScopeResponseSchema.parse(result));
+});
+
+api.get("/dashboard", async (context) => {
+  const principal = context.get("principal");
+  const result = await getLearnerDashboard(
+    context.env.DB,
+    principal.userId,
+    principal.tokenDigest,
+    Date.now(),
+  );
+  return context.json(learnerDashboardResponseSchema.parse(result));
 });
 
 api.get("/attempts", async (context) => {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useBlocker } from "react-router";
+import { useBlocker, useLocation } from "react-router";
 import {
   getPracticeAttempt,
   LearnerPracticeApiError,
@@ -74,6 +74,7 @@ function SaveStatus({ state, message }: { state: SaveState; message: string }) {
 }
 
 export function LearnerPractice() {
+  const location = useLocation();
   const [scopes, setScopes] = useState<PracticeScope[]>([]);
   const [scopesReady, setScopesReady] = useState(false);
   const [selectedScopeKey, setSelectedScopeKey] = useState("");
@@ -121,10 +122,36 @@ export function LearnerPractice() {
     let active = true;
     setLoadError("");
     void listPracticeScopes()
-      .then((response) => {
+      .then(async (response) => {
         if (!active) return;
         setScopes(response.items);
         if (response.items[0]) setSelectedScopeKey(scopeKey(response.items[0]));
+        const linkedAttemptId = new URLSearchParams(location.search).get("attemptId");
+        if (!linkedAttemptId) return;
+        setIsLoadingAttempt(true);
+        try {
+          const linkedAttempt = await getPracticeAttempt(linkedAttemptId);
+          if (!active) return;
+          setAttempt(linkedAttempt);
+          activeAttemptId.current = linkedAttempt.attempt.id;
+          setSelectedOptionKey("");
+          setSaveState("saved");
+          setSaveMessage(
+            linkedAttempt.attempt.state === "completed"
+              ? "The selected completed result was loaded from the server."
+              : "The selected attempt was loaded with server-acknowledged progress.",
+          );
+          const linkedScope = response.items.find(
+            (scope) =>
+              scope.certificationId === linkedAttempt.attempt.certificationId &&
+              scope.examVersionId === linkedAttempt.attempt.examVersionId,
+          );
+          if (linkedScope) setSelectedScopeKey(scopeKey(linkedScope));
+        } catch (error) {
+          if (active) setLoadError(messageFor(error));
+        } finally {
+          if (active) setIsLoadingAttempt(false);
+        }
       })
       .catch((error: unknown) => {
         if (active) setLoadError(messageFor(error));
@@ -135,7 +162,7 @@ export function LearnerPractice() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [location.search]);
 
   useEffect(() => {
     const requestId = ++listRequest.current;

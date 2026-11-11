@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useBlocker } from "react-router";
+import { useBlocker, useLocation } from "react-router";
 import {
   getTimedMockAttempt,
   LearnerPracticeApiError,
@@ -75,6 +75,7 @@ function formatTime(seconds: number): string {
 }
 
 export function LearnerTimedMock() {
+  const location = useLocation();
   const [scopes, setScopes] = useState<PracticeScope[]>([]);
   const [scopeKeyValue, setScopeKeyValue] = useState("");
   const [attempts, setAttempts] = useState<TimedMockAttemptSummary[]>([]);
@@ -251,6 +252,31 @@ export function LearnerTimedMock() {
         const available = response.items.filter((item) => item.mockProfile);
         setScopes(available);
         if (available[0]) setScopeKeyValue(scopeKey(available[0]));
+        const linkedAttemptId = new URLSearchParams(location.search).get("attemptId");
+        if (!linkedAttemptId) return;
+        updateBusy(true);
+        setError("");
+        try {
+          const restored = await getTimedMockAttempt(linkedAttemptId);
+          if (!active) return;
+          installAttempt(restored);
+          saveAttemptId.current = restored.attempt.id;
+          const linkedScope = available.find(
+            (item) =>
+              item.certificationId === restored.attempt.certificationId &&
+              item.examVersionId === restored.attempt.examVersionId,
+          );
+          if (linkedScope) setScopeKeyValue(scopeKey(linkedScope));
+          setStatus(
+            restored.attempt.state === "completed"
+              ? "The selected server-finalized result was loaded."
+              : "The selected mock and its server deadline were loaded.",
+          );
+        } catch (cause) {
+          if (active) setError(errorMessage(cause));
+        } finally {
+          if (active) updateBusy(false);
+        }
       })
       .catch((cause: unknown) => {
         if (active) setError(errorMessage(cause));
@@ -261,7 +287,7 @@ export function LearnerTimedMock() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [location.search]);
 
   useEffect(() => () => stopDeadlineRecovery(), []);
 

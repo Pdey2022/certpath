@@ -18,7 +18,7 @@ export function meta(_: Route.MetaArgs) {
 }
 
 const links = [
-  { label: "Home preview", to: "/app" },
+  { label: "Dashboard", to: "/app/home" },
   { label: "Protected practice", to: "/app/practice/live" },
   { label: "Timed mock", to: "/app/mock/live" },
   { label: "Synthetic practice demo", to: "/app/practice" },

@@ -103,6 +103,27 @@ handoff](reviews/milestone-3b.md) and [timed-mock API contract](timed-mock-api.m
 Provider-backed sign-in, session issuance, grant-management screens,
 adaptive Pro exams, payments and deployment remain out of scope.
 
+### Milestone 3C — learner dashboard and progress history
+
+Add a protected `/app/home` dashboard backed by a same-origin Worker endpoint.
+Build its groups only from the learner's current active Standard grants and
+active server-validated session. Return bounded summaries for the learner's
+own untimed and timed attempts: up to 20 in-progress and 20 completed attempts
+per attempt type, and at most 200 authorized certification/version groups.
+Summaries may contain acknowledged answer counts, current position, recorded
+score and mock deadline, but never question text, choices, explanations or
+answer keys. Keep running mocks ahead of recent completed attempts and link
+each card to the existing protected attempt/result route by its exact attempt
+ID. The attempt endpoint remains authoritative for ownership, active exam
+access and timeout finalization.
+
+An expired or revoked Standard grant hides that exam's dashboard group and
+continues to block direct attempt/result reads; restore access before the
+learner can resume or review that exam. A timed-out mock remains resumable in
+the summary until an authorized read finalizes it. Do not pause or change the
+existing server deadline. Provider-backed sign-in, grant management, billing,
+adaptive Pro exams and deployment are separate work.
+
 Acceptance for the remaining learning-engine slices: acknowledged answers survive interruption; duplicate answer requests have one effect; server timing applies; content updates preserve attempt snapshots; correct keys are not disclosed prematurely. Save & exit cannot report success on failed persistence; stale writes cannot overwrite later progress; final attempts stay locked. Leaving non-pausable exams does not stop their timer. Reauthentication recovery and access expiry follow explicit policies.
 
 ## Milestone 4 — commerce and entitlement rules

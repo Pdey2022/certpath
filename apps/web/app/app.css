@@ -1477,6 +1477,80 @@ td {
   clip-path: inset(50%);
 }
 
+.learner-dashboard {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.learner-dashboard > .intro {
+  max-width: 62ch;
+}
+
+.learner-dashboard-groups {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.learner-dashboard-group {
+  min-width: 0;
+  display: grid;
+  gap: 1rem;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  border: 1px solid #dce1e8;
+  border-radius: 0.8rem;
+  background: #fff;
+}
+
+.learner-dashboard-group-heading h2,
+.learner-dashboard-group-heading p {
+  margin-block: 0.25rem;
+}
+
+.learner-dashboard-section {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.learner-dashboard-section h3 {
+  margin: 0;
+}
+
+.learner-dashboard-attempts {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.learner-dashboard-attempt {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.learner-dashboard-attempt h4,
+.learner-dashboard-attempt p {
+  margin-block: 0.2rem;
+}
+
+.learner-dashboard-attempt progress {
+  display: block;
+  width: min(100%, 22rem);
+  height: 0.7rem;
+  margin-top: 0.75rem;
+  accent-color: #006c70;
+}
+
+.learner-dashboard-open {
+  width: 100%;
+}
+
+.learner-dashboard-empty {
+  max-width: 52rem;
+}
+
 @media (min-width: 48rem) {
   .protected-editor-main {
     padding-block: 2rem 4rem;
@@ -1527,6 +1601,10 @@ td {
 
   .workspace-content {
     padding-inline: clamp(1.5rem, 4vw, 3rem);
+  }
+
+  .learner-dashboard-open {
+    width: auto;
   }
 }
 
