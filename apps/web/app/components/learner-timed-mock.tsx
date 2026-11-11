@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useBlocker, useLocation } from "react-router";
+import { useBlocker, useLocation, useNavigate } from "react-router";
 import {
   getTimedMockAttempt,
   LearnerPracticeApiError,
@@ -76,10 +76,12 @@ function formatTime(seconds: number): string {
 
 export function LearnerTimedMock() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [scopes, setScopes] = useState<PracticeScope[]>([]);
   const [scopeKeyValue, setScopeKeyValue] = useState("");
   const [attempts, setAttempts] = useState<TimedMockAttemptSummary[]>([]);
   const [attempt, setAttempt] = useState<TimedMockAttempt | null>(null);
+  const [linkedAttemptId, setLinkedAttemptId] = useState<string | null>(null);
   const [selectedOptionKey, setSelectedOptionKey] = useState("");
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
   const [loading, setLoading] = useState(true);
@@ -90,16 +92,23 @@ export function LearnerTimedMock() {
   const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [submitConfirmation, setSubmitConfirmation] = useState(false);
   const [leaveConfirmation, setLeaveConfirmation] = useState(false);
+  const [clearLinkedAttemptOnExit, setClearLinkedAttemptOnExit] = useState(false);
   const [unansweredNavigation, setUnansweredNavigation] = useState<number | null>(null);
   const submitRequestId = useRef<string | null>(null);
   const saveAttemptId = useRef<string | null>(null);
   const receivedAt = useRef(0);
   const requestSequence = useRef(0);
+  const linkedRequestSequence = useRef(0);
   const deadlineCheckAttempt = useRef<string | null>(null);
   const deadlineRecovery = useRef<DeadlineRecovery | null>(null);
 
   const scope =
     scopes.find((item) => scopeKey(item) === scopeKeyValue) ?? null;
+  const requestedAttemptId = new URLSearchParams(location.search).get("attemptId");
+  const linkIsCurrent =
+    linkedAttemptId === requestedAttemptId &&
+    (requestedAttemptId === null || attempt?.attempt.id === requestedAttemptId);
+  const linkIsPending = !linkIsCurrent && !error;
   const currentItem =
     attempt?.items.find((item) => item.position === attempt.attempt.currentPosition) ?? null;
   const acknowledgedKey = currentItem?.selectedOptionKey ?? "";
@@ -246,20 +255,33 @@ export function LearnerTimedMock() {
 
   useEffect(() => {
     let active = true;
+    const requestId = ++linkedRequestSequence.current;
+    const requestedAttemptId = new URLSearchParams(location.search).get("attemptId");
+    setLoading(true);
+    setAttempt(null);
+    setLinkedAttemptId(null);
+    saveAttemptId.current = null;
+    stopDeadlineRecovery();
+    deadlineCheckAttempt.current = null;
+    setSelectedOptionKey("");
+    setPendingOperation(null);
+    setError("");
+    setStatus("");
     void listPracticeScopes()
       .then(async (response) => {
         if (!active) return;
         const available = response.items.filter((item) => item.mockProfile);
         setScopes(available);
         if (available[0]) setScopeKeyValue(scopeKey(available[0]));
-        const linkedAttemptId = new URLSearchParams(location.search).get("attemptId");
-        if (!linkedAttemptId) return;
-        updateBusy(true);
-        setError("");
+        if (!requestedAttemptId) return;
         try {
-          const restored = await getTimedMockAttempt(linkedAttemptId);
-          if (!active) return;
+          const restored = await getTimedMockAttempt(requestedAttemptId);
+          if (
+            !active ||
+            linkedRequestSequence.current !== requestId
+          ) return;
           installAttempt(restored);
+          setLinkedAttemptId(requestedAttemptId);
           saveAttemptId.current = restored.attempt.id;
           const linkedScope = available.find(
             (item) =>
@@ -273,16 +295,26 @@ export function LearnerTimedMock() {
               : "The selected mock and its server deadline were loaded.",
           );
         } catch (cause) {
-          if (active) setError(errorMessage(cause));
-        } finally {
-          if (active) updateBusy(false);
+          if (active && linkedRequestSequence.current === requestId) {
+            setAttempt(null);
+            setLinkedAttemptId(null);
+            saveAttemptId.current = null;
+            setError(errorMessage(cause));
+          }
         }
       })
       .catch((cause: unknown) => {
-        if (active) setError(errorMessage(cause));
+        if (active && linkedRequestSequence.current === requestId) {
+          setAttempt(null);
+          setLinkedAttemptId(null);
+          saveAttemptId.current = null;
+          setError(errorMessage(cause));
+        }
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active && linkedRequestSequence.current === requestId) {
+          setLoading(false);
+        }
       });
     return () => {
       active = false;
@@ -308,7 +340,7 @@ export function LearnerTimedMock() {
   }, [scope?.certificationId, scope?.examVersionId]);
 
   useEffect(() => {
-    if (!attempt || completed) return;
+    if (!attempt || completed || !linkIsCurrent) return;
     const tick = () => {
       const elapsedSeconds = Math.floor((performance.now() - receivedAt.current) / 1000);
       const left = Math.max(
@@ -324,7 +356,13 @@ export function LearnerTimedMock() {
     };
     const timer = window.setInterval(tick, 1000);
     return () => window.clearInterval(timer);
-  }, [attempt?.attempt.id, attempt?.attempt.deadlineAt, attempt?.attempt.version, completed]);
+  }, [
+    attempt?.attempt.id,
+    attempt?.attempt.deadlineAt,
+    attempt?.attempt.version,
+    completed,
+    linkIsCurrent,
+  ]);
 
   useEffect(() => {
     if (!hasPendingWork || completed) return;
@@ -336,7 +374,18 @@ export function LearnerTimedMock() {
     return () => window.removeEventListener("beforeunload", warn);
   }, [hasPendingWork, completed]);
 
+  useEffect(() => {
+    if (!clearLinkedAttemptOnExit || hasPendingWork) return;
+    setClearLinkedAttemptOnExit(false);
+    if (requestedAttemptId) {
+      void navigate("/app/mock/live", { replace: true });
+    }
+  }, [clearLinkedAttemptOnExit, hasPendingWork, navigate, requestedAttemptId]);
+
   async function startMock() {
+    if (requestedAttemptId) {
+      await navigate("/app/mock/live", { replace: true });
+    }
     if (!scope || busy) return;
     stopDeadlineRecovery();
     deadlineCheckAttempt.current = null;
@@ -361,6 +410,12 @@ export function LearnerTimedMock() {
   }
 
   async function openMock(summary: TimedMockAttemptSummary) {
+    if (requestedAttemptId && requestedAttemptId !== summary.id) {
+      await navigate(
+        `/app/mock/live?attemptId=${encodeURIComponent(summary.id)}`,
+      );
+      return;
+    }
     stopDeadlineRecovery();
     deadlineCheckAttempt.current = null;
     const requestId = ++requestSequence.current;
@@ -370,6 +425,9 @@ export function LearnerTimedMock() {
       const restored = await getTimedMockAttempt(summary.id);
       if (requestSequence.current !== requestId) return;
       installAttempt(restored);
+      setLinkedAttemptId(
+        requestedAttemptId === summary.id ? summary.id : null,
+      );
       saveAttemptId.current = summary.id;
       setStatus(
         restored.attempt.state === "completed"
@@ -556,14 +614,16 @@ export function LearnerTimedMock() {
       );
     }
     setAttempt(null);
+    setLinkedAttemptId(null);
     saveAttemptId.current = null;
     setSelectedOptionKey("");
     setPendingOperation(null);
     setLeaveConfirmation(false);
     setStatus("Your acknowledged mock progress and deadline remain saved on the server.");
+    if (requestedAttemptId) setClearLinkedAttemptOnExit(true);
   }
 
-  if (loading) {
+  if (loading || linkIsPending) {
     return (
       <section className="card" aria-busy="true">
         <p className="eyebrow">CertPath practice</p>

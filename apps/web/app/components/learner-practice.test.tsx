@@ -142,6 +142,11 @@ function renderPractice() {
           null,
           createElement(LearnerPractice),
           createElement(Link, { to: "/app", "aria-label": "Navigate away" }, "Home"),
+          createElement(
+            Link,
+            { to: "/app/practice/live?attemptId=other-attempt", "aria-label": "Switch attempt" },
+            "Switch attempt",
+          ),
         ),
       },
       { path: "/app", element: createElement("p", null, "Away page") },
@@ -290,6 +295,19 @@ test("warns while a save is in flight and keeps the selected answer when staying
   );
   acknowledge(jsonResponse(attemptResponse({ answered: true, completed: true })));
   await screen.findByRole("heading", { name: "Practice summary" });
+});
+
+test("keeps the unsaved-answer warning when switching to another attempt link", async () => {
+  installFetch();
+  await startOneQuestionPractice();
+  fireEvent.click(screen.getByRole("radio", { name: /Synthetic answer/ }));
+  fireEvent.click(screen.getByRole("link", { name: "Switch attempt" }));
+  await screen.findByRole("heading", { name: "Leave this practice?" });
+  fireEvent.click(screen.getByRole("button", { name: "Stay on this page" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /Synthetic answer/ }) as HTMLInputElement).checked,
+    true,
+  );
 });
 
 test("explains missing session or active exam access without treating a demo role as authority", async () => {

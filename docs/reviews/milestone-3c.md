@@ -114,3 +114,23 @@ private/no-store and non-indexable.
    `apps/web/app/components/learner-practice.tsx` and
    `apps/web/app/components/learner-timed-mock.tsx`; the server remains
    authoritative for ownership, active access, and timeout finalization.
+
+## PR #13 attempt-link navigation correction
+
+Attempt links now clear or hide the previously displayed attempt as soon as a
+different `attemptId` is selected. Link-load responses are ignored if the
+requested ID has changed, and failed loads leave the error visible without
+retaining the previous question or result. The practice and timed-mock
+components keep the existing unsaved-answer navigation blocker; choosing to
+stay preserves the selection. Exiting a linked attempt returns to the
+unqualified route so a later start is not pinned to the old dashboard link.
+
+Dashboard navigation tests mount the actual dashboard, practice, and timed
+mock components in one router. They cover acknowledged practice progress,
+resuming a timed mock's acknowledged answer, loading the selected completed
+result, failed-link stale-content hiding, out-of-order practice/mock responses,
+and unsaved-answer warnings when switching attempt links. The actual
+`npm run verify` passed on Windows after this correction: API health and 69
+Worker/D1 tests passed across 9 test files, all 58 web tests passed, workspace
+type checks passed, and both production builds completed. `git diff --check`
+also passed.

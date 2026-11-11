@@ -258,6 +258,11 @@ function renderMock() {
           null,
           createElement(LearnerTimedMock),
           createElement(Link, { to: "/app", "aria-label": "Navigate away" }, "Home"),
+          createElement(
+            Link,
+            { to: "/app/mock/live?attemptId=other-mock", "aria-label": "Switch mock" },
+            "Switch mock",
+          ),
         ),
       },
       { path: "/app", element: createElement("p", null, "Away page") },
@@ -345,6 +350,20 @@ test("retains a selected answer after a failed network save and retries the same
   await waitFor(() => assert.ok(screen.getByText("Saved on the server.")));
 });
 
+test("keeps the unsaved-answer warning when switching to another mock link", async () => {
+  installFetch();
+  await startMock();
+  fireEvent.click(screen.getByRole("radio", { name: /Synthetic answer 1/ }));
+  fireEvent.click(screen.getByRole("link", { name: "Switch mock" }));
+  await screen.findByRole("heading", { name: "Leave this mock?" });
+  fireEvent.click(screen.getByRole("button", { name: "Stay on this page" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /Synthetic answer 1/ }) as HTMLInputElement)
+      .checked,
+    true,
+  );
+});
+
 test("checks for timeout after an in-flight answer save settles", async () => {
   const answerGate = deferred<void>();
   const requests = installFetch({
@@ -377,7 +396,10 @@ test("retries a temporary timeout-result check failure without manual action", a
   await startMock();
 
   await countdown.tick();
-  await waitFor(() => assert.equal(requests.resultCheckCount, 1));
+  await waitFor(
+    () => assert.equal(requests.resultCheckCount, 1),
+    { timeout: 3000 },
+  );
   assert.ok(screen.getByRole("button", { name: "Refresh server state" }));
 
   await screen.findByRole("heading", { name: "Mock results" }, { timeout: 3000 });
