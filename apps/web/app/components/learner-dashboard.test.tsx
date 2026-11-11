@@ -122,3 +122,51 @@ test("shows an empty state and a retryable failure", async () => {
   await screen.findByRole("alert");
   assert.ok(screen.getByRole("button", { name: "Retry loading progress" }));
 });
+
+test("signs out through the CSRF-protected session revocation endpoint", async () => {
+  const calls: Array<{ path: string; init?: RequestInit }> = [];
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input), browser.location.href).pathname;
+    calls.push({ path, init });
+    if (path === "/api/practice/dashboard") {
+      return jsonResponse({ groups: [] });
+    }
+    if (path === "/api/auth/cognito/csrf") {
+      return jsonResponse({ csrfToken: `v1.${"a".repeat(43)}` });
+    }
+    if (path === "/api/auth/cognito/logout") {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  };
+  const router = createMemoryRouter(
+    [
+      { path: "/app/home", element: createElement(LearnerDashboard) },
+      { path: "/sign-in", element: createElement("p", null, "Sign-in entry") },
+    ],
+    { initialEntries: ["/app/home"] },
+  );
+  render(createElement(RouterProvider, { router }));
+
+  await screen.findByRole("heading", { name: "No active exam access" });
+  fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  await screen.findByText("Sign-in entry");
+
+  assert.deepEqual(
+    calls.map((call) => call.path),
+    [
+      "/api/practice/dashboard",
+      "/api/auth/cognito/csrf",
+      "/api/auth/cognito/logout",
+    ],
+  );
+  assert.equal(router.state.location.pathname, "/sign-in");
+  const logoutCall = calls.find(
+    (call) => call.path === "/api/auth/cognito/logout",
+  );
+  assert.equal(logoutCall?.init?.method, "POST");
+  assert.equal(
+    new Headers(logoutCall?.init?.headers).get("X-CSRF-Token"),
+    `v1.${"a".repeat(43)}`,
+  );
+});

@@ -16,6 +16,7 @@ import {
 import type { z } from "zod";
 
 const apiRoot = "/api/practice";
+const learnerAuthApiRoot = "/api/auth/cognito";
 
 export type PracticeScope = z.infer<
   typeof practiceScopeResponseSchema
@@ -53,10 +54,11 @@ async function requestJson<T>(
   path: string,
   schema: { parse(value: unknown): T },
   init: RequestInit = {},
+  root = apiRoot,
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${apiRoot}${path}`, {
+    response = await fetch(`${root}${path}`, {
       ...init,
       credentials: "same-origin",
       cache: "no-store",
@@ -108,6 +110,29 @@ export function listPracticeScopes() {
 
 export function getLearnerDashboard() {
   return requestJson("/dashboard", learnerDashboardResponseSchema);
+}
+
+export async function signOutLearner(): Promise<void> {
+  const csrfToken = (
+    await requestJson("/csrf", csrfResponseSchema, {}, learnerAuthApiRoot)
+  ).csrfToken;
+  let response: Response;
+  try {
+    response = await fetch(`${learnerAuthApiRoot}/logout`, {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {
+        Accept: "application/json",
+        "X-CSRF-Token": csrfToken,
+      },
+    });
+  } catch {
+    throw new LearnerPracticeApiError(0, "network_error");
+  }
+  if (!response.ok) {
+    throw new LearnerPracticeApiError(response.status, "logout_failed");
+  }
 }
 
 export function listPracticeAttempts(

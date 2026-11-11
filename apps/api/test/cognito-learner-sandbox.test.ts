@@ -249,10 +249,14 @@ const application = createApi(provider.fetch);
 async function fetchApi(
   request: Request,
   clientIp = allowedClientIp,
+  overrides: { COGNITO_LEARNER_SANDBOX_ENABLED?: string } = {},
 ): Promise<Response> {
   const headers = new Headers(request.headers);
   headers.set("CF-Connecting-IP", clientIp);
-  return application.fetch(new Request(request, { headers }), bindings);
+  return application.fetch(
+    new Request(request, { headers }),
+    { ...bindings, ...overrides },
+  );
 }
 
 beforeAll(async () => {
@@ -373,6 +377,26 @@ describe("learner-only hosted email sign-in", () => {
     expect(pending.authorizationUrl.searchParams.has("audience")).toBe(false);
     expect(pending.cookie).toContain("certpath_learner_login_");
     expect(await loginTransactionCount()).toBeGreaterThan(0);
+  });
+
+  it("reports disabled sign-in through preflight and blocks login start", async () => {
+    const preflight = await fetchApi(
+      new Request(`${origin}/api/auth/cognito/preflight`),
+      allowedClientIp,
+      { COGNITO_LEARNER_SANDBOX_ENABLED: "false" },
+    );
+    expect(preflight.status).toBe(200);
+    await expect(preflight.json()).resolves.toEqual({ signInEnabled: false });
+
+    const start = await fetchApi(
+      new Request(`${origin}/api/auth/cognito/start`),
+      allowedClientIp,
+      { COGNITO_LEARNER_SANDBOX_ENABLED: "false" },
+    );
+    expect(start.status).toBe(503);
+    await expect(start.json()).resolves.toMatchObject({
+      error: { code: "auth_not_configured" },
+    });
   });
 
   it("rejects a staff login intent before writing a transaction", async () => {

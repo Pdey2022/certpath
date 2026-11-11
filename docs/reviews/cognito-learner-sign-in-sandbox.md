@@ -97,3 +97,28 @@ AWS pool.
    configuration, and email delivery are not part of this change.
 6. Review `db/migrations/0007_cognito_login_transactions.sql` and the API
    binding registration in `apps/api/src/index.ts`.
+
+## PR #16 follow-up: availability and sign-out controls
+
+The public navigation and `/sign-in` entry now check the Worker preflight
+endpoint before offering learner sign-in. The navigation shows a status rather
+than a link while checking, when sign-in is disabled, or when availability
+cannot be confirmed. The entry page offers the hosted-provider action only
+when the preflight response explicitly reports that sign-in is enabled. A
+disabled preflight also rejects login start.
+
+The learner dashboard now has a Sign out control. It obtains a CSRF token from
+the existing session endpoint, POSTs to the existing logout/revocation
+endpoint, and navigates to `/sign-in` only after a successful response.
+Failures remain on the dashboard with a retryable sign-out error.
+
+Focused local checks passed: the Worker/D1 auth tests passed 11/11; the focused
+dashboard and sign-in component tests passed 6/6; web and API typechecks passed.
+The disabled-state coverage verifies both that no link or hosted action is
+offered and that the Worker blocks login start. The sign-out coverage verifies
+the CSRF-protected POST and post-success navigation. No cloud resources,
+provider endpoints, or email delivery were used.
+
+Final follow-up verification: `npm run verify` passed with API Worker/D1 tests
+83/83 across 11 files, the API health test 1/1, web tests 62/62, workspace
+typechecks, and client and server production builds.
