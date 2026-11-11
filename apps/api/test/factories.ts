@@ -151,3 +151,31 @@ export async function assignTestCertification(
     )
     .run();
 }
+
+export async function grantTestLearnerAccess(
+  database: SecurityDatabase,
+  userId: string,
+  certificationId: string,
+  options: { startsAt?: number; expiresAt?: number; revokedAt?: number | null } = {},
+): Promise<string> {
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  await database
+    .prepare(
+      `INSERT INTO learner_access_grants (
+         id, user_id, certification_id, feature, starts_at, expires_at,
+         revoked_at, created_at
+       ) VALUES (?, ?, ?, 'standard', ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      userId,
+      certificationId,
+      options.startsAt ?? now - 60_000,
+      options.expiresAt ?? now + 60 * 60 * 1000,
+      options.revokedAt ?? null,
+      now,
+    )
+    .run();
+  return id;
+}

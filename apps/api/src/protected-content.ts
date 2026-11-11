@@ -66,6 +66,12 @@ import {
   authorizeStaffSession,
   findActiveApplicationSession,
 } from "./security/repository.ts";
+import {
+  constantTimeEqual,
+  createCsrfToken,
+  sessionCookieToken,
+  sessionDigest,
+} from "./security/http-session.ts";
 
 type ApiBindings = {
   DB: SecurityDatabase;
@@ -97,7 +103,6 @@ type ProtectedContext = Context<{
   Variables: ProtectedVariables;
 }>;
 
-const SESSION_COOKIE = "certpath_session";
 const SMALL_JSON_BODY_MAX_BYTES = 24 * 1024;
 const QUESTION_JSON_BODY_MAX_BYTES = 256 * 1024;
 const CSV_BODY_MAX_BYTES = QUESTION_IMPORT_MAX_BYTES;
@@ -178,82 +183,12 @@ function readSecurityConfiguration(bindings: ApiBindings): SecurityConfiguration
   };
 }
 
-function decodeBase64Url(value: string): Uint8Array | null {
-  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return null;
-  try {
-    const base64 = value.replaceAll("-", "+").replaceAll("_", "/") + "=";
-    const binary = atob(base64);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    if (bytes.byteLength !== 32) return null;
-    const canonical = btoa(String.fromCharCode(...bytes))
-      .replaceAll("+", "-")
-      .replaceAll("/", "_")
-      .replace(/=+$/, "");
-    return canonical === value ? bytes : null;
-  } catch {
-    return null;
-  }
-}
-
-function sessionCookieToken(cookieHeader: string | null): string | null {
-  if (!cookieHeader) return null;
-  const matches = cookieHeader
-    .split(";")
-    .map((part) => part.trim())
-    .filter((part) => part.startsWith(`${SESSION_COOKIE}=`));
-  if (matches.length !== 1) return null;
-  const value = matches[0].slice(SESSION_COOKIE.length + 1);
-  return decodeBase64Url(value) ? value : null;
-}
-
-async function sessionDigest(rawToken: string): Promise<string> {
-  const bytes = decodeBase64Url(rawToken);
-  if (!bytes) throw new Error("Invalid opaque session token");
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", arrayBuffer(bytes)),
-  );
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function base64Url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-}
-
-function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-  return buffer;
-}
-
 async function csrfToken(principal: RequestPrincipal): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    arrayBuffer(principal.configuration.csrfSecret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
+  return createCsrfToken(
+    principal.configuration.origin,
+    principal.tokenDigest,
+    principal.configuration.csrfSecret,
   );
-  const payload = `certpath-csrf-v1\n${principal.configuration.origin}\n${principal.tokenDigest}`;
-  const signature = new Uint8Array(
-    await crypto.subtle.sign(
-      "HMAC",
-      key,
-      arrayBuffer(new TextEncoder().encode(payload)),
-    ),
-  );
-  return `v1.${base64Url(signature)}`;
-}
-
-function constantTimeEqual(left: string, right: string): boolean {
-  let difference = left.length ^ right.length;
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    difference |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
-  }
-  return difference === 0;
 }
 
 async function mutationProtection(

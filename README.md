@@ -1,11 +1,11 @@
 # CertPath foundation
 
-This repository contains the CertPath Milestone 1 interactive prototype. The
-public site is server-rendered with React Router on Cloudflare Workers. A Hono
-API is mounted at the same-origin `/api` path in that Worker; D1 is bound
-locally for future server-side data access. Learner and admin experiences use
-synthetic demo data only. There is no authentication, payment processing,
-production persistence, or production authorization.
+This repository contains the CertPath prototype and the first protected
+untimed learner-practice slice. The public site is server-rendered with React
+Router on Cloudflare Workers. A Hono API is mounted at the same-origin `/api`
+path in that Worker; D1 holds server-side attempt snapshots and answers.
+Provider-backed sign-in, live session issuance, access-grant issuance,
+payments, and production provisioning are not implemented.
 
 ## Requirements
 
@@ -24,10 +24,13 @@ npm run dev
 
 The local Worker is available at the URL printed by Wrangler (normally
 `http://localhost:5173`). Public routes return HTML from the Worker without
-requiring browser JavaScript. The learner and admin routes are non-indexable
-interactive previews, not authenticated accounts or authorized staff views.
-Practice progress is saved only in the current browser and is labelled as
-demo-only; it is not sent to the server or synchronized between devices.
+requiring browser JavaScript. The `/app` workspace and `/app/practice` remain
+synthetic, browser-only previews and do not authorize any action.
+`/app/practice/live` is a separate protected route; it requires an opaque
+application-session cookie and a current D1 Standard grant. This repository
+does not provide an endpoint to issue sessions or grants. API/D1 tests use
+isolated synthetic fixtures only. Protected practice content is never written
+to browser storage.
 
 ## Verification
 
@@ -37,7 +40,8 @@ npm run verify
 
 This runs workspace type checks, tests, and a production build. To inspect the
 running HTML and API manually, start `npm run dev` and request `/`, `/exams`,
-`/robots.txt`, `/sitemap.xml`, `/app`, `/admin`, and `/api/health`. Private
+`/robots.txt`, `/sitemap.xml`, `/app`, `/app/practice/live`, `/admin`, and
+`/api/health`. Private
 previews carry `noindex` and `private, no-store`; local robots configuration
 disallows crawling. See [Milestone 1 review](docs/reviews/milestone-1.md) for
 prototype limitations, screenshots, verification, and inspection steps.
