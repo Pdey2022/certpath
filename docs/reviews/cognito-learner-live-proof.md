@@ -12,8 +12,9 @@ The required $0 out-of-pocket gate could not be established: the AWS CLI is
 not installed and no AWS identity could be queried. Wrangler is authenticated
 to the Cloudflare account named `Certpath`, but its D1 database-list request
 failed with Cloudflare authentication error `10000`; the current Workers plan
-and D1 usage could not be verified. No plan upgrade or credential refresh was
-attempted.
+and D1 usage could not be verified. After the owner reported refreshing
+Wrangler authorization, the read-only D1 request was retried and failed with
+the same error. No plan upgrade was attempted.
 
 ## Check results
 
@@ -25,7 +26,7 @@ attempted.
 | AWS Free plan status and available credit balance | Untested | Requires authenticated access to the account's billing/Free Tier view |
 | Account-specific Cognito email, Cognito MAU, and signup-trigger cost coverage | Untested | Account eligibility, credit balance, remaining allowances, and usage are unknown |
 | Published AWS pricing review | Passed | AWS publishes up to $200 in credits for eligible new accounts, with a six-month Free plan; Cognito verification/recovery email uses SES and is priced separately. Current SES Essentials pricing is $0.16 per 1,000 outbound emails. Lambda's published free tier includes 1 million requests and 400,000 GB-seconds monthly. These public allowances do not prove this account has available coverage. |
-| Wrangler authentication to the Certpath Cloudflare account | Passed | `wrangler whoami` succeeded with account-read, Workers Scripts write, and D1 write scopes |
+| Wrangler authentication to the Certpath Cloudflare account | Passed | `wrangler whoami` succeeded with account-read, Workers Scripts write, and D1 write scopes; the same scopes remained after the reported refresh |
 | Cloudflare Workers Free plan and current usage | Untested | Subscription and usage information were not available from the current authenticated session |
 | Cloudflare D1 database inventory and remaining capacity | Failed | `wrangler d1 list` returned Authentication error `10000`; capacity remains unverified and no D1 database was created |
 | Cloudflare Workers published Free limits review | Passed | Current docs list 100,000 requests/day and 10 ms CPU per invocation on Workers Free. Account plan and usage remain unknown. |
@@ -35,7 +36,8 @@ attempted.
 | Registration, pre-verification denial, verification email, sign-in, and password reset | Untested | No live provider interaction or email delivery occurred |
 | Standard grant, second-exam isolation, and live dashboard sign-out | Untested | No live learner session or grant was created |
 | Disable learner sign-in after the test | Untested | No live Worker was changed; the state of any existing deployment is unknown |
-| Billing evidence and reporting delay | Untested | No account billing/credit report was accessible; no billing reporting delay was measured |
+| Account billing evidence and reporting delay | Untested | No account billing/credit report was accessible; no account-specific reporting delay was measured |
+| AWS Cost Explorer published reporting delay | Passed | AWS says current-month data is available in about 24 hours and refreshes at least every 24 hours, but upstream data may take longer |
 | Charges from this test attempt | Passed | No provisioning, deployment, or email operations were performed; account-wide charges remain unverified |
 
 ## Public pricing sources reviewed
@@ -45,6 +47,7 @@ attempted.
 - [Cognito email settings](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-email.html) — default email delivery and SES-backed email configuration.
 - [Amazon SES pricing](https://aws.amazon.com/ses/pricing/) — current Essentials outbound email rate and Free Tier credit notes.
 - [AWS Lambda pricing](https://aws.amazon.com/lambda/pricing/) — request and duration allowances.
+- [AWS Cost Explorer data](https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html) — console/API access and published refresh delay; the console UI is free, while Cost Explorer API calls are $0.01 each.
 - [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) — Workers Free request and CPU limits.
 - [Cloudflare D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) — D1 Free limits, database count, and overage prices.
 
@@ -62,11 +65,12 @@ remaining daily/storage capacity.
    recent and month-to-date costs, Free Tier usage, Cognito/SES charges, and
    Lambda usage. The account owner must verify the billing evidence and
    explicitly confirm the $0 cap before any resource or email operation.
-3. Refresh the existing Wrangler authorization through the approved Cloudflare
+3. Resolve the Wrangler authorization failure through the approved Cloudflare
    sign-in flow with read access to D1 inventory/analytics and account
-   subscription/billing details. Current `wrangler d1 list` fails with
-   authentication error `10000`; do not broaden access beyond the required
-   read and sandbox provisioning scopes.
+   subscription/billing details. The owner reported a refresh; `wrangler
+   whoami` still showed the same scopes and `wrangler d1 list` still failed
+   with authentication error `10000`. Do not broaden access beyond the
+   required read and sandbox provisioning scopes.
 4. Re-run the cost gate and verify a usable learner inbox before creating the
    isolated pool, Worker, or D1 database. If any email or service could incur
    an uncovered charge, stop and request owner approval rather than upgrade.
