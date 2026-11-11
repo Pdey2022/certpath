@@ -76,7 +76,7 @@ deployment, or real question content.
 | `Set-Location apps\web; npx tsx --test app/routes/admin-question-editor.test.tsx` | Passed: 2 component tests for the neutral/missing-session shell and stale-edit retention/retry. |
 | `npm run verify` | Passed: API health test; 55 API tests across 8 files; 15 web tests; typechecks; client and SSR builds. |
 | Browser responsive check | Passed on the rendered neutral editor shell at 390x844 and 1440x900; document width matched viewport at both sizes (no horizontal overflow). |
-| Ubuntu GitHub Actions | Pending on the final PR head. |
+| Ubuntu GitHub Actions | Passed on implementation commit `d792d1916257f4bfc4425f8967153f4ae5defd21`: [verify run](https://github.com/Pdey2022/certpath/actions/runs/43015938117). |
 
 The Worker/D1 integration test uses isolated test factories to establish an
 assigned Manager session, creates taxonomy and a question through HTTP,
