@@ -41,8 +41,17 @@ deployment, or real question content.
   a sealed revision. The editor never writes browser-supplied authority.
 - A stale correction leaves the form values intact. The UI offers an explicit
   latest-revision load and displays its stem; only after the user chooses
-  “Use latest revision as base and keep my edits” does it update the expected
+  “Use latest revision as base and keep my edits” does it pin the save to the
+  exact revision number that was reviewed. The loaded revision number remains
+  distinct from the question's current lock version returned by D1. If they
+  differ, saving is disabled and the form remains intact until explicit latest
+  revision recovery. A further concurrent edit after recovery still conflicts
+  because the correction sends the reviewed revision number as its expected
   lock version. Validation and network errors likewise do not clear fields.
+- Taxonomy, question-search, question-detail, revision-list and exact-revision
+  requests use request identities and current-scope checks. A form-generation
+  guard also prevents late mutation/detail responses from overwriting a
+  different question or taxonomy selected while a save is in flight.
 - The exact synthetic admin preview stays unchanged and remains separately
   labelled. Test identities, sessions and synthetic content exist only in the
   isolated Worker/D1 test harness. No provider, production session, secret,
@@ -73,9 +82,9 @@ deployment, or real question content.
 | Command | Result |
 |---|---|
 | `Set-Location apps\api; npx vitest run --config vitest.config.ts test/protected-content.test.ts` | Passed: 13 protected HTTP tests, including the Worker/D1 editor workflow, assignment isolation, paging, session expiry, stale edit and CSRF rejection. |
-| `Set-Location apps\web; npx tsx --test app/routes/admin-question-editor.test.tsx` | Passed: 2 component tests for the neutral/missing-session shell and stale-edit retention/retry. |
-| `npm run verify` | Passed: API health test; 55 API tests across 8 files; 15 web tests; typechecks; client and SSR builds. |
-| Browser responsive check | Passed on the rendered neutral editor shell at 390x844 and 1440x900; document width matched viewport at both sizes (no horizontal overflow). |
+| `Set-Location apps\web; npx tsx --test app/routes/admin-question-editor.test.tsx` | Passed: 7 component tests, including revision/list races, out-of-order question/search/revision results, save-while-switching, stale correction recovery and preserving unsaved edits after a subsequent conflict. |
+| `npm run verify` | Passed: API health test; 55 API tests across 8 files; 20 web tests; typechecks; client and SSR builds. |
+| Authenticated browser responsive check | Passed using an assigned synthetic Manager session and synthetic content in a fresh isolated local D1 Worker. Loaded the actual editor form at 390x844 and 1440x900; document widths were 375 and 1425 respectively, with no horizontal overflow. The desktop answer editor used a two-column option layout; mobile collapsed to one column. |
 | Ubuntu GitHub Actions | Passed on implementation commit `d792d1916257f4bfc4425f8967153f4ae5defd21`: [verify run](https://github.com/Pdey2022/certpath/actions/runs/43015938117). |
 
 The Worker/D1 integration test uses isolated test factories to establish an

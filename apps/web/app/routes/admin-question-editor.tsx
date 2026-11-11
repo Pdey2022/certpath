@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Route } from "./+types/admin-question-editor";
 import {
   createCorrection,
@@ -124,11 +124,27 @@ export default function AdminQuestionEditor() {
   const [content, setContent] = useState<QuestionContent>(emptyContent);
   const [selectedRevision, setSelectedRevision] = useState<QuestionRevision | null>(null);
   const [latestRevision, setLatestRevision] = useState<QuestionRevision | null>(null);
-  const [baseLockVersion, setBaseLockVersion] = useState<number | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
+  const scopeRef = useRef({
+    certificationId: "",
+    examVersionId: "",
+    domainId: "",
+    topicId: "",
+  });
+  const selectedQuestionRef = useRef("");
+  const formGeneration = useRef(0);
+  const requests = useRef({
+    versions: 0,
+    domains: 0,
+    topics: 0,
+    questions: 0,
+    question: 0,
+    revisions: 0,
+    revision: 0,
+  });
 
   const selectedQuestion = useMemo(
     () => questions.items.find((question) => question.id === questionId) ?? null,
@@ -137,8 +153,60 @@ export default function AdminQuestionEditor() {
   const canEditSavedDraft =
     selectedQuestion !== null &&
     selectedRevision !== null &&
+    selectedRevision.revisionId === revisionId &&
     selectedRevision.revisionId === selectedQuestion.currentRevisionId &&
+    selectedRevision.revisionNumber === selectedQuestion.lockVersion &&
     ["draft", "rejected"].includes(selectedRevision.workflowState);
+  const displayedRevisionNeedsRecovery =
+    selectedRevision !== null &&
+    selectedQuestion !== null &&
+    (selectedRevision.revisionNumber !== selectedQuestion.lockVersion ||
+      selectedRevision.revisionId !== selectedQuestion.currentRevisionId);
+  const revisionLoading =
+    questionId !== "" && selectedRevision?.revisionId !== revisionId;
+
+  function invalidateForm(): number {
+    formGeneration.current += 1;
+    selectedQuestionRef.current = "";
+    requests.current.questions += 1;
+    requests.current.question += 1;
+    requests.current.revisions += 1;
+    requests.current.revision += 1;
+    setSaving(false);
+    return formGeneration.current;
+  }
+
+  function scopeMatches(scope: typeof scopeRef.current): boolean {
+    return (
+      scopeRef.current.certificationId === scope.certificationId &&
+      scopeRef.current.examVersionId === scope.examVersionId &&
+      scopeRef.current.domainId === scope.domainId &&
+      scopeRef.current.topicId === scope.topicId
+    );
+  }
+
+  function formMatches(
+    generation: number,
+    scope: typeof scopeRef.current,
+    expectedQuestionId: string,
+  ): boolean {
+    return (
+      formGeneration.current === generation &&
+      scopeMatches(scope) &&
+      selectedQuestionRef.current === expectedQuestionId
+    );
+  }
+
+  function updateQuestionLock(questionId: string, lockVersion: number): void {
+    setQuestions((current) => ({
+      ...current,
+      items: current.items.map((question) =>
+        question.id === questionId && lockVersion > question.lockVersion
+          ? { ...question, lockVersion }
+          : question,
+      ),
+    }));
+  }
 
   useEffect(() => {
     let active = true;
@@ -166,19 +234,45 @@ export default function AdminQuestionEditor() {
   }, []);
 
   async function loadVersions(id: string, cursor?: string) {
-    const page = await listExamVersions(id, cursor);
-    setVersions((current) => ({
-      items: cursor ? [...current.items, ...page.items] : page.items,
-      nextCursor: page.nextCursor,
-    }));
+    const request = ++requests.current.versions;
+    try {
+      const page = await listExamVersions(id, cursor);
+      if (
+        request !== requests.current.versions ||
+        scopeRef.current.certificationId !== id
+      ) return;
+      setVersions((current) => ({
+        items: cursor ? [...current.items, ...page.items] : page.items,
+        nextCursor: page.nextCursor,
+      }));
+    } catch (cause) {
+      if (
+        request === requests.current.versions &&
+        scopeRef.current.certificationId === id
+      ) setError(errorMessage(cause));
+    }
   }
 
   async function loadDomains(certId: string, versionId: string, cursor?: string) {
-    const page = await listDomains(certId, versionId, cursor);
-    setDomains((current) => ({
-      items: cursor ? [...current.items, ...page.items] : page.items,
-      nextCursor: page.nextCursor,
-    }));
+    const request = ++requests.current.domains;
+    try {
+      const page = await listDomains(certId, versionId, cursor);
+      if (
+        request !== requests.current.domains ||
+        scopeRef.current.certificationId !== certId ||
+        scopeRef.current.examVersionId !== versionId
+      ) return;
+      setDomains((current) => ({
+        items: cursor ? [...current.items, ...page.items] : page.items,
+        nextCursor: page.nextCursor,
+      }));
+    } catch (cause) {
+      if (
+        request === requests.current.domains &&
+        scopeRef.current.certificationId === certId &&
+        scopeRef.current.examVersionId === versionId
+      ) setError(errorMessage(cause));
+    }
   }
 
   async function loadTopics(
@@ -187,11 +281,27 @@ export default function AdminQuestionEditor() {
     selectedDomainId: string,
     cursor?: string,
   ) {
-    const page = await listTopics(certId, versionId, selectedDomainId, cursor);
-    setTopics((current) => ({
-      items: cursor ? [...current.items, ...page.items] : page.items,
-      nextCursor: page.nextCursor,
-    }));
+    const request = ++requests.current.topics;
+    try {
+      const page = await listTopics(certId, versionId, selectedDomainId, cursor);
+      if (
+        request !== requests.current.topics ||
+        scopeRef.current.certificationId !== certId ||
+        scopeRef.current.examVersionId !== versionId ||
+        scopeRef.current.domainId !== selectedDomainId
+      ) return;
+      setTopics((current) => ({
+        items: cursor ? [...current.items, ...page.items] : page.items,
+        nextCursor: page.nextCursor,
+      }));
+    } catch (cause) {
+      if (
+        request === requests.current.topics &&
+        scopeRef.current.certificationId === certId &&
+        scopeRef.current.examVersionId === versionId &&
+        scopeRef.current.domainId === selectedDomainId
+      ) setError(errorMessage(cause));
+    }
   }
 
   async function loadQuestions(
@@ -199,28 +309,62 @@ export default function AdminQuestionEditor() {
     search = questionSearch,
     selectedTopicId = topicId,
   ) {
-    const page = await listQuestions({
-      certificationId,
-      examVersionId,
-      domainId,
-      topicId: selectedTopicId,
-      ...(search ? { search } : {}),
-      ...(cursor ? { cursor } : {}),
-    });
-    setQuestions((current) => ({
-      items: cursor ? [...current.items, ...page.items] : page.items,
-      nextCursor: page.nextCursor,
-    }));
+    const scope = { ...scopeRef.current };
+    const request = ++requests.current.questions;
+    if (
+      scope.certificationId !== certificationId ||
+      scope.examVersionId !== examVersionId ||
+      scope.domainId !== domainId ||
+      scope.topicId !== selectedTopicId
+    ) return;
+    try {
+      const page = await listQuestions({
+        ...scope,
+        ...(search ? { search } : {}),
+        ...(cursor ? { cursor } : {}),
+      });
+      if (request !== requests.current.questions || !scopeMatches(scope)) return;
+      setQuestions((current) => {
+        const pageItems = cursor ? [...current.items, ...page.items] : page.items;
+        const items = pageItems.map((item) => {
+          const previous = current.items.find((question) => question.id === item.id);
+          return previous && previous.lockVersion > item.lockVersion
+            ? {
+                ...item,
+                currentRevisionId: previous.currentRevisionId,
+                revisionNumber: previous.revisionNumber,
+                lockVersion: previous.lockVersion,
+                workflowState: previous.workflowState,
+              }
+            : item;
+        });
+        const activeQuestion = current.items.find(
+          (question) => question.id === selectedQuestionRef.current,
+        );
+        if (activeQuestion && !items.some((item) => item.id === activeQuestion.id)) {
+          items.unshift(activeQuestion);
+        }
+        return { items, nextCursor: page.nextCursor };
+      });
+    } catch (cause) {
+      if (request === requests.current.questions && scopeMatches(scope)) {
+        setError(errorMessage(cause));
+      }
+    }
   }
 
   async function chooseQuestion(question: Question) {
+    const scope = { ...scopeRef.current };
+    const generation = invalidateForm();
+    const request = ++requests.current.question;
+    selectedQuestionRef.current = question.id;
     setQuestionId(question.id);
     setRevisionId(question.currentRevisionId);
     setSelectedRevision(null);
     setLatestRevision(null);
     setRevisions(emptyPage());
     setQuestionKey(question.questionKey);
-    setBaseLockVersion(question.lockVersion);
+    setContent(emptyContent());
     setValidationErrors([]);
     setError("");
     setStatus("");
@@ -234,6 +378,10 @@ export default function AdminQuestionEditor() {
           question.currentRevisionId,
         ),
       ]);
+      if (
+        request !== requests.current.question ||
+        !formMatches(generation, scope, question.id)
+      ) return;
       setRevisions({
         ...page,
         items: page.items.some((revision) => revision.id === question.currentRevisionId)
@@ -250,13 +398,36 @@ export default function AdminQuestionEditor() {
       });
       setSelectedRevision(detail);
       setContent(revisionContent(detail));
-      setStatus(`Loaded revision ${detail.revisionNumber} (${detail.workflowState}).`);
+      updateQuestionLock(question.id, detail.lockVersion);
+      const currentLockVersion = Math.max(question.lockVersion, detail.lockVersion);
+      const detailIsCurrent =
+        detail.revisionNumber === currentLockVersion &&
+        detail.revisionId === question.currentRevisionId;
+      setStatus(
+        detailIsCurrent
+          ? `Loaded revision ${detail.revisionNumber} (${detail.workflowState}).`
+          : `Revision ${detail.revisionNumber} is not the current question version (${currentLockVersion}). Review the latest revision before saving.`,
+      );
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (
+        request === requests.current.question &&
+        formMatches(generation, scope, question.id)
+      ) setError(errorMessage(cause));
     }
   }
 
   async function selectCertification(id: string) {
+    const scope = {
+      certificationId: id,
+      examVersionId: "",
+      domainId: "",
+      topicId: "",
+    };
+    scopeRef.current = scope;
+    invalidateForm();
+    requests.current.versions += 1;
+    requests.current.domains += 1;
+    requests.current.topics += 1;
     setCertificationId(id);
     setExamVersionId("");
     setDomainId("");
@@ -269,20 +440,26 @@ export default function AdminQuestionEditor() {
     setQuestions(emptyPage());
     setRevisions(emptyPage());
     setSelectedRevision(null);
-    setBaseLockVersion(null);
+    setLatestRevision(null);
     setError("");
     setStatus("");
     setQuestionKey("");
     setContent(emptyContent());
+    setValidationErrors([]);
     if (!id) return;
-    try {
-      await loadVersions(id);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
+    await loadVersions(id);
   }
 
   async function selectVersion(id: string) {
+    scopeRef.current = {
+      ...scopeRef.current,
+      examVersionId: id,
+      domainId: "",
+      topicId: "",
+    };
+    invalidateForm();
+    requests.current.domains += 1;
+    requests.current.topics += 1;
     setExamVersionId(id);
     setDomainId("");
     setTopicId("");
@@ -293,18 +470,20 @@ export default function AdminQuestionEditor() {
     setQuestions(emptyPage());
     setRevisions(emptyPage());
     setSelectedRevision(null);
-    setBaseLockVersion(null);
+    setLatestRevision(null);
     setError("");
     setStatus("");
+    setQuestionKey("");
+    setContent(emptyContent());
+    setValidationErrors([]);
     if (!id || !certificationId) return;
-    try {
-      await loadDomains(certificationId, id);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
+    await loadDomains(certificationId, id);
   }
 
   async function selectDomain(id: string) {
+    scopeRef.current = { ...scopeRef.current, domainId: id, topicId: "" };
+    invalidateForm();
+    requests.current.topics += 1;
     setDomainId(id);
     setTopicId("");
     setQuestionId("");
@@ -313,42 +492,42 @@ export default function AdminQuestionEditor() {
     setQuestions(emptyPage());
     setRevisions(emptyPage());
     setSelectedRevision(null);
-    setBaseLockVersion(null);
+    setLatestRevision(null);
     setError("");
     setStatus("");
+    setQuestionKey("");
+    setContent(emptyContent());
+    setValidationErrors([]);
     if (!id || !certificationId || !examVersionId) return;
-    try {
-      await loadTopics(certificationId, examVersionId, id);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
+    await loadTopics(certificationId, examVersionId, id);
   }
 
   async function selectTopic(id: string) {
+    scopeRef.current = { ...scopeRef.current, topicId: id };
+    invalidateForm();
     setTopicId(id);
     setQuestionId("");
     setRevisionId("");
     setQuestions(emptyPage());
     setRevisions(emptyPage());
     setSelectedRevision(null);
-    setBaseLockVersion(null);
+    setLatestRevision(null);
     setError("");
     setStatus("");
+    setQuestionKey("");
+    setContent(emptyContent());
+    setValidationErrors([]);
     if (!id) return;
-    try {
-      await loadQuestions(undefined, questionSearch, id);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
+    await loadQuestions(undefined, questionSearch, id);
   }
 
   function startNewQuestion() {
+    invalidateForm();
     setQuestionId("");
     setRevisionId("");
     setRevisions(emptyPage());
     setSelectedRevision(null);
     setLatestRevision(null);
-    setBaseLockVersion(null);
     setQuestionKey("");
     setContent(emptyContent());
     setValidationErrors([]);
@@ -398,6 +577,9 @@ export default function AdminQuestionEditor() {
 
   async function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const scope = { ...scopeRef.current };
+    const generation = formGeneration.current;
+    const expectedQuestionId = questionId;
     const errors = validateDraft();
     if (!questionId && !questionKey.trim()) errors.push("Question key is required for a new question.");
     setValidationErrors(errors);
@@ -410,29 +592,51 @@ export default function AdminQuestionEditor() {
       setError("Select an authorised certification, exam version, domain, and topic first.");
       return;
     }
+    if (questionId && !canEditSavedDraft) {
+      setError(
+        "The displayed revision is not the current editable draft. Review the latest revision before saving.",
+      );
+      return;
+    }
     setSaving(true);
     setError("");
     setStatus("");
     try {
-      if (questionId && baseLockVersion !== null) {
+      if (questionId && selectedRevision) {
         const result = await createCorrection(certificationId, examVersionId, questionId, {
           domainId,
           topicId,
-          expectedLockVersion: baseLockVersion,
+          expectedLockVersion: selectedRevision.revisionNumber,
           content,
         });
+        if (!formMatches(generation, scope, expectedQuestionId)) return;
         const detail = await getQuestionRevision(
           certificationId,
           examVersionId,
           questionId,
           result.revisionId,
         );
+        if (!formMatches(generation, scope, expectedQuestionId)) return;
         setSelectedRevision(detail);
         setRevisionId(detail.revisionId);
-        setBaseLockVersion(detail.lockVersion);
         setLatestRevision(null);
         setContent(revisionContent(detail));
+        updateQuestionLock(questionId, detail.lockVersion);
+        setQuestions((current) => ({
+          ...current,
+          items: current.items.map((question) =>
+            question.id === questionId
+              ? {
+                  ...question,
+                  currentRevisionId: detail.revisionId,
+                  revisionNumber: detail.revisionNumber,
+                  workflowState: detail.workflowState,
+                }
+              : question,
+          ),
+        }));
         await loadQuestions();
+        if (!formMatches(generation, scope, expectedQuestionId)) return;
         setStatus(`Saved as revision ${detail.revisionNumber}. Earlier revisions remain unchanged.`);
       } else {
         const result = await createDraft(certificationId, examVersionId, {
@@ -441,6 +645,7 @@ export default function AdminQuestionEditor() {
           topicId,
           content,
         });
+        if (!formMatches(generation, scope, expectedQuestionId)) return;
         const createdQuestion = {
           id: result.questionId,
           questionKey,
@@ -456,6 +661,7 @@ export default function AdminQuestionEditor() {
           domainId,
           topicId,
         });
+        if (!formMatches(generation, scope, expectedQuestionId)) return;
         setQuestionSearch("");
         setSearchDraft("");
         setQuestions({
@@ -470,24 +676,33 @@ export default function AdminQuestionEditor() {
       }
       setValidationErrors([]);
     } catch (cause) {
+      if (!formMatches(generation, scope, expectedQuestionId)) return;
       if (cause instanceof ProtectedApiError && cause.status === 409 && questionId) {
         setError(errorMessage(cause));
       } else {
         setError(errorMessage(cause));
       }
     } finally {
-      setSaving(false);
+      if (formMatches(generation, scope, expectedQuestionId)) setSaving(false);
     }
   }
 
   async function loadLatestAfterConflict() {
-    if (!questionId) return;
+    const expectedQuestionId = questionId;
+    if (!expectedQuestionId) return;
+    const scope = { ...scopeRef.current };
+    const generation = formGeneration.current;
+    const request = ++requests.current.revision;
     try {
       const page = await listQuestionRevisions(
         certificationId,
         examVersionId,
-        questionId,
+        expectedQuestionId,
       );
+      if (
+        request !== requests.current.revision ||
+        !formMatches(generation, scope, expectedQuestionId)
+      ) return;
       setRevisions(page);
       const latestSummary = page.items.reduce<QuestionRevisionSummary | null>(
         (latest, revision) =>
@@ -500,22 +715,29 @@ export default function AdminQuestionEditor() {
       const latest = await getQuestionRevision(
         certificationId,
         examVersionId,
-        questionId,
+        expectedQuestionId,
         latestSummary.id,
       );
+      if (
+        request !== requests.current.revision ||
+        !formMatches(generation, scope, expectedQuestionId)
+      ) return;
       setLatestRevision(latest);
+      updateQuestionLock(expectedQuestionId, latest.lockVersion);
       setError("");
       setStatus(
         `Loaded server revision ${latest.revisionNumber}. Your unsaved field values are unchanged.`,
       );
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (
+        request === requests.current.revision &&
+        formMatches(generation, scope, expectedQuestionId)
+      ) setError(errorMessage(cause));
     }
   }
 
   function useLatestAsBase() {
     if (!latestRevision) return;
-    setBaseLockVersion(latestRevision.lockVersion);
     setSelectedRevision(latestRevision);
     setRevisionId(latestRevision.revisionId);
     setQuestions((current) => ({
@@ -524,9 +746,14 @@ export default function AdminQuestionEditor() {
         question.id === questionId
           ? {
               ...question,
-              currentRevisionId: latestRevision.revisionId,
-              revisionNumber: latestRevision.revisionNumber,
-              lockVersion: latestRevision.lockVersion,
+              ...(latestRevision.revisionNumber === latestRevision.lockVersion &&
+              question.lockVersion <= latestRevision.revisionNumber
+                ? {
+                    currentRevisionId: latestRevision.revisionId,
+                    revisionNumber: latestRevision.revisionNumber,
+                  }
+                : {}),
+              lockVersion: Math.max(question.lockVersion, latestRevision.lockVersion),
               stem: latestRevision.stem.slice(0, 200),
               workflowState: latestRevision.workflowState,
             }
@@ -542,28 +769,87 @@ export default function AdminQuestionEditor() {
 
   async function selectRevision(id: string) {
     if (!id || !questionId) return;
+    formGeneration.current += 1;
+    setSaving(false);
+    const generation = formGeneration.current;
+    const expectedQuestionId = questionId;
+    const scope = { ...scopeRef.current };
+    const request = ++requests.current.revision;
+    const previousRevisionId = selectedRevision?.revisionId ?? "";
     setRevisionId(id);
+    setLatestRevision(null);
     setError("");
     setStatus("");
     try {
       const detail = await getQuestionRevision(
         certificationId,
         examVersionId,
-        questionId,
+        expectedQuestionId,
         id,
       );
+      if (
+        request !== requests.current.revision ||
+        !formMatches(generation, scope, expectedQuestionId)
+      ) return;
       setSelectedRevision(detail);
       setContent(revisionContent(detail));
-      setBaseLockVersion(detail.lockVersion);
-      setLatestRevision(null);
+      updateQuestionLock(expectedQuestionId, detail.lockVersion);
       setValidationErrors([]);
+      const currentLockVersion = Math.max(
+        detail.lockVersion,
+        selectedQuestion?.lockVersion ?? 0,
+      );
+      const knownCurrentRevisionId =
+        selectedQuestion && selectedQuestion.lockVersion >= detail.lockVersion
+          ? selectedQuestion.currentRevisionId
+          : detail.revisionId;
+      const detailIsCurrent =
+        detail.revisionNumber === currentLockVersion &&
+        detail.revisionId === knownCurrentRevisionId;
       setStatus(
-        detail.revisionId === selectedQuestion?.currentRevisionId
+        detailIsCurrent
           ? `Loaded current revision ${detail.revisionNumber}.`
-          : `Revision ${detail.revisionNumber} is historical and read-only.`,
+          : detail.revisionNumber < currentLockVersion
+            ? `Revision ${detail.revisionNumber} is not the current question version (${currentLockVersion}) and is read-only.`
+            : `Revision ${detail.revisionNumber} is historical and read-only.`,
       );
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (
+        request === requests.current.revision &&
+        formMatches(generation, scope, expectedQuestionId)
+      ) {
+        setRevisionId(previousRevisionId);
+        setError(errorMessage(cause));
+      }
+    }
+  }
+
+  async function loadMoreRevisions(cursor: string) {
+    const expectedQuestionId = questionId;
+    if (!expectedQuestionId) return;
+    const scope = { ...scopeRef.current };
+    const generation = formGeneration.current;
+    const request = ++requests.current.revisions;
+    try {
+      const page = await listQuestionRevisions(
+        certificationId,
+        examVersionId,
+        expectedQuestionId,
+        cursor,
+      );
+      if (
+        request !== requests.current.revisions ||
+        !formMatches(generation, scope, expectedQuestionId)
+      ) return;
+      setRevisions((current) => ({
+        items: [...current.items, ...page.items],
+        nextCursor: page.nextCursor,
+      }));
+    } catch (cause) {
+      if (
+        request === requests.current.revisions &&
+        formMatches(generation, scope, expectedQuestionId)
+      ) setError(errorMessage(cause));
     }
   }
 
@@ -731,7 +1017,6 @@ export default function AdminQuestionEditor() {
                   onSubmit={(event) => {
                     event.preventDefault();
                     setQuestionSearch(searchDraft.trim());
-                    setQuestions(emptyPage());
                     void loadQuestions(undefined, searchDraft.trim()).catch((cause: unknown) =>
                       setError(errorMessage(cause)),
                     );
@@ -803,22 +1088,16 @@ export default function AdminQuestionEditor() {
                   <button
                     className="button-secondary"
                     type="button"
-                    onClick={() => void listQuestionRevisions(
-                      certificationId,
-                      examVersionId,
-                      questionId,
-                      revisions.nextCursor!,
-                    ).then((page) => setRevisions((current) => ({
-                      items: [...current.items, ...page.items],
-                      nextCursor: page.nextCursor,
-                    }))).catch((cause: unknown) => setError(errorMessage(cause)))}
+                    onClick={() => void loadMoreRevisions(revisions.nextCursor!)}
                   >
                     Load more revisions
                   </button>
                 )}
                 {questionId && !canEditSavedDraft && (
                   <p className="protected-editor-status" role="note">
-                    This revision is read-only. Select the current draft or rejected revision to create a correction.
+                    {displayedRevisionNeedsRecovery
+                      ? "The question advanced after this revision was listed or loaded. Your form values are preserved; load and review the latest revision before saving."
+                      : "This revision is historical and read-only. Select the current draft or rejected revision to create a correction."}
                   </p>
                 )}
                 {latestRevision && (
@@ -839,7 +1118,15 @@ export default function AdminQuestionEditor() {
                     <ul>{validationErrors.map((message) => <li key={message}>{message}</li>)}</ul>
                   </div>
                 )}
-                <form className="protected-editor-form" onSubmit={(event) => void submitQuestion(event)}>
+                <form
+                  className="protected-editor-form"
+                  aria-busy={saving || revisionLoading}
+                  onSubmit={(event) => void submitQuestion(event)}
+                >
+                  <fieldset
+                    className="protected-editor-fields"
+                    disabled={saving || revisionLoading}
+                  >
                   {!questionId && (
                     <label>
                       Stable question key
@@ -969,20 +1256,27 @@ export default function AdminQuestionEditor() {
                     <button
                       className="button-primary"
                       type="submit"
-                      disabled={saving || (questionId !== "" && !canEditSavedDraft)}
+                      disabled={
+                        saving ||
+                        (questionId !== "" && !canEditSavedDraft) ||
+                        (questionId !== "" && selectedRevision?.revisionId !== revisionId)
+                      }
                     >
                       {saving ? "Saving…" : questionId ? "Save correction" : "Save draft"}
                     </button>
-                    {error.includes("changed since it was loaded") && questionId && (
+                    {(error.includes("changed since it was loaded") ||
+                      displayedRevisionNeedsRecovery) && questionId && (
                       <button
                         className="button-secondary"
                         type="button"
+                        disabled={saving}
                         onClick={() => void loadLatestAfterConflict()}
                       >
                         Load latest revision
                       </button>
                     )}
                   </div>
+                  </fieldset>
                 </form>
               </section>
             )}
