@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { api } from "../src/index.ts";
 import type { SecurityDatabase } from "../src/security/database.ts";
 import {
@@ -181,6 +181,61 @@ async function request(
     }),
     learner.bindings,
   );
+}
+
+async function createTimedMock(
+  learner: Learner,
+  scope: Awaited<ReturnType<typeof createContentScope>>,
+  requestId = crypto.randomUUID(),
+) {
+  const response = await request(learner, "/mocks", {
+    method: "POST",
+    body: {
+      certificationId: scope.certificationId,
+      examVersionId: scope.examVersionId,
+      requestId,
+    },
+  });
+  return {
+    response,
+    body: await response.json() as {
+      attempt: {
+        id: string;
+        version: number;
+        state: string;
+        currentPosition: number;
+        durationSeconds: number;
+        questionCount: number;
+        startedAt: number;
+        deadlineAt: number;
+        completionReason: string | null;
+        correctCount?: number;
+      };
+      serverNow: number;
+      items: Array<{
+        position: number;
+        revisionId: string;
+        stem: string;
+        selectedOptionKey?: string;
+        correctOptionKey?: string;
+        isCorrect?: boolean;
+        options: Array<{ key: string; text: string; explanation?: string }>;
+      }>;
+    },
+  };
+}
+
+async function publishTimedMockQuestions(
+  scope: Awaited<ReturnType<typeof createContentScope>>,
+  count = 10,
+) {
+  const questions = [];
+  for (let index = 0; index < count; index += 1) {
+    questions.push(
+      await publishQuestion(scope, `timed-mock-${crypto.randomUUID()}-${index}`),
+    );
+  }
+  return questions;
 }
 
 function assertPrivate(response: Response): void {
@@ -809,5 +864,342 @@ describe("protected learner practice Worker/D1 boundary", () => {
         .bind(learner.userId)
         .first<{ count: number }>(),
     ).toMatchObject({ count: 0 });
+  });
+
+  it("runs a fixed mock with pinned snapshots, cross-session resume, stale-write protection, and one result", async () => {
+    const scope = await createContentScope(database);
+    const questions = await publishTimedMockQuestions(scope, 12);
+    const learner = await createLearner(scope.certificationId);
+    const requestId = crypto.randomUUID();
+    const starts = await Promise.all([
+    createTimedMock(learner, scope, requestId),
+    createTimedMock(learner, scope, requestId),
+    ]);
+    expect(starts.map(({ response }) => response.status)).toEqual([201, 201]);
+    const started = starts[0]!.body;
+    expect(starts[1]!.body.attempt.id).toBe(started.attempt.id);
+    expect(started.attempt).toMatchObject({
+    state: "in_progress",
+    version: 1,
+    durationSeconds: 900,
+    questionCount: 10,
+    currentPosition: 0,
+    });
+    expect(started.attempt.deadlineAt - started.attempt.startedAt).toBe(900_000);
+    expect(started.items).toHaveLength(10);
+    expect(started.items.map((item) => item.position)).toEqual(
+      Array.from({ length: 10 }, (_, position) => position),
+    );
+    expect(started.items[0]).not.toHaveProperty("correctOptionKey");
+    expect(started.items[0]?.options[0]).not.toHaveProperty("explanation");
+    assertPrivate(starts[0]!.response);
+    expect(
+    await database
+      .prepare(
+        "SELECT COUNT(*) AS count FROM timed_mock_attempts WHERE user_id = ? AND create_request_id = ?",
+      )
+      .bind(learner.userId, requestId)
+      .first<{ count: number }>(),
+    ).toMatchObject({ count: 1 });
+
+    const answerInput = {
+    expectedVersion: 1,
+    requestId: crypto.randomUUID(),
+    position: 0,
+    selectedOptionKey: "A",
+    };
+    const answerPath = `/mocks/${started.attempt.id}/answers`;
+    const savedAnswers = await Promise.all([
+    request(learner, answerPath, {
+      method: "POST",
+      body: answerInput,
+    }),
+    request(learner, answerPath, {
+      method: "POST",
+      body: answerInput,
+    }),
+    ]);
+    expect(savedAnswers.map((response) => response.status)).toEqual([200, 200]);
+    const savedAnswer = savedAnswers[0]!;
+    assertPrivate(savedAnswer);
+    expect(savedAnswer.status).toBe(200);
+    const acknowledged = await savedAnswer.json();
+    expect(acknowledged.attempt).toMatchObject({
+    state: "in_progress",
+    version: 2,
+    currentPosition: 0,
+    answeredCount: 1,
+    });
+    expect(acknowledged.items[0]).toMatchObject({
+    revisionId: started.items[0]?.revisionId,
+    selectedOptionKey: "A",
+    });
+    expect(acknowledged.items[0]).not.toHaveProperty("correctOptionKey");
+    expect(acknowledged.items[0]?.options[0]).not.toHaveProperty("explanation");
+    expect(
+      await database
+        .prepare("SELECT COUNT(*) AS count FROM timed_mock_commands WHERE attempt_id = ?")
+        .bind(started.attempt.id)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 1 });
+
+    const stale = await request(learner, answerPath, {
+    method: "POST",
+    body: {
+      ...answerInput,
+      expectedVersion: 1,
+      requestId: crypto.randomUUID(),
+      selectedOptionKey: "B",
+    },
+    });
+    assertPrivate(stale);
+    expect(stale.status).toBe(409);
+
+    const secondSessionCredentials = await createTestSessionCredentials(
+    database,
+    learner.userId,
+    { now: Date.now(), expiresAt: Date.now() + 60 * 60 * 1000 },
+    );
+    const secondSession = {
+    ...learner,
+    rawToken: secondSessionCredentials.rawToken,
+    tokenDigest: secondSessionCredentials.tokenDigest,
+    };
+    const resumed = await request(secondSession, `/mocks/${started.attempt.id}`);
+    assertPrivate(resumed);
+    expect(resumed.status).toBe(200);
+    const resumedBody = await resumed.json();
+    expect(resumedBody.attempt).toMatchObject({
+    version: 2,
+    deadlineAt: started.attempt.deadlineAt,
+    answeredCount: 1,
+    });
+    expect(resumedBody.items[0]).toMatchObject({
+    selectedOptionKey: "A",
+    revisionId: started.items[0]?.revisionId,
+    });
+    expect(resumedBody).not.toHaveProperty("correctOptionKey");
+
+    const submitInput = {
+    expectedVersion: 2,
+    requestId: crypto.randomUUID(),
+    };
+    const submitPath = `/mocks/${started.attempt.id}/submit`;
+    const finalResponses = await Promise.all([
+    request(learner, submitPath, { method: "POST", body: submitInput }),
+    request(secondSession, submitPath, { method: "POST", body: submitInput }),
+    ]);
+    expect(finalResponses.map((response) => response.status)).toEqual([200, 200]);
+    for (const response of finalResponses) assertPrivate(response);
+    const finalized = await finalResponses[0]!.json();
+    expect(finalized.attempt).toMatchObject({
+    state: "completed",
+    completionReason: "learner_submitted",
+    version: 3,
+    correctCount: 1,
+    });
+    expect(finalized.items[0]).toMatchObject({
+    selectedOptionKey: "A",
+    correctOptionKey: "A",
+    isCorrect: true,
+    });
+    expect(finalized.items[0]?.options[0]).toHaveProperty("explanation");
+
+    const retry = await request(learner, submitPath, {
+    method: "POST",
+    body: { expectedVersion: 2, requestId: crypto.randomUUID() },
+    });
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({
+    attempt: {
+      id: started.attempt.id,
+      state: "completed",
+      completionReason: "learner_submitted",
+      correctCount: 1,
+    },
+    });
+    expect(
+    await database
+      .prepare(
+        "SELECT COUNT(*) AS count FROM timed_mock_attempts WHERE id = ? AND state = 'completed'",
+      )
+      .bind(started.attempt.id)
+      .first<{ count: number }>(),
+    ).toMatchObject({ count: 1 });
+    const snapshot = await database
+    .prepare(
+      "SELECT position, question_revision_id FROM timed_mock_items WHERE attempt_id = ? ORDER BY position",
+    )
+    .bind(started.attempt.id)
+    .all<{ position: number; question_revision_id: string }>();
+    expect(snapshot.results.map((item) => item.position)).toEqual(
+      Array.from({ length: 10 }, (_, position) => position),
+    );
+    expect(snapshot.results).toHaveLength(10);
+    expect(snapshot.results.every((item) =>
+      questions.some((question) => question.revisionId === item.question_revision_id),
+    )).toBe(true);
+
+    const otherLearner = await createLearner(scope.certificationId);
+    const hiddenFromOtherUser = await request(
+    otherLearner,
+    `/mocks/${started.attempt.id}`,
+    );
+    expect(hiddenFromOtherUser.status).toBe(404);
+    assertPrivate(hiddenFromOtherUser);
+  });
+
+  it("enforces the deadline boundary and finalizes from acknowledged answers", async () => {
+    const scope = await createContentScope(database);
+    await publishTimedMockQuestions(scope);
+    const learner = await createLearner(scope.certificationId);
+    const started = await createTimedMock(learner, scope);
+    expect(started.response.status).toBe(201);
+    const attemptId = started.body.attempt.id;
+    const answerPath = `/mocks/${attemptId}/answers`;
+
+    vi.useFakeTimers();
+    try {
+    vi.setSystemTime(started.body.attempt.deadlineAt - 1000);
+    const beforeDeadline = await request(learner, answerPath, {
+      method: "POST",
+      body: {
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+        position: 0,
+        selectedOptionKey: "A",
+      },
+    });
+    expect(
+      beforeDeadline.status,
+      JSON.stringify(await beforeDeadline.clone().json()),
+    ).toBe(200);
+
+    vi.setSystemTime(started.body.attempt.deadlineAt);
+    const atDeadline = await request(learner, answerPath, {
+      method: "POST",
+      body: {
+        expectedVersion: 2,
+        requestId: crypto.randomUUID(),
+        position: 1,
+        selectedOptionKey: "A",
+      },
+    });
+    assertPrivate(atDeadline);
+    expect(atDeadline.status).toBe(409);
+    expect(await atDeadline.json()).toMatchObject({
+      error: { code: "deadline_reached" },
+    });
+
+    const finalResponse = await request(learner, `/mocks/${attemptId}`);
+    expect(finalResponse.status).toBe(200);
+    const finalBody = await finalResponse.json();
+    expect(finalBody.attempt).toMatchObject({
+      state: "completed",
+      completionReason: "timed_out",
+      correctCount: 1,
+    });
+    expect(finalBody.items[0]).toMatchObject({
+      selectedOptionKey: "A",
+      correctOptionKey: "A",
+      isCorrect: true,
+    });
+    expect(
+      await database
+        .prepare("SELECT COUNT(*) AS count FROM timed_mock_answers WHERE attempt_id = ?")
+        .bind(attemptId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 1 });
+    } finally {
+    vi.useRealTimers();
+    }
+  });
+
+  it("keeps Standard-grant expiry distinct from the running mock deadline", async () => {
+    const scope = await createContentScope(database);
+    await publishTimedMockQuestions(scope);
+    const learner = await createLearner(scope.certificationId);
+    const started = await createTimedMock(learner, scope);
+    expect(started.response.status).toBe(201);
+    const attemptId = started.body.attempt.id;
+    await database
+    .prepare(
+      "UPDATE learner_access_grants SET expires_at = ? WHERE user_id = ? AND certification_id = ?",
+    )
+    .bind(started.body.attempt.deadlineAt - 1000, learner.userId, scope.certificationId)
+    .run();
+
+    vi.useFakeTimers();
+    try {
+    vi.setSystemTime(started.body.attempt.deadlineAt - 500);
+    const expiredAccess = await request(learner, `/mocks/${attemptId}`);
+    assertPrivate(expiredAccess);
+    expect(expiredAccess.status).toBe(403);
+
+    await database
+      .prepare(
+        "UPDATE learner_access_grants SET expires_at = ? WHERE user_id = ? AND certification_id = ?",
+      )
+      .bind(started.body.attempt.deadlineAt + 60_000, learner.userId, scope.certificationId)
+      .run();
+    const stillRunning = await request(learner, `/mocks/${attemptId}`);
+    expect(stillRunning.status).toBe(200);
+    expect((await stillRunning.json()).attempt).toMatchObject({
+      state: "in_progress",
+      deadlineAt: started.body.attempt.deadlineAt,
+    });
+
+    vi.setSystemTime(started.body.attempt.deadlineAt);
+    const afterDeadline = await request(learner, `/mocks/${attemptId}`);
+    expect(afterDeadline.status).toBe(200);
+    expect(await afterDeadline.json()).toMatchObject({
+      attempt: { state: "completed", completionReason: "timed_out" },
+    });
+    } finally {
+    vi.useRealTimers();
+    }
+  });
+
+  it("uses only the server profile and rejects an exam with too few published questions", async () => {
+    const scope = await createContentScope(database);
+    await publishTimedMockQuestions(scope, 9);
+    const learner = await createLearner(scope.certificationId);
+    const forgedProfile = await request(learner, "/mocks", {
+    method: "POST",
+    body: {
+      certificationId: scope.certificationId,
+      examVersionId: scope.examVersionId,
+      durationSeconds: 60,
+      questionCount: 1,
+      requestId: crypto.randomUUID(),
+    },
+    });
+    expect(forgedProfile.status).toBe(400);
+    assertPrivate(forgedProfile);
+
+    const insufficient = await createTimedMock(learner, scope);
+    expect(insufficient.response.status).toBe(409);
+    assertPrivate(insufficient.response);
+    expect(insufficient.body).toMatchObject({
+    error: { code: "insufficient_questions" },
+    });
+    expect(
+    await database
+      .prepare("SELECT COUNT(*) AS count FROM timed_mock_attempts WHERE user_id = ?")
+      .bind(learner.userId)
+      .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+
+    const otherScope = await createContentScope(database);
+    const crossExam = await request(learner, "/mocks", {
+    method: "POST",
+    body: {
+      certificationId: otherScope.certificationId,
+      examVersionId: otherScope.examVersionId,
+      requestId: crypto.randomUUID(),
+    },
+    });
+    expect(crossExam.status).toBe(403);
+    assertPrivate(crossExam);
   });
 });

@@ -6,6 +6,12 @@ import {
   practiceAttemptResponseSchema,
   practiceScopeResponseSchema,
   startPracticeRequestSchema,
+  startTimedMockRequestSchema,
+  timedMockAnswerRequestSchema,
+  timedMockAttemptListResponseSchema,
+  timedMockAttemptResponseSchema,
+  timedMockPositionRequestSchema,
+  timedMockSubmitRequestSchema,
 } from "@certpath/contracts";
 import type { SecurityDatabase } from "./security/database.ts";
 import {
@@ -15,6 +21,14 @@ import {
   startPracticeAttempt,
   submitPracticeAnswer,
 } from "./security/practice.ts";
+import {
+  getTimedMockAttempt,
+  listTimedMockAttempts,
+  saveTimedMockAnswer,
+  saveTimedMockPosition,
+  startTimedMock,
+  submitTimedMock,
+} from "./security/timed-mocks.ts";
 import {
   constantTimeEqual,
   createCsrfToken,
@@ -202,6 +216,15 @@ function operationFailure(
   if (reason === "insufficient-questions") {
     return response(context, 409, "insufficient_questions");
   }
+  if (reason === "deadline") {
+    return response(context, 409, "deadline_reached");
+  }
+  if (reason === "invalid-answer") {
+    return response(context, 400, "validation_error");
+  }
+  if (reason === "not-configured") {
+    return response(context, 409, "mock_not_configured");
+  }
   return response(context, 409, "conflict");
 }
 
@@ -310,6 +333,128 @@ api.post("/attempts/:attemptId/answers", async (context) => {
   );
   if (!result.ok) return operationFailure(context, result.reason);
   return context.json(practiceAttemptResponseSchema.parse(result.value));
+});
+
+api.get("/mocks", async (context) => {
+  const entries = [...new URL(context.req.url).searchParams.entries()];
+  if (entries.length !== 2 || new Set(entries.map(([key]) => key)).size !== 2) {
+    return response(context, 400, "validation_error");
+  }
+  const parsed = practiceAttemptListQuerySchema.safeParse(
+    Object.fromEntries(entries),
+  );
+  if (!parsed.success) return response(context, 400, "validation_error");
+  const principal = context.get("principal");
+  const result = await listTimedMockAttempts(
+    context.env.DB,
+    principal.userId,
+    principal.tokenDigest,
+    parsed.data.certificationId,
+    parsed.data.examVersionId,
+    Date.now(),
+  );
+  if (!result.ok) return operationFailure(context, result.reason);
+  return context.json(timedMockAttemptListResponseSchema.parse(result.value));
+});
+
+api.post("/mocks", async (context) => {
+  const denied = await protectMutation(context);
+  if (denied) return denied;
+  const parsed = await readJson(context, startTimedMockRequestSchema);
+  if ("response" in parsed) return parsed.response;
+  const principal = context.get("principal");
+  const result = await startTimedMock(
+    context.env.DB,
+    principal.userId,
+    principal.tokenDigest,
+    parsed.value,
+    Date.now(),
+  );
+  if (!result.ok) return operationFailure(context, result.reason);
+  return context.json(timedMockAttemptResponseSchema.parse(result.value), 201);
+});
+
+api.get("/mocks/:attemptId", async (context) => {
+  const attemptId = context.req.param("attemptId");
+  if (!pathIdSchema.test(attemptId)) {
+    return response(context, 404, "not_found");
+  }
+  const principal = context.get("principal");
+  const result = await getTimedMockAttempt(
+    context.env.DB,
+    principal.userId,
+    principal.tokenDigest,
+    attemptId,
+    Date.now(),
+  );
+  if (!result.ok) return operationFailure(context, result.reason);
+  return context.json(timedMockAttemptResponseSchema.parse(result.value));
+});
+
+api.post("/mocks/:attemptId/answers", async (context) => {
+  const attemptId = context.req.param("attemptId");
+  if (!pathIdSchema.test(attemptId)) {
+    return response(context, 404, "not_found");
+  }
+  const denied = await protectMutation(context);
+  if (denied) return denied;
+  const parsed = await readJson(context, timedMockAnswerRequestSchema);
+  if ("response" in parsed) return parsed.response;
+  const principal = context.get("principal");
+  const result = await saveTimedMockAnswer(
+    context.env.DB,
+    principal.userId,
+    principal.tokenDigest,
+    attemptId,
+    parsed.value,
+    Date.now(),
+  );
+  if (!result.ok) return operationFailure(context, result.reason);
+  return context.json(timedMockAttemptResponseSchema.parse(result.value));
+});
+
+api.post("/mocks/:attemptId/position", async (context) => {
+  const attemptId = context.req.param("attemptId");
+  if (!pathIdSchema.test(attemptId)) {
+    return response(context, 404, "not_found");
+  }
+  const denied = await protectMutation(context);
+  if (denied) return denied;
+  const parsed = await readJson(context, timedMockPositionRequestSchema);
+  if ("response" in parsed) return parsed.response;
+  const principal = context.get("principal");
+  const result = await saveTimedMockPosition(
+    context.env.DB,
+    principal.userId,
+    principal.tokenDigest,
+    attemptId,
+    parsed.value,
+    Date.now(),
+  );
+  if (!result.ok) return operationFailure(context, result.reason);
+  return context.json(timedMockAttemptResponseSchema.parse(result.value));
+});
+
+api.post("/mocks/:attemptId/submit", async (context) => {
+  const attemptId = context.req.param("attemptId");
+  if (!pathIdSchema.test(attemptId)) {
+    return response(context, 404, "not_found");
+  }
+  const denied = await protectMutation(context);
+  if (denied) return denied;
+  const parsed = await readJson(context, timedMockSubmitRequestSchema);
+  if ("response" in parsed) return parsed.response;
+  const principal = context.get("principal");
+  const result = await submitTimedMock(
+    context.env.DB,
+    principal.userId,
+    principal.tokenDigest,
+    attemptId,
+    parsed.value,
+    Date.now(),
+  );
+  if (!result.ok) return operationFailure(context, result.reason);
+  return context.json(timedMockAttemptResponseSchema.parse(result.value));
 });
 
 api.notFound((context) => response(context, 404, "not_found"));

@@ -20,6 +20,7 @@ export function meta(_: Route.MetaArgs) {
 const links = [
   { label: "Home preview", to: "/app" },
   { label: "Protected practice", to: "/app/practice/live" },
+  { label: "Timed mock", to: "/app/mock/live" },
   { label: "Synthetic practice demo", to: "/app/practice" },
 ];
 
