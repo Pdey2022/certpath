@@ -1,7 +1,8 @@
 # Question-bank import/export contract v1
 
-Status: internal Milestone 2D contract. The CSV services are server-only;
-there is no upload route, UI, public endpoint, or real identity provider.
+Status: internal Milestone 2D data contract, exposed to the protected staff
+workspace in Milestone 2H. There is no public endpoint or real identity
+provider.
 Authorization uses the existing internal session/role/assignment services and
 an explicitly supplied MFA policy.
 
@@ -126,12 +127,12 @@ parser. It handles quoted commas, escaped quotes and embedded newlines without
 hand-written delimiter splitting and is exercised in the actual local
 Worker/D1 runtime and production build. D1 tests use synthetic records only.
 
-No public route, UI, provider, real question bank, learner persistence,
+No public content route, provider, real question bank, learner persistence,
 payment, deployment or production provisioning is part of this slice. The
-cleanup schedule is code/configuration only and has not been deployed.
-Future route integration must enforce request-body limits before buffering,
-monitor the periodic cleanup backlog, keep private responses
-`noindex`/`private, no-store`, and preserve the existing public SEO and
-synthetic-prototype boundaries.
+protected UI is an internal staff screen; the cleanup schedule is
+code/configuration only and has not been deployed. The Worker enforces request
+body limits before buffering, and protected responses remain
+`noindex`/`private, no-store`. Monitor the periodic cleanup backlog and preserve
+the existing public SEO and synthetic-prototype boundaries.
 
 Cloudflare reference: [D1 limits](https://developers.cloudflare.com/d1/platform/limits/).

@@ -1798,6 +1798,66 @@ describe("protected content HTTP boundary", () => {
       }),
     });
     const topicId = ((await topicResponse.json()) as { id: string }).id;
+    const invalidRow = contentRow(
+      actualVersionId,
+      domainId,
+      topicId,
+      `invalid-import-${versionId}`,
+    );
+    invalidRow[5] = "";
+    const invalidPreviewResponse = await call(
+      actor,
+      `${versionPathValue}/import-previews`,
+      {
+        method: "POST",
+        body: new TextDecoder().decode(csvFile(invalidRow)),
+        contentType: "text/csv",
+      },
+    );
+    expect(invalidPreviewResponse.status).toBe(400);
+    assertPrivate(invalidPreviewResponse);
+    const invalidPreview = (await invalidPreviewResponse.json()) as {
+      error: {
+        issues: Array<{ path: string; code: string }>;
+        summary: { parsedRows: number; validRows: number; invalidRows: number };
+      };
+    };
+    expect(invalidPreview.error.summary).toEqual({
+      parsedRows: 1,
+      validRows: 0,
+      invalidRows: 1,
+    });
+    expect(invalidPreview.error.issues[0]?.path).toBe("row.2.content");
+    expect(JSON.stringify(invalidPreview)).not.toContain(validQuestionContent.stem);
+
+    const unknownHeaderCsv = new TextDecoder()
+      .decode(csvFile(contentRow(
+        actualVersionId,
+        domainId,
+        topicId,
+        `unknown-header-${versionId}`,
+      )))
+      .replace('"format_version"', '"private-header-sentinel","format_version"');
+    const unknownHeaderResponse = await call(
+      actor,
+      `${versionPathValue}/import-previews`,
+      {
+        method: "POST",
+        body: unknownHeaderCsv,
+        contentType: "text/csv",
+      },
+    );
+    expect(unknownHeaderResponse.status).toBe(400);
+    assertPrivate(unknownHeaderResponse);
+    const unknownHeader = await unknownHeaderResponse.json();
+    expect(JSON.stringify(unknownHeader)).not.toContain("private-header-sentinel");
+    expect(unknownHeader).toMatchObject({
+      error: {
+        issues: [{ path: "row.1.header", code: "unknown_header" }],
+        summary: { parsedRows: 1, validRows: 0, invalidRows: 1 },
+      },
+    });
+
     const csv = csvFile(
       contentRow(actualVersionId, domainId, topicId, `import-${versionId}`),
     );

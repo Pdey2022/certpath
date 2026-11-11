@@ -28,6 +28,7 @@ import type {
   QuestionRevisionSummary,
   Topic,
 } from "../lib/admin-question-editor-api";
+import { ProtectedCsvTools } from "../components/protected-csv-tools";
 
 type Page<T> = {
   items: T[];
@@ -1375,6 +1376,19 @@ export default function AdminQuestionEditor() {
                 </button>
               )}
             </section>
+
+            {certifications.items.length > 0 && (
+              <ProtectedCsvTools
+                certificationId={certificationId}
+                certificationName={
+                  certifications.items.find((item) => item.id === certificationId)?.displayName ?? ""
+                }
+                examVersionId={examVersionId}
+                examVersionName={
+                  versions.items.find((item) => item.id === examVersionId)?.title ?? ""
+                }
+              />
+            )}
 
             {topicId && (
               <section className="protected-question-picker" aria-labelledby="question-picker-title">

@@ -107,6 +107,7 @@ function errorResponse(
   status: number,
   code: string,
   issues?: Array<{ path: string; code: string }>,
+  summary?: { parsedRows: number; validRows: number; invalidRows: number },
 ): Response {
   const headers = new Headers({
     "Cache-Control": "private, no-store, max-age=0",
@@ -121,6 +122,7 @@ function errorResponse(
         code,
         requestId: context.get("requestId"),
         ...(issues ? { issues } : {}),
+        ...(summary ? { summary } : {}),
       },
     }),
     { status, headers },
@@ -1143,9 +1145,10 @@ protectedApi.post(
         result.reason === "conflict" ? 409 : result.reason === "not-found" ? 404 : 400,
         result.reason === "conflict" ? "conflict" : result.reason === "not-found" ? "not_found" : "validation_error",
         result.errors.map((issue) => ({
-          path: `row.${issue.row}.${issue.column}`,
+          path: `row.${issue.row}.${issue.code === "unknown_header" ? "header" : issue.column}`,
           code: issue.code,
         })),
+        result.summary,
       );
     }
     return contentError(context, result.reason);

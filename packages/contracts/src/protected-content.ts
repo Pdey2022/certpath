@@ -264,18 +264,20 @@ export const questionPublicationResponseSchema = z
   })
   .strict();
 
+export const importPreviewSummarySchema = z
+  .object({
+    parsedRows: safeInteger.nonnegative(),
+    validRows: safeInteger.nonnegative(),
+    invalidRows: safeInteger.nonnegative(),
+  })
+  .strict();
+
 export const importPreviewResponseSchema = z
   .object({
     importId: id,
     formatVersion: z.literal("certpath-question-v1"),
     expiresAt: safeInteger,
-    summary: z
-      .object({
-        parsedRows: safeInteger.nonnegative(),
-        validRows: safeInteger.nonnegative(),
-        invalidRows: safeInteger.nonnegative(),
-      })
-      .strict(),
+    summary: importPreviewSummarySchema,
   })
   .strict();
 
@@ -293,5 +295,6 @@ export interface ProtectedContentApiError {
     code: string;
     requestId: string;
     issues?: Array<{ path: string; code: string }>;
+    summary?: z.infer<typeof importPreviewSummarySchema>;
   };
 }

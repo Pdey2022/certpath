@@ -377,6 +377,10 @@ export async function previewQuestionImport(
     validRows: 0,
     invalidRows: 0,
   };
+  const invalidSummary = (): QuestionImportSummary => ({
+    ...summary,
+    invalidRows: Math.max(1, summary.parsedRows),
+  });
   if (
     !isId(input.certificationId) ||
     !isId(input.examVersionId) ||
@@ -472,7 +476,7 @@ export async function previewQuestionImport(
     return rejectPreview(
       "invalid-input",
       [issue(1, "header", "missing_header")],
-      summary,
+      invalidSummary(),
     );
   }
   const duplicateHeaders = new Set(
@@ -482,7 +486,7 @@ export async function previewQuestionImport(
     return rejectPreview(
       "invalid-input",
       [...duplicateHeaders].map(() => issue(1, "header", "duplicate_header")),
-      summary,
+      invalidSummary(),
     );
   }
   const unknownHeaders = header.filter(
@@ -500,7 +504,7 @@ export async function previewQuestionImport(
           issue(1, name, "missing_header"),
         ),
       ],
-      summary,
+      invalidSummary(),
     );
   }
   if (
@@ -511,7 +515,7 @@ export async function previewQuestionImport(
     return rejectPreview(
       "invalid-input",
       [issue(1, "header", "column_order_mismatch")],
-      summary,
+      invalidSummary(),
     );
   }
   if (records.length === 0 || records.length > QUESTION_IMPORT_MAX_ROWS) {
