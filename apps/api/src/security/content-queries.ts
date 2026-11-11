@@ -362,3 +362,81 @@ export async function listQuestionRevisions(
     }>();
   return pageResult(result.results, input.pageSize);
 }
+
+export async function getQuestionPublication(
+    database: SecurityDatabase,
+    input: Omit<ContentPageInput, "cursor" | "pageSize"> & {
+      examVersionId: string;
+      questionId: string;
+    },
+): Promise<{
+    questionId: string;
+    publication: {
+      revisionId: string;
+      state: "published" | "retired";
+      pointerVersion: number;
+      changedAt: number;
+    } | null;
+} | null> {
+    const guard = createScopeGuard(
+      input.tokenDigest,
+      input.certificationId,
+      input.now,
+      input.policy,
+    );
+    const row = await database
+      .withSession("first-primary")
+      .prepare(
+        `SELECT question.id AS questionId,
+                pointer.question_revision_id AS revisionId,
+                pointer.publication_state AS state,
+                pointer.lock_version AS pointerVersion,
+                pointer.changed_at AS changedAt
+         FROM questions AS question
+         LEFT JOIN exam_version_questions AS pointer
+           ON pointer.certification_id = question.certification_id
+          AND pointer.exam_version_id = ?
+          AND pointer.question_id = question.id
+         WHERE question.certification_id = ?
+           AND question.id = ?
+           AND EXISTS (
+             SELECT 1 FROM question_revisions AS revision
+             WHERE revision.certification_id = question.certification_id
+               AND revision.exam_version_id = ?
+               AND revision.question_id = question.id
+           )
+           AND ${guard.sql}`,
+      )
+      .bind(
+        input.examVersionId,
+        input.certificationId,
+        input.questionId,
+        input.examVersionId,
+        ...guard.values,
+      )
+      .first<{
+        questionId: string;
+        revisionId: string | null;
+        state: "published" | "retired" | null;
+        pointerVersion: number | null;
+        changedAt: number | null;
+      }>();
+    if (!row) return null;
+    if (
+      row.revisionId === null ||
+      row.state === null ||
+      row.pointerVersion === null ||
+      row.changedAt === null
+    ) {
+      return { questionId: row.questionId, publication: null };
+    }
+    return {
+      questionId: row.questionId,
+      publication: {
+        revisionId: row.revisionId,
+        state: row.state,
+        pointerVersion: row.pointerVersion,
+        changedAt: row.changedAt,
+      },
+    };
+}

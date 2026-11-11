@@ -248,6 +248,21 @@ export const pointerVersionResponseSchema = z
   .object({ pointerVersion: safeInteger.positive() })
   .strict();
 
+export const questionPublicationResponseSchema = z
+  .object({
+    questionId: id,
+    publication: z
+      .object({
+        revisionId: id,
+        state: z.enum(["published", "retired"]),
+        pointerVersion: safeInteger.positive(),
+        changedAt: safeInteger,
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+
 export const importPreviewResponseSchema = z
   .object({
     importId: id,

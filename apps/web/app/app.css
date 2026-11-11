@@ -1081,6 +1081,54 @@ td {
   overflow-wrap: anywhere;
 }
 
+.protected-workflow-panel,
+.protected-workflow-confirmation,
+.protected-workflow-conflict {
+  display: grid;
+  min-width: 0;
+  gap: 0.75rem;
+  margin-block: 1rem;
+  padding: clamp(0.85rem, 3vw, 1.25rem);
+  border: 1px solid #c8d0db;
+  border-radius: 0.6rem;
+  background: #f8fafc;
+  overflow-wrap: anywhere;
+}
+
+.protected-workflow-panel h3,
+.protected-workflow-confirmation h4 {
+  margin: 0;
+}
+
+.protected-workflow-panel p,
+.protected-workflow-confirmation p,
+.protected-workflow-conflict p {
+  margin-block: 0.25rem;
+}
+
+.protected-review-form {
+  display: grid;
+  min-width: 0;
+  gap: 0.75rem;
+}
+
+.protected-review-form label {
+  display: grid;
+  min-width: 0;
+  gap: 0.35rem;
+  font-weight: 650;
+}
+
+.protected-workflow-confirmation {
+  border-color: #d6bd82;
+  background: #fff9ee;
+}
+
+.protected-workflow-conflict {
+  border-color: #bd5a5a;
+  background: #fff1f0;
+}
+
 .protected-latest-revision h3 {
   margin-top: 0;
 }

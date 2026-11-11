@@ -1,10 +1,10 @@
 # Protected content API contract v1
 
-Status: Milestone 2F contract. These routes expose the existing server-only
-content/import/export services. They do not implement provider login or
-application-session issuance. The real editor uses only the scoped reads and
-draft/revision mutations documented here; the synthetic prototype remains
-separate.
+Status: Milestone 2G contract update. These routes expose the existing
+server-only content/import/export services. They do not implement provider
+login or application-session issuance. The real editor uses the scoped reads,
+draft/revision mutations and editorial workflow routes documented here; the
+synthetic prototype remains separate.
 
 ## Trust and request rules
 
@@ -64,6 +64,7 @@ define scope.
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/domains/:domainId/topics?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with scoped topic items `{id,topicKey,title,order}` and `nextCursor`. |
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/questions?domainId=...&topicId=...&search=...&cursor=...&limit=1..50` | Required taxonomy IDs; optional bounded search (1–100 characters) over question key and stem. Returns only latest revisions in that taxonomy scope. | `200` with question items `{id,questionKey,currentRevisionId,revisionNumber,lockVersion,stem,workflowState}` and `nextCursor`. Stem is a 200-character preview. |
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/revisions?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with exact revision summaries `{id,revisionNumber,workflowState,createdAt}` and `nextCursor`, newest first. |
+| `GET /certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/publication` | No body; exact question and exam version only. | `200 {"questionId":"...","publication":null}` when never published, otherwise includes `{revisionId,state,pointerVersion,changedAt}`. |
 | `POST /certifications/:certificationId/exam-versions` | Strict JSON: `versionKey`, `title`, `syllabusReference`, optional nullable integer `effectiveFrom`, `effectiveUntil`. Server generates ID, operation ID and time. | `201 {"id":"..."}` |
 | `POST /certifications/:certificationId/exam-versions/:examVersionId/domains` | Strict JSON: `domainKey`, `title`, `meaning`, non-negative integer `order`. | `201 {"id":"..."}` |
 | `POST /certifications/:certificationId/exam-versions/:examVersionId/domains/:domainId/topics` | Strict JSON: `topicKey`, `title`, `meaning`, non-negative integer `order`. | `201 {"id":"..."}` |
@@ -79,12 +80,14 @@ define scope.
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/export?cursor=...&limit=1..100` | No body; strict query allowlist. | `200 text/csv` with the export CSV and `X-Export-Next-Cursor` when another page exists. |
 
 General unscoped collection/search endpoints, cross-certification copy,
-lifecycle management, login/logout, role changes, bootstrap, test-session
-creation and all learner routes are out of scope. The question search is
+certification/account lifecycle management, login/logout, role changes,
+bootstrap, test-session creation and all learner routes are out of scope. The question search is
 restricted to the selected authorized taxonomy and bounded to 50 results per
 page. Every list query includes current session, MFA and certification-role/
 assignment predicates in the same primary D1 query; mutations repeat their
-existing service-level authorization. Operation IDs and timestamps are
+existing service-level authorization. Publication status is a bounded exact-
+question read guarded by the same current session/MFA/certification predicate;
+it never returns another question's or exam version's pointer. Operation IDs and timestamps are
 generated server-side. No route accepts client-supplied actor or audit
 identity.
 
