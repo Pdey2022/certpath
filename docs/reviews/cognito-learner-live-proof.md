@@ -8,14 +8,17 @@ there is no deployment version, no test-generated bill, and no resource teardown
 to perform. Learner sign-in was not enabled by this test. The status of any
 separately existing live deployment was not checked or changed.
 
-The $0 out-of-pocket gate remains unconfirmed. The owner reported an active
-AWS Free Tier credit balance of $100.00 ($100.00 remaining, $0.00 used),
-expiring November 11, 2027 at 19:42 UTC. The AWS account-plan status, credit
-eligibility for the test services, current Cognito/SES/Lambda usage, and
-month-to-date costs are still unverified. The owner reported Cloudflare
-Workers Free with 0 of 100,000 requests and 0 of 200,000 observability events
-for November 11, 2026; CPU usage was unavailable. A D1 inventory snapshot
-reported one of ten databases and 704,512 bytes stored in the existing
+The $0 out-of-pocket gate remains unconfirmed for the requested test. The owner
+reported an active AWS Free account plan whose console says the account is not
+charged while that plan remains active, plus an active $100.00 credit balance
+($100.00 remaining, $0.00 used) expiring November 11, 2027 at 19:42 UTC.
+However, service-level Cognito/SES/Lambda usage, month-to-date costs, the
+billing data timestamp, and the credit's applicable products are unavailable;
+the availability and coverage of the planned email and signup-trigger
+operations are therefore not verified. The owner reported Cloudflare Workers
+Free with 0 of 100,000 requests and 0 of 200,000 observability events for
+November 11, 2026; CPU usage was unavailable. A D1 inventory snapshot reported
+one of ten databases and 704,512 bytes stored in the existing
 `certpath-staff-mfa-sandbox` database. That database is not to be reused for
 the learner test. D1 daily row usage is unavailable. The owner reported that
 the Wrangler inventory succeeded at 22:02 UTC, but a local retry at 22:04 UTC
@@ -29,7 +32,8 @@ still failed with authentication error `10000`. No plan upgrade was attempted.
 | Read repository instructions and learner sandbox handoff | Passed | Both documents reviewed |
 | AWS CLI and authorized AWS identity | Failed | `aws` CLI is absent locally; owner supplied a read-only console summary instead |
 | AWS credit balance | Passed (owner-reported) | Owner reported an active $100.00 credit, $100.00 remaining, $0.00 used, expiring November 11, 2027 at 19:42 UTC |
-| AWS account-plan status and credit eligibility for the test services | Untested | Account plan and the credit's applicable products for Cognito, SES, and Lambda were not provided |
+| AWS Free account plan and no-charge condition | Passed (owner-reported) | Owner reports the console shows the Free plan active and says the account is not charged while on that plan; no plan upgrade was attempted |
+| Credit eligibility and availability of Cognito/SES email and Lambda signup trigger | Untested | Credit Applicable products and service availability/coverage are not shown; do not assume credits or plan limits cover these operations |
 | Account-specific Cognito/SES email, Cognito MAU, signup-trigger usage, and month-to-date costs | Untested | Owner reports these values and the billing data timestamp are unavailable |
 | Published AWS pricing review | Passed | Cognito Essentials has a 10,000 direct-user MAU free tier; AWS lists registration, password-recovery, and verification email as separately priced through SES. SES Essentials is $0.16 per 1,000 outbound emails. Lambda's published free tier includes 1 million requests and 400,000 GB-seconds monthly. Credit eligibility and account usage still require verification. |
 | Wrangler authentication to the Certpath Cloudflare account | Partial | `wrangler whoami` works, but local `wrangler d1 list` still returns authentication error `10000`; the owner reported a successful inventory command at 22:02 UTC |
@@ -43,7 +47,7 @@ still failed with authentication error `10000`. No plan upgrade was attempted.
 | Registration, pre-verification denial, verification email, sign-in, and password reset | Untested | No live provider interaction or email delivery occurred |
 | Standard grant, second-exam isolation, and live dashboard sign-out | Untested | No live learner session or grant was created |
 | Disable learner sign-in after the test | Untested | No live Worker was changed; the state of any existing deployment is unknown |
-| Account billing evidence and reporting delay | Untested | Credit balance was reported, but service eligibility, month-to-date costs, Free Tier usage, and the billing data timestamp are unavailable |
+| Account billing evidence and reporting delay | Untested | Free plan and credit were reported, but service eligibility, month-to-date costs, Free Tier usage, and the billing data timestamp are unavailable |
 | AWS Cost Explorer published reporting delay | Passed | AWS says current-month data is available in about 24 hours and refreshes at least every 24 hours, but upstream data may take longer |
 | Charges from this test attempt | Passed | No provisioning, deployment, or email operations were performed; account-wide charges remain unverified |
 
@@ -59,19 +63,20 @@ still failed with authentication error `10000`. No plan upgrade was attempted.
 - [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) — Workers Free request and CPU limits.
 - [Cloudflare D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) — D1 Free limits, database count, and overage prices.
 
-The public pricing pages do not establish this AWS account's active plan,
-which services the reported credit covers, or current service usage. The
-owner-reported Cloudflare plan, request count, database count, and storage
-snapshot are useful evidence, but D1 daily row usage and Worker CPU usage remain
-unavailable. The local Wrangler token also still cannot read the D1 inventory.
+The owner-reported AWS Free plan and credit balance do not establish service
+availability, eligible credit products, or current usage for the planned
+email/trigger operations. The owner-reported Cloudflare plan, request count,
+database count, and storage snapshot are useful evidence, but D1 daily row
+usage and Worker CPU usage remain unavailable. The local Wrangler token also
+still cannot read the D1 inventory.
 
 ## Blockers and required access
 
-1. Verify the AWS account plan and inspect the credit details page's
-   **Applicable products** for Cognito, SES, and Lambda. Provide recent and
-   month-to-date costs, Free Tier usage, and the billing data timestamp. The
-   owner must explicitly confirm that the credit/Free Tier covers all test
-   operations with no out-of-pocket charge.
+1. Verify from the AWS console that Cognito email delivery and the signup
+   trigger are available under the active Free plan, and inspect the credit
+   details page's **Applicable products** for Cognito, SES, and Lambda. The
+   account owner must explicitly confirm these exact test operations cannot
+   incur an out-of-pocket charge while the plan remains active.
 2. Resolve local Wrangler D1 read access or use the Cloudflare dashboard to
    verify D1 daily row usage and Worker CPU usage. Keep the existing staff
    database separate; the learner test needs its own database.
@@ -82,9 +87,10 @@ unavailable. The local Wrangler token also still cannot read the D1 inventory.
 ## Deployment, billing, and teardown
 
 - Deployment version: **not applicable; nothing was deployed**.
-- Billing evidence: **partial and owner-reported**. AWS credits are reported
-  as active with $100.00 remaining, but applicable products, account plan,
-  usage, month-to-date costs, and reporting timestamp are unverified.
+- Billing evidence: **partial and owner-reported**. AWS Free plan is reported
+  active with $100.00 in credits remaining and a no-charge condition, but
+  test-service availability, applicable products, usage, month-to-date costs,
+  and reporting timestamp are unverified.
 - Teardown: **not applicable; no resources were created**. If a later approved
   run provisions resources, first set learner sign-in disabled and verify
   preflight reports disabled; then remove the learner-only Worker, D1 database,
