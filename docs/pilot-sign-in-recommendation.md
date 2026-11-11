@@ -7,21 +7,29 @@ Official documentation and public pricing checked: **11 November 2026**.
 
 ## Recommendation
 
-Use **Auth0 Customer Identity (B2C)** as the first provider for an isolated
-compatibility proof, subject to owner approval of its paid staff-MFA tier and
-the unresolved market, residency, and session policies. This is a
-recommendation to test Auth0, not approval to select it or begin production
-implementation.
+Use **Amazon Cognito User Pools Essentials** as the first candidate for a
+non-production **email-and-password pilot sandbox**, subject to proving that
+the target pool emits the required signed TOTP assurance claims. This is a
+candidate recommendation, not approval to configure a provider or start
+production sign-in.
 
-Auth0 is the better fit of the two candidates reviewed because its hosted
-Universal Login supports email/password and Google, and its post-login Actions
-can require an MFA challenge and report the completed method to a following
-Action. That subsequent Action can place namespaced MFA evidence in the staff
-OIDC ID token. The Worker must validate that ID token against the expected
-client ID and the nonce stored for that exact login transaction before creating
-a session. Cognito's documented MFA setting applies to local user-pool users,
-not federated users; it therefore does not, by itself, meet the mandatory-MFA
-requirement when a Global Admin or Manager uses Google sign-in.
+The Cognito proof is intentionally limited to local email/password accounts;
+defer Google federation. Cognito's Essentials plan enables requesting
+authentication levels, and its documentation describes signed `acr`/`amr`
+claims for completed factors, including password plus authenticator-app TOTP.
+However, the claim feature is rolling out gradually and may not be available
+in the target pool. The Worker must create no staff session unless it verifies
+the ID token signature, expected client and login nonce, TOTP-level claims,
+and a sufficiently fresh provider `auth_time`. If the target pool cannot
+produce and maintain that evidence across the tested flows, record the gap
+and use the retained Auth0 design below as the fallback recommendation.
+
+Google sign-in is deferred from this sandbox. Cognito itself documents that
+its pool MFA does not add a factor to federated sign-ins, so Google staff login
+would require a separately proven assurance path. The Auth0 fallback preserves
+the corrected design: a subsequent post-challenge Action places namespaced MFA
+evidence in the staff ID token, which the Worker validates against the
+expected client and exact transaction nonce.
 
 Keep the approved Cloudflare Workers + React Router SSR + same-origin Hono API
 + D1 architecture. Use a provider only to prove identity. The Worker maps the
@@ -31,18 +39,18 @@ Do not put application roles or entitlements in provider claims.
 
 ## Candidate comparison
 
-| Requirement | Auth0 Customer Identity (B2C) | Amazon Cognito User Pools |
+| Requirement | Amazon Cognito Essentials (recommended sandbox candidate) | Auth0 Customer Identity (fallback) |
 |---|---|---|
-| Email registration and verification | Database connection supports email/password signup and email verification links; Auth0 sends verification by default. The application must deny access to flows requiring a verified address until `email_verified` is verified. | Self-signups must be confirmed before sign-in. Confirmation by code/link verifies the email or phone destination. |
-| Google sign-in | Google social connection via OAuth 2.0 and Universal Login. Requires a Google OAuth client and Auth0 connection configuration. Request only the basic identity data needed. | Google is a supported federated provider. Cognito brokers the provider tokens and issues user-pool tokens. |
-| Recovery | Auth0 database users can use the hosted email password-reset flow. Auth0 documents that a password reset expires the Auth0 session. Google-account recovery stays with Google. | Self-service recovery uses a verified channel. Configure recovery separately from MFA: the MFA delivery channel cannot also be used for Cognito forgot-password codes. Google credentials are recovered at Google. |
-| Mandatory MFA for both staff roles | Can be required for a dedicated staff login client using a blocking post-login Action and an enabled factor. Keep role authorization in D1; the staff login path is not a role grant. Auth0's B2C Essentials plan is the lowest published B2C plan listing Pro MFA. | `MfaConfiguration=ON` can require MFA for local users, but Cognito explicitly states that it does not add MFA for federated users. An upstream Google MFA prompt is not a Cognito assurance guarantee. Cognito would need a separate, application-enforced staff factor for Google staff. |
-| Worker-verifiable MFA evidence | The post-login Action event exposes completed authentication methods. After the required challenge, a subsequent Action can require an `mfa` method and add namespaced provider-recorded factor and timestamp evidence to the staff ID token. The Worker must validate the ID token signature, issuer, expected staff client audience, transaction nonce, and evidence freshness, rejecting missing or unsupported evidence. Prove the method/timestamp mapping in the sandbox. | Cognito's ID-token documentation now describes computed `acr`/`amr` authentication-strength claims, but availability is gradually rolling out and requesting levels requires Essentials or Plus. Do not depend on these claims before verifying the target pool; they also do not remove the federated-user MFA gap. |
-| Cloudflare Workers compatibility | Standards-based OIDC/OAuth over Fetch and JWT verification with Web Crypto are compatible in principle. Official documentation reviewed does not establish that an Auth0 Node SDK is compatible with Workers. Prefer a small standards-based callback/JWKS proof; use no Node-only APIs in the Worker. | User-pool OIDC endpoints and JWTs are protocol-compatible in principle; this review did not establish AWS SDK or Cognito-specific library compatibility in Workers. The same Fetch/Web Crypto proof is required. |
-| Logout and revocation | Auth0 refresh-token revocation affects provider tokens, not an independently issued CertPath D1 session. Provider logout or password reset must not be assumed to delete the opaque application session. | Cognito can revoke tokens or globally sign out a user, but its JWTs are self-contained and a local signature/expiry-only check can still accept a revoked token. Cognito revocation does not delete a CertPath D1 session. |
-| Pilot cost and published limits | Free lists up to 25,000 MAUs but does not list the needed Pro MFA feature. B2C Essentials starts at **$35/month for 500 MAUs** and lists Pro MFA. This is the likely minimum Auth0 subscription for the proposed staff-MFA proof, not a quote. Higher MAU tiers cost more. | Essentials currently includes 10,000 free direct/social MAUs, then the pricing page's example uses **$0.015 per additional MAU**. SMS MFA uses SNS pricing; verification and recovery email use SES pricing. Pool tier and regional pricing must be checked for the actual account. |
+| Email registration and verification | Local self-signups must be confirmed before sign-in; code/link confirmation verifies the destination. Require a verified email before using it as a contact or recovery address. | Database connection supports email/password signup and email verification links; the application must enforce verified-email requirements. |
+| Google sign-in | **Deferred** for this email/password sandbox. Cognito supports Google federation, but its pool MFA does not add MFA for federated users; do not extend the staff flow to Google without a separate assurance proof. | Auth0 can add Google OAuth through Universal Login. Google sign-in remains out of this pilot slice. |
+| Recovery | Self-service recovery uses a verified channel. If TOTP is the MFA factor, verify that the pool has a separate recovery channel; Cognito does not send MFA and password-reset codes to the same email/phone destination. | Database users can use Auth0's hosted email password-reset flow; Auth0 documents that a password reset expires the Auth0 session. |
+| Mandatory MFA for both staff roles | Configure pool MFA as required and TOTP as the only enabled MFA factor for the proof. A first sign-in may return tokens without an authenticator challenge; it must not create a CertPath staff session. Complete Cognito's TOTP enrollment, then require a later sign-in to prove the TOTP challenge. | A dedicated staff flow can require an enabled factor through a blocking post-login Action. Keep role authorization in D1; login is not a role grant. Auth0 B2C Essentials is the lowest published B2C plan listing Pro MFA. |
+| Worker-verifiable MFA evidence | Cognito documents `acr`/`amr` claims, including level 4 (`urn:cognito:loa:4`) for password plus authenticator-app TOTP and `amr` values `pwd`, `otp`, and `mfa`. Request the target level with `acr_values` and freshness with `max_age`; check `auth_time` in the signed ID token. Claim availability is rolling out and requires Essentials or Plus. Verify actual availability and semantics in the target pool; absence or mismatch fails closed. Refresh preserves `acr`/`amr` and does not reset `auth_time`. | The corrected fallback uses two client IDs and a transaction-bound nonce. A subsequent Auth0 Action after the required challenge checks the provider-recorded method and timestamp and writes namespaced evidence to the staff ID token. The Worker validates signature, issuer, expected client, nonce, and freshness. |
+| Cloudflare Workers compatibility | Cognito OIDC endpoints and signed JWTs are compatible in principle with Worker Fetch and Web Crypto. The exact callback, JWKS validation, claims, and flow still require an actual Worker proof; do not assume AWS SDK compatibility. | Standards-based OIDC and JWT verification are compatible in principle. Official documentation does not establish Auth0 Node SDK compatibility with Workers; prefer the standards-based callback/JWKS proof and no Node-only APIs. |
+| Logout and revocation | Cognito token revocation does not revoke an independently issued CertPath D1 session. Self-contained JWTs can still pass local signature/expiry-only validation after revocation; application logout must revoke D1. | Auth0 refresh-token revocation does not revoke an independently issued CertPath D1 session. Provider logout or password reset must not be assumed to revoke it. |
+| Pilot cost and published limits | Cognito Essentials pricing currently includes **10,000 direct/social MAUs** then **$0.015 per additional MAU** in AWS's published example. Cognito registration, verification, and recovery email are billed separately through SES. SES Essentials currently lists **$0.16 per 1,000 outbound emails** for the first 10 million monthly emails, with marginal volume rates above that. Verify region/account configuration and actual charges before approval. TOTP avoids SMS MFA delivery charges. | Auth0 Free lists up to 25,000 MAUs but does not list the needed Pro MFA feature. B2C Essentials starts at **$35/month for 500 MAUs** and lists Pro MFA; higher tiers, email delivery, taxes, and support may add cost. Reconfirm current terms before a fallback tenant. |
 
-### Auth0 MFA evidence shape to prove
+### Retained Auth0 fallback design
 
 Use separate Auth0 application/client IDs for learner and staff login
 transactions. The Worker validates the OIDC ID token against the configured
@@ -68,14 +76,15 @@ staff session, even if the account has a staff row in D1; it must complete the
 staff-client flow with current MFA evidence. Public registration, Google email
 verification, and provider metadata never create either staff role.
 
-This is a proof target, not a claim that the Action configuration or assurance
-freshness is already implemented. Auth0 documents how to challenge and observe
-methods, add claims to the ID token, and validate an ID token's audience and
-nonce. The sandbox must establish that the Action reports the actual completed
-factor and its provider-recorded timestamp in a Worker-verifiable ID token for
-both Global Admin and Manager sign-ins, including Google federation when a
-provider SSO session already exists. An existing SSO session must not silently
-bypass the required fresh staff factor.
+This is the fallback proof design, not a claim that the Action configuration or
+assurance freshness is already implemented. If Cognito cannot prove the
+required evidence in the target pool, the fallback sandbox must establish that
+the Action reports the actual completed factor and its provider-recorded
+timestamp in a Worker-verifiable ID token for both Global Admin and Manager.
+If Google federation is considered later, include Google with an existing
+provider SSO session; it is deferred from the Cognito email/password sandbox.
+An existing SSO session must not silently bypass the required fresh staff
+factor.
 
 ### Session boundary
 
@@ -99,72 +108,89 @@ behavior remain unproven for both candidates.
 
 ## Smallest sandbox proof and acceptance checks
 
-Only start after the owner approves a capped Auth0 Essentials sandbox spend
-(or confirms an eligible plan that includes Pro MFA). Use a non-production
-Auth0 tenant, a non-production Cloudflare Worker and isolated D1 database,
-synthetic identities, and no real question content. Keep secrets in local
-secret bindings or the sandbox's secret store, never in the repository. Do not
+Only start after the owner approves a capped Cognito Essentials sandbox spend
+and a staff-assurance freshness threshold. Use a non-production Cognito user
+pool, a non-production Cloudflare Worker and isolated D1 database, synthetic
+identities, and no real question content. Keep secrets in local secret
+bindings or the sandbox's secret store, never in the repository. Do not
 connect production users or execute the initial Global Admin bootstrap.
 
-1. **Worker callback and ID-token verification:** run the OAuth
+1. **Worker callback and ID-token verification:** run Cognito's OIDC
    authorization-code flow with PKCE, state, and nonce through the actual
-   Worker. Keep the expected staff or learner client ID and nonce bound to the
-   server-side login transaction. Fetch provider metadata/JWKS with Worker
-   `fetch`; validate the OIDC ID token with Worker Web Crypto, checking
-   signature, issuer, expiry/not-before, expected `aud`, and exact transaction
-   nonce. Reject bad state, wrong nonce, wrong issuer/audience, expired tokens,
-   bad signatures, replay, and tokens for the other client.
-2. **Email learner flow:** register a synthetic email/password learner, verify
-   the email, sign in, request recovery, complete password reset, and confirm
-   the new credential works. Confirm an unverified email cannot be used as an
-   account-linking key and reset does not silently merge accounts.
-3. **Google learner flow:** use an isolated Google OAuth client and test
-   accounts. Sign in with Google and verify the provider's issuer, subject, and
-   verified-email assertion. Confirm a matching email never auto-links to a
-   different internal user.
-4. **Both staff roles and MFA evidence:** issue two synthetic internal staff
-   identities through test-only D1 fixtures: one Global Admin and one Manager
-   with one exam assignment. Exercise password and Google sign-in through the
-   staff client for both identities, including Google sign-in with an existing
-   provider SSO session. Confirm the subsequent Action runs after the challenge
-   and that the staff ID token contains the actual provider-recorded factor and
-   timestamp. The Worker must verify and persist those exact values in D1.
-   Omitting/canceling MFA, using an unenrolled factor, or receiving missing,
-   unsupported, forged, or stale evidence creates no staff session. Explicitly
-   verify that a correctly signed learner-client ID token cannot create a
-   staff session, and that a wrong transaction nonce cannot create any
-   session. Each role remains authorized only by its D1 row and current
-   assignment.
-5. **Application and provider revocation:** prove application logout revokes
+   Worker. Use distinct expected staff and learner app-client IDs, with the
+   expected client and nonce bound to the server-side login transaction. Fetch
+   provider metadata/JWKS with Worker `fetch`; validate the ID token with Worker
+   Web Crypto, checking signature, issuer, `token_use=id`, expiry/not-before,
+   expected `aud`, and exact transaction nonce. Reject bad state, wrong nonce,
+   wrong issuer/audience, expired tokens, bad signatures, replay, and tokens
+   for the other client.
+2. **Target-pool claim availability:** configure an Essentials user pool with
+   required MFA and authenticator-app TOTP. Request
+   `acr_values=urn:cognito:loa:4` and `max_age` for the owner-approved
+   freshness threshold. Verify that the actual signed ID token contains the
+   expected `acr`, the required `amr` values (`pwd`, `otp`, and `mfa`), and a
+   current `auth_time`. Confirm those claims are available and mean a
+   completed TOTP challenge in this pool and app client. The documentation
+   describes a gradual rollout; missing or ambiguous claims fail the proof.
+3. **First sign-in and TOTP enrollment:** for synthetic Global Admin and
+   Manager accounts, verify email and complete first sign-in. Cognito may
+   issue tokens before TOTP enrollment; those tokens and the enrollment flow
+   must not create a CertPath staff session. Complete TOTP enrollment using
+   Cognito's setup flow, then perform a subsequent sign-in and verify that the
+   Worker accepts only a fresh token with the required signed evidence.
+4. **Returning staff and existing SSO:** test both roles as returning users
+   with TOTP already enrolled. Complete a fresh authenticator challenge and
+   verify that the Worker accepts the evidence. Repeat with an existing
+   Cognito managed-login SSO session; request the required authentication
+   level and freshness. If the session does not result in signed, current
+   TOTP evidence, reject it and create no staff session.
+5. **Missing and stale evidence:** for both staff roles, verify that a
+   learner-client ID token, wrong nonce, absent or wrong `acr`, absent `otp`
+   or `mfa` in `amr`, invalid signature, and missing or stale `auth_time`
+   cannot create a staff session. Reuse a refreshed token and prove that its
+   preserved `auth_time` does not reset freshness. A successful password-only
+   or first-enrollment response is never sufficient. Keep D1 role and
+   Manager-assignment authorization authoritative.
+6. **Email learner flow:** register a synthetic email/password learner,
+   verify the email, sign in, request recovery, complete password reset, and
+   confirm the new credential works. Confirm an unverified email cannot be
+   used as an account-linking key and reset does not silently merge accounts.
+   Verify that email delivery uses the approved SES configuration and record
+   the actual sandbox message cost.
+7. **Application and provider revocation:** prove application logout revokes
    the D1 session on the next protected request, even with an otherwise valid
    provider token. Separately revoke the provider token/end the provider
    session and observe whether an existing opaque D1 session remains valid;
    document that result and test the proposed session lifetime/revalidation
    behavior. Do not count provider logout alone as D1 revocation.
-6. **Learner's first exam and dashboard:** create a verified synthetic learner
-   through either supported sign-in method. Verify signup grants no staff role
-   and no exam access. Use an explicitly approved pilot operator procedure to
-   issue that internal user an audited, exam-specific Standard grant for the
-   owner-selected first exam; then sign in and reach the protected `/app/home`
+8. **Learner's first exam and dashboard:** create a verified synthetic learner
+   with email/password only. Verify signup grants no staff role and no exam
+   access. Use an explicitly approved pilot operator procedure to issue that
+   internal user an audited, exam-specific Standard grant for the owner-
+   selected first exam; then sign in and reach the protected `/app/home`
    dashboard. Verify the granted exam appears and another exam remains denied.
    The test grant is synthetic and is not a payment or a production access
    grant.
 
-The proof passes only when both provider routes complete in the deployed
-Worker runtime; staff and learner ID tokens are accepted only for their
-expected client and exact transaction nonce; and each staff role, including
-Google sign-in with an existing SSO session, produces verifiable
-provider-recorded factor and timestamp evidence after MFA. Learner-client
-tokens, wrong nonces, and missing or stale MFA evidence must not create staff
-sessions. D1 remains authoritative for roles, assignments, grants, and opaque
-sessions; logout/revocation behavior is recorded without assuming provider
-and application sessions are coupled.
+The proof passes only when the Cognito flow works in the deployed Worker
+runtime; staff and learner ID tokens are accepted only for their expected
+client and exact transaction nonce; and both staff roles, including returning
+staff with an existing SSO session, produce fresh, signed evidence of the
+completed authenticator-app challenge. The target pool must expose the
+documented assurance claims and their semantics must be verified, not
+assumed. Learner-client tokens, wrong nonces, and missing, incorrect, or stale
+MFA evidence must not create staff sessions. If Cognito cannot provide that
+evidence, record the precise gap and recommend the corrected Auth0 fallback;
+do not weaken staff MFA or create a session as a workaround. Google sign-in is
+not part of this proof. D1 remains authoritative for roles, assignments,
+grants, and opaque sessions; logout/revocation behavior is recorded without
+assuming provider and application sessions are coupled.
 
 ## Pilot learner access path
 
-1. A pilot learner registers with email/password and verifies email, or signs
-   in with Google. The Worker resolves the provider `(issuer, subject)` to an
-   internal user; a new account is a learner only.
+1. A pilot learner registers with email/password and verifies email. The
+   Worker resolves the Cognito `(issuer, subject)` to an internal user; a new
+   account is a learner only.
 2. A named, authorized Global Admin (not a Manager) issues an audited,
    time-bounded Standard grant for the selected certification and exam version
    using the approved pilot access process. The grant is independent of
@@ -183,11 +209,13 @@ owner approval and a named Global Admin operator.
 
 ## Owner and architect decisions still required
 
-- **Provider and spending:** approve or reject Auth0 as the proof candidate;
-  approve a maximum monthly sandbox cost and expected MAU range. Confirm the
-  paid Pro MFA requirement, email delivery configuration/cost, SMS or other
-  factor charges, support/tax/region costs, and upgrade threshold before
-  creating a paid tenant.
+- **Provider and spending:** approve or reject Cognito Essentials as the
+  email/password sandbox candidate; approve a maximum monthly cost and
+  expected MAU range. Confirm regional MAU pricing, SES email configuration
+  and cost, recovery options, and any support/tax/region costs before
+  creating a pool. If Cognito fails the evidence proof, separately approve
+  the Auth0 fallback and its paid Pro MFA requirement before creating a
+  tenant.
 - **Pilot admissions:** choose invitation-only versus learner self-registration,
   who may invite learners, whether a verified email invitation is required,
   and how duplicate or inaccessible accounts are recovered. Never use
@@ -208,7 +236,8 @@ owner approval and a named Global Admin operator.
   application-session revocation.
 - **Market, privacy, and operations:** confirm launch country, acceptable
   provider/data regions, data retention and processor terms, email sender and
-  deliverability, support procedure, and Google consent-screen requirements.
+  deliverability, support procedure, and whether/when Google sign-in should
+  be evaluated in a separate slice.
 - **Initial administrator:** approve the first Global Admin identity and
   operator/bootstrap process separately. The sandbox proof must not perform
   production provisioning.
@@ -218,7 +247,8 @@ owner approval and a named Global Admin operator.
 This recommendation refines the provider comparison in
 [ADR 0002](decisions/0002-identity-and-content-architecture.md) and the
 [Milestone 2A handoff](reviews/milestone-2a.md), but does not change either
-document's status. Auth0 remains a candidate recommendation only. Architect
+document's status. Cognito Essentials is a candidate recommendation only;
+Auth0 remains the documented fallback, not an approved provider. Architect
 and owner approval is required before configuring a tenant or beginning
 provider-backed implementation. Provider setup, live session issuance,
 production MFA, grant management, billing, and deployment remain outside this
@@ -248,8 +278,12 @@ public documentation, not a quote or contractual residency statement.
 
 ### Amazon Cognito
 
-- [Cognito pricing](https://aws.amazon.com/cognito/pricing/) — current Essentials MAU tiers and separately billed SNS/SES messages.
+- [Cognito pricing](https://aws.amazon.com/cognito/pricing/) — current Essentials MAU tiers and separately billed message delivery.
+- [Amazon SES pricing](https://aws.amazon.com/ses/pricing/) — outbound email pricing by volume and configuration.
 - [Adding MFA to a user pool](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-mfa.html) — required local-user MFA and explicit federated-user limitation.
+- [TOTP software tokens](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-mfa-totp.html) — authenticator-app enrollment and TOTP MFA flow.
+- [Step-up authentication](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-step-up-authentication.html) — requesting authentication levels, `acr`/`amr`, `auth_time`, and refresh behavior.
+- [Verifying user-pool JWTs](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-tokens-verifying-a-jwt.html) — signature, issuer, audience, and token-use validation.
 - [Signing up and confirming users](https://docs.aws.amazon.com/cognito/latest/developerguide/signing-up-users-in-your-app.html) — signup confirmation and email/phone verification.
 - [Account recovery and password policies](https://docs.aws.amazon.com/cognito/latest/developerguide/managing-users-passwords.html) — recovery channels and policy.
 - [Google and other federated providers](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-identity-federation.html) — user-pool federation.
