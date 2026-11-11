@@ -122,7 +122,7 @@ The identity architecture decision remains proposed; no provider was adopted.
 | Live target-pool claim availability; first sign-in/enrollment; returning staff; existing Cognito SSO | **Untested** — no target pool was provisioned under the $0 cap. |
 | Actual learner email verification/password reset, and actual provider logout/revocation effects on a CertPath session | **Untested** — require the live provider sandbox. |
 | Remote Cloudflare Worker and D1 integration | **Untested** — verification used the local Cloudflare Worker test harness and Miniflare D1. |
-| Ubuntu GitHub Actions | Passed on implementation commit `e2b634e44574243290a799c70b59e744575a87df`: [run 43081225260](https://github.com/Pdey2022/certpath/actions/runs/43081225260). Any later PR-head update must be checked separately. |
+| Ubuntu GitHub Actions | Passed on control implementation commit `2d4d80923894a153383451bf6d801f64848f1b52`: [run 43085685495](https://github.com/Pdey2022/certpath/actions/runs/43085685495). |
 
 ## Live test setup and teardown checklist
 
