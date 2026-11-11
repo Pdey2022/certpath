@@ -43,12 +43,10 @@ content only inside the isolated test harness.
   reads and writes, while retained snapshots are not deleted. The owner must
   decide whether active attempts continue, receive a grace period, or stop at
   expiry, and whether completed explanations remain available.
-- The route's server-rendered output is a neutral shell. Local responsive
-  inspection used synthetic protected-API responses because the development
-  Worker was not configured with a seeded session, grant and security secret.
-  Those visual checks are not represented as an authenticated browser
-  workflow. Session, grant, denial, resume, answer and expiry behavior is
-  tested separately through the actual Worker/D1 integration harness.
+- The route's server-rendered output is a neutral shell. The authenticated
+  browser walkthrough used an isolated local Worker/D1 database, synthetic
+  sessions and content, and a separate Edge profile for the second session.
+  No provider sign-in or session-issuance endpoint was added.
 
 ## Files changed
 
@@ -81,12 +79,13 @@ No dependency was added for this milestone.
 
 | Check | Result |
 |---|---|
-| `npm run verify` | Passed on Windows: workspace type checks, tests, and production builds. API tests: 63 passed across 9 files. Web tests: 39 passed. |
-| Worker/D1 practice integration | Passed with the actual Hono/Worker boundary and isolated D1: authorization and scope denial, exact revision snapshots, hidden answers, start/answer/resume, idempotent retries, stale writes, expiry/revocation and atomicity cases. |
-| Learner UI tests | Passed: neutral initial shell, access/session errors, server-acknowledged save state, failed-save recovery with the same request, result review and locked completion, and Save & exit behavior. |
-| Responsive browser inspection | At 1440×900, 375×812 and 320×720, the question screen and controls were inspected. No horizontal overflow was measured at the 320 px viewport. Synthetic protected-API responses were used for this visual pass; it was not an authenticated Worker browser test. |
+| `npm run verify` | Passed on Windows: workspace type checks, tests, and production builds. API tests: 64 passed across 9 files; web tests: 42 passed. |
+| Worker/D1 practice integration | Passed with the actual Hono/Worker boundary and isolated D1: authorization and scope denial, exact revision snapshots, hidden answers, start/answer/resume, idempotent retries, stale writes, expiry/revocation, atomicity, and concurrent save/resume cases. |
+| Learner UI tests | Passed: neutral initial shell, access/session errors, server-acknowledged save state, failed-save recovery with the same request, result review and locked completion, Save & exit, and navigation/reload warnings while work is pending. |
+| Authenticated Worker/D1 browser walkthrough | Passed using two isolated synthetic active sessions for the same learner. In the first browser, started a two-question attempt, submitted option A on question 1, and used Save & exit. In a separate Edge profile, resumed the same attempt. The API summary and detail both reported the same attempt, version 2, position 1, and one saved answer (option A); the UI restored question 2 of 2. |
+| Authenticated responsive browser check | Passed on the resumed attempt at mobile 390×844 and desktop 1280×900. The question and controls were present at both sizes; measured document width did not exceed the viewport. |
 | `git diff --check` | Passed after handoff authoring; staged diff will be checked again before commit. |
-| Ubuntu GitHub Actions | Passed on implementation commit `74588f7f9ae8aaa8b3a798a3ae5fe2c78354d6a9` in [run 43040602041](https://github.com/Pdey2022/certpath/actions/runs/43040602041). A handoff-only documentation commit follows; its check is reported with the PR. |
+| Ubuntu GitHub Actions | The earlier pass on the original implementation does not cover this correction. The pushed correction must pass on its exact final SHA before architect review; the final SHA and run are reported with the PR. |
 
 No credentials, personal data or real question banks were added.
 
@@ -97,9 +96,9 @@ No credentials, personal data or real question banks were added.
   endpoint.
 - Active-attempt and completed-result behavior after grant expiry needs product
   approval as described above.
-- The responsive browser inspection did not use an authenticated Worker
-  session; actual authorization and data behavior is verified through
-  Worker/D1 tests with isolated test factories.
+- Browser verification uses only local Worker configuration and synthetic
+  fixtures. Production identity-provider sign-in and live session issuance
+  remain out of scope.
 - Only untimed single-choice practice is implemented. Timed exams, adaptive
   selection, notes, bookmarks, learner reports, grant-management UI and
   production provisioning remain out of scope.

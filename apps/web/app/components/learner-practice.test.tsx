@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { createElement } from "react";
 import * as React from "react";
+import { createMemoryRouter, Link, RouterProvider } from "react-router";
 import { Window } from "happy-dom";
 
 const browser = new Window({ url: "http://localhost/app/practice/live" });
@@ -131,8 +132,27 @@ function installFetch(options: {
   return answerBodies;
 }
 
+function renderPractice() {
+  const router = createMemoryRouter(
+    [
+      {
+        path: "/app/practice/live",
+        element: createElement(
+          React.Fragment,
+          null,
+          createElement(LearnerPractice),
+          createElement(Link, { to: "/app", "aria-label": "Navigate away" }, "Home"),
+        ),
+      },
+      { path: "/app", element: createElement("p", null, "Away page") },
+    ],
+    { initialEntries: ["/app/practice/live"] },
+  );
+  return render(createElement(RouterProvider, { router }));
+}
+
 async function startOneQuestionPractice() {
-  render(createElement(LearnerPractice));
+  renderPractice();
   await screen.findByRole("option", { name: /Synthetic certification/ });
   await waitFor(() => {
     assert.equal(
@@ -149,7 +169,7 @@ async function startOneQuestionPractice() {
 
 test("keeps the first render neutral, hides answers, and shows Saved only after acknowledgement", async () => {
   installFetch();
-  render(createElement(LearnerPractice));
+  renderPractice();
   assert.ok(screen.getByRole("heading", { name: "Loading practice" }));
   await screen.findByRole("option", { name: /Synthetic certification/ });
   await waitFor(() => {
@@ -208,10 +228,74 @@ test("retains an unacknowledged answer and retries with the same idempotency key
   assert.equal(bodies[0]?.selectedOptionKey, bodies[1]?.selectedOptionKey);
 });
 
+test("warns before navigation or reload and keeps a selected answer when staying", async () => {
+  installFetch();
+  await startOneQuestionPractice();
+  fireEvent.click(screen.getByRole("radio", { name: /Synthetic answer/ }));
+
+  const unload = new browser.Event("beforeunload", { cancelable: true });
+  browser.dispatchEvent(unload);
+  assert.equal(unload.defaultPrevented, true);
+
+  fireEvent.click(screen.getByRole("link", { name: "Navigate away" }));
+  assert.ok(screen.getByRole("alertdialog", { name: "Leave this practice?" }));
+  fireEvent.click(screen.getByRole("button", { name: "Stay on this page" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /Synthetic answer/ }) as HTMLInputElement).checked,
+    true,
+  );
+  assert.equal(screen.queryByText("Away page"), null);
+});
+
+test("staying during pending retry preserves the answer and original retry ID", async () => {
+  const bodies = installFetch({
+    answer: async (_body, call) => {
+      if (call === 1) throw new TypeError("simulated network loss");
+      return jsonResponse(attemptResponse({ answered: true, completed: true }));
+    },
+  });
+  await startOneQuestionPractice();
+  fireEvent.click(screen.getByRole("radio", { name: /Synthetic answer/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+  await screen.findByText("Unable to save");
+  fireEvent.click(screen.getByRole("link", { name: "Navigate away" }));
+  fireEvent.click(screen.getByRole("button", { name: "Stay on this page" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /Synthetic answer/ }) as HTMLInputElement).checked,
+    true,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Retry the same answer safely" }));
+  await screen.findByRole("heading", { name: "Practice summary" });
+  assert.equal(bodies[0]?.requestId, bodies[1]?.requestId);
+});
+
+test("warns while a save is in flight and keeps the selected answer when staying", async () => {
+  let acknowledge!: (response: Response) => void;
+  installFetch({
+    answer: async () =>
+      new Promise<Response>((resolve) => {
+        acknowledge = resolve;
+      }),
+  });
+  await startOneQuestionPractice();
+  fireEvent.click(screen.getByRole("radio", { name: /Synthetic answer/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
+  await screen.findByText("Saving");
+
+  fireEvent.click(screen.getByRole("link", { name: "Navigate away" }));
+  fireEvent.click(screen.getByRole("button", { name: "Stay on this page" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /Synthetic answer/ }) as HTMLInputElement).checked,
+    true,
+  );
+  acknowledge(jsonResponse(attemptResponse({ answered: true, completed: true })));
+  await screen.findByRole("heading", { name: "Practice summary" });
+});
+
 test("explains missing session or active exam access without treating a demo role as authority", async () => {
   globalThis.fetch = async () =>
     jsonResponse({ error: { code: "unauthenticated", requestId: "synthetic" } }, 401);
-  render(createElement(LearnerPractice));
+  renderPractice();
   await screen.findByRole("alert");
   assert.match(
     screen.getByRole("alert").textContent ?? "",

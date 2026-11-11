@@ -54,6 +54,8 @@ interface AttemptItemRow {
   is_correct: number | null;
 }
 
+interface AttemptSnapshotRow extends AttemptRow, AttemptItemRow {}
+
 interface PublishedQuestionRow {
   position: number;
   question_id: string;
@@ -314,22 +316,55 @@ export async function listPracticeAttempts(
 
 async function loadAttemptResponse(
   database: SecurityDatabase,
-  row: AttemptRow,
-): Promise<PracticeAttemptResponse> {
-  const itemRows = await database
+  userId: string,
+  tokenDigest: string,
+  attemptId: string,
+  now: number,
+): Promise<PracticeAttemptResponse | null> {
+  const rows = await database
     .prepare(
-      `SELECT item.position, item.question_id, item.question_revision_id,
+      `SELECT attempt.id, attempt.certification_id, attempt.exam_version_id,
+              attempt.state, attempt.version, attempt.question_count,
+              attempt.current_position, attempt.correct_count,
+              attempt.filters_json, attempt.create_request_id,
+              attempt.created_at, attempt.updated_at, attempt.completed_at,
+              item.position, item.question_id, item.question_revision_id,
               item.snapshot_json, answer.selected_option_key, answer.is_correct
-       FROM practice_attempt_items AS item
+       FROM practice_attempts AS attempt
+       JOIN exam_versions AS version
+         ON version.certification_id = attempt.certification_id
+        AND version.id = attempt.exam_version_id
+       JOIN practice_attempt_items AS item
+         ON item.attempt_id = attempt.id
        LEFT JOIN practice_answer_events AS answer
-         ON answer.attempt_id = item.attempt_id
+         ON answer.attempt_id = attempt.id
         AND answer.item_position = item.position
-       WHERE item.attempt_id = ?
+       WHERE attempt.id = ? AND attempt.user_id = ?
+         AND ${activeSessionSql("attempt")}
+         AND ${activeGrantSql("attempt")}
        ORDER BY item.position`,
     )
-    .bind(row.id)
-    .all<AttemptItemRow>();
-  const items = itemRows.results.map((item) => {
+    .bind(attemptId, userId, tokenDigest, now, now, now)
+    .all<AttemptSnapshotRow>();
+  const snapshotRows = rows.results;
+  const first = snapshotRows[0];
+  if (!first) return null;
+  const row: AttemptRow = {
+    id: first.id,
+    certification_id: first.certification_id,
+    exam_version_id: first.exam_version_id,
+    state: first.state,
+    version: first.version,
+    question_count: first.question_count,
+    current_position: first.current_position,
+    correct_count: first.correct_count,
+    filters_json: first.filters_json,
+    create_request_id: first.create_request_id,
+    created_at: first.created_at,
+    updated_at: first.updated_at,
+    completed_at: first.completed_at,
+  };
+  const items = snapshotRows.map((item) => {
     const snapshot = JSON.parse(item.snapshot_json) as Snapshot;
     const answered = item.selected_option_key !== null;
     return {
@@ -360,8 +395,14 @@ export async function getPracticeAttempt(
   attemptId: string,
   now: number,
 ): Promise<PracticeResult<PracticeAttemptResponse>> {
-  const row = await findAttempt(database, userId, tokenDigest, attemptId, now);
-  if (!row) {
+  const response = await loadAttemptResponse(
+    database,
+    userId,
+    tokenDigest,
+    attemptId,
+    now,
+  );
+  if (!response) {
     const owned = await database
       .prepare("SELECT certification_id FROM practice_attempts WHERE id = ? AND user_id = ?")
       .bind(attemptId, userId)
@@ -371,7 +412,7 @@ export async function getPracticeAttempt(
       reason: owned ? "access-required" : "not-found",
     };
   }
-  return { ok: true, value: await loadAttemptResponse(database, row) };
+  return { ok: true, value: response };
 }
 
 function sameFilters(
@@ -612,7 +653,16 @@ export async function startPracticeAttempt(
       now,
     );
     if (!existing) return { ok: false, reason: "access-required" };
-    return { ok: true, value: await loadAttemptResponse(database, existing) };
+    const response = await loadAttemptResponse(
+      database,
+      userId,
+      tokenDigest,
+      existing.id,
+      now,
+    );
+    return response
+      ? { ok: true, value: response }
+      : { ok: false, reason: "access-required" };
   }
 
   if (
@@ -746,10 +796,16 @@ export async function startPracticeAttempt(
           now,
         );
         if (!accessible) return { ok: false, reason: "access-required" };
-        return {
-          ok: true,
-          value: await loadAttemptResponse(database, accessible),
-        };
+        const response = await loadAttemptResponse(
+          database,
+          userId,
+          tokenDigest,
+          accessible.id,
+          now,
+        );
+        return response
+          ? { ok: true, value: response }
+          : { ok: false, reason: "access-required" };
       }
       return { ok: false, reason: "access-required" };
     }
@@ -776,7 +832,16 @@ export async function startPracticeAttempt(
         now,
       );
       if (!accessible) return { ok: false, reason: "access-required" };
-      return { ok: true, value: await loadAttemptResponse(database, accessible) };
+      const response = await loadAttemptResponse(
+        database,
+        userId,
+        tokenDigest,
+        accessible.id,
+        now,
+      );
+      return response
+        ? { ok: true, value: response }
+        : { ok: false, reason: "access-required" };
     }
     throw new Error("Practice attempt transaction failed", { cause: error });
   }
@@ -789,7 +854,16 @@ export async function startPracticeAttempt(
     now,
   );
   if (!created) throw new Error("Created practice attempt could not be read");
-  return { ok: true, value: await loadAttemptResponse(database, created) };
+  const response = await loadAttemptResponse(
+    database,
+    userId,
+    tokenDigest,
+    created.id,
+    now,
+  );
+  return response
+    ? { ok: true, value: response }
+    : { ok: false, reason: "access-required" };
 }
 
 export async function submitPracticeAnswer(
@@ -847,7 +921,16 @@ export async function submitPracticeAnswer(
       now,
     );
     if (!replay) return { ok: false, reason: "access-required" };
-    return { ok: true, value: await loadAttemptResponse(database, replay) };
+    const response = await loadAttemptResponse(
+      database,
+      userId,
+      tokenDigest,
+      replay.id,
+      now,
+    );
+    return response
+      ? { ok: true, value: response }
+      : { ok: false, reason: "access-required" };
   }
 
   const inserted = await database
@@ -923,5 +1006,14 @@ export async function submitPracticeAnswer(
     now,
   );
   if (!updated) return { ok: false, reason: "access-required" };
-  return { ok: true, value: await loadAttemptResponse(database, updated) };
+  const response = await loadAttemptResponse(
+    database,
+    userId,
+    tokenDigest,
+    updated.id,
+    now,
+  );
+  return response
+    ? { ok: true, value: response }
+    : { ok: false, reason: "access-required" };
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useBlocker } from "react-router";
 import {
   getPracticeAttempt,
   LearnerPracticeApiError,
@@ -96,6 +97,22 @@ export function LearnerPractice() {
   const attemptRequest = useRef(0);
   const activeAttemptId = useRef<string | null>(null);
   const pendingAnswerRef = useRef<PendingAnswer | null>(null);
+  const hasPendingWork =
+    Boolean(selectedOptionKey) ||
+    Boolean(pendingAnswer) ||
+    saveState === "saving" ||
+    isStarting;
+  const blocker = useBlocker(hasPendingWork);
+
+  useEffect(() => {
+    if (!hasPendingWork) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasPendingWork]);
 
   const selectedScope =
     scopes.find((scope) => scopeKey(scope) === selectedScopeKey) ?? null;
@@ -363,6 +380,32 @@ export function LearnerPractice() {
       </p>
 
       {loadError && <p className="form-errors" role="alert">{loadError}</p>}
+
+      {blocker.state === "blocked" && (
+        <section className="card navigation-warning" role="alertdialog" aria-labelledby="leave-practice-title">
+          <h2 id="leave-practice-title">Leave this practice?</h2>
+          <p>
+            Your selected answer is not saved yet, or a save is still awaiting
+            acknowledgement. Leaving now may discard that work.
+          </p>
+          <div className="practice-actions">
+            <button
+              className="button-secondary"
+              type="button"
+              onClick={() => blocker.reset()}
+            >
+              Stay on this page
+            </button>
+            <button
+              className="button-primary"
+              type="button"
+              onClick={() => blocker.proceed()}
+            >
+              Leave practice
+            </button>
+          </div>
+        </section>
+      )}
 
       {attempt ? (
         <div className="practice-column">

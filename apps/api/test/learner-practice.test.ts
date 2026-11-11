@@ -210,6 +210,7 @@ async function createPractice(
     attempt: {
       id: string;
       version: number;
+      currentPosition: number;
       state: string;
       correctCount?: number;
       filters: { domainId?: string; difficulty?: string };
@@ -488,6 +489,76 @@ describe("protected learner practice Worker/D1 boundary", () => {
     });
     expect(stale.status).toBe(409);
     expect((await request(learner, `/attempts/${attemptId}`)).status).toBe(200);
+  });
+
+  it("returns a coherent resume snapshot while another device saves an answer", async () => {
+    const scope = await createContentScope(database);
+    await Promise.all([
+      publishQuestion(scope, `practice-${crypto.randomUUID()}`),
+      publishQuestion(scope, `practice-${crypto.randomUUID()}`),
+    ]);
+    const learner = await createLearner(scope.certificationId);
+    const { response: created, body } = await createPractice(learner, scope, 2);
+    expect(created.status).toBe(201);
+
+    const secondDeviceCredentials = await createTestSessionCredentials(
+      database,
+      learner.userId,
+      { now: Date.now(), expiresAt: Date.now() + 60 * 60 * 1000 },
+    );
+    const secondDevice = {
+      ...learner,
+      tokenDigest: secondDeviceCredentials.tokenDigest,
+      rawToken: secondDeviceCredentials.rawToken,
+    };
+    const answerRequestId = crypto.randomUUID();
+    const [savedResponse, concurrentResume] = await Promise.all([
+      request(learner, `/attempts/${body.attempt.id}/answers`, {
+        method: "POST",
+        body: {
+          expectedVersion: 1,
+          requestId: answerRequestId,
+          selectedOptionKey: "A",
+        },
+      }),
+      request(secondDevice, `/attempts/${body.attempt.id}`),
+    ]);
+    expect(savedResponse.status).toBe(200);
+    expect(concurrentResume.status).toBe(200);
+    const saved = await savedResponse.json() as typeof body;
+    const resumedDuringSave = await concurrentResume.json() as typeof body;
+
+    const completedSnapshotIsVisible =
+      resumedDuringSave.attempt.version === 2;
+    expect(
+      resumedDuringSave.attempt.currentPosition,
+    ).toBe(completedSnapshotIsVisible ? 1 : 0);
+    expect(resumedDuringSave.items.filter(
+      (item) => item.selectedOptionKey !== undefined,
+    )).toHaveLength(completedSnapshotIsVisible ? 1 : 0);
+    expect(resumedDuringSave.items[0]?.selectedOptionKey).toBe(
+      completedSnapshotIsVisible ? "A" : undefined,
+    );
+    expect(saved.attempt).toMatchObject({
+      version: 2,
+      currentPosition: 1,
+    });
+    expect(saved.items[0]).toMatchObject({
+      selectedOptionKey: "A",
+      isCorrect: true,
+    });
+
+    const resumedAfterSave = await request(
+      secondDevice,
+      `/attempts/${body.attempt.id}`,
+    );
+    const finalSnapshot = await resumedAfterSave.json() as typeof body;
+    expect(finalSnapshot.attempt).toMatchObject({
+      version: saved.attempt.version,
+      currentPosition: saved.attempt.currentPosition,
+      state: saved.attempt.state,
+    });
+    expect(finalSnapshot.items).toEqual(saved.items);
   });
 
   it("keeps the original question revision after publication replacement and retirement", async () => {
