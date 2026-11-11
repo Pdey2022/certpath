@@ -3,24 +3,32 @@ import {
   createdDraftResponseSchema,
   createdIdResponseSchema,
   createdRevisionResponseSchema,
+  certificationListResponseSchema,
   csrfResponseSchema,
   createDomainRequestSchema,
   createExamVersionRequestSchema,
   createQuestionRequestSchema,
   createQuestionRevisionRequestSchema,
   createTopicRequestSchema,
+  contentPageQuerySchema,
+  domainListResponseSchema,
   emptyMutationRequestSchema,
   exportQuerySchema,
+  examVersionListResponseSchema,
   importConfirmationResponseSchema,
   importPreviewResponseSchema,
   protectedPathIdSchema,
   pointerVersionResponseSchema,
   questionRevisionResponseSchema,
+  questionListResponseSchema,
+  questionPageQuerySchema,
+  questionRevisionListResponseSchema,
   questionReviewRequestSchema,
   publishQuestionRequestSchema,
   reviewIdResponseSchema,
   revisionIdResponseSchema,
   retireQuestionRequestSchema,
+  topicListResponseSchema,
 } from "@certpath/contracts";
 import type { SecurityDatabase } from "./security/database.ts";
 import {
@@ -44,7 +52,16 @@ import {
 } from "./security/question-imports.ts";
 import type { StaffMfaPolicy } from "./security/mfa.ts";
 import {
+  listAuthorizedCertifications,
+  listDomains,
+  listExamVersions,
+  listQuestionRevisions,
+  listQuestions,
+  listTopics,
+} from "./security/content-queries.ts";
+import {
   authorizeCertification,
+  authorizeStaffSession,
   findActiveApplicationSession,
 } from "./security/repository.ts";
 
@@ -504,6 +521,28 @@ async function questionExistsInVersion(
   return row !== null;
 }
 
+function strictQueryObject(context: ProtectedContext): Record<string, string> | Response {
+  const entries = [...new URL(context.req.url).searchParams.entries()];
+  const query: Record<string, string> = {};
+  for (const [key, value] of entries) {
+    if (key in query) return errorResponse(context, 400, "validation_error");
+    query[key] = value;
+  }
+  return query;
+}
+
+function parseQuery<T>(
+  context: ProtectedContext,
+  schema: { safeParse(input: unknown): { success: true; data: T } | { success: false } },
+): { value: T } | { response: Response } {
+  const query = strictQueryObject(context);
+  if (query instanceof Response) return { response: query };
+  const parsed = schema.safeParse(query);
+  return parsed.success
+    ? { value: parsed.data }
+    : { response: errorResponse(context, 400, "validation_error") };
+}
+
 function configurePrivateResponse(context: ProtectedContext): void {
   context.header("Cache-Control", "private, no-store, max-age=0");
   context.header("X-Robots-Tag", "noindex, nofollow");
@@ -555,6 +594,161 @@ protectedApi.get("/csrf", async (context) => {
   const token = await csrfToken(principal);
   return context.json(csrfResponseSchema.parse({ csrfToken: token }));
 });
+
+protectedApi.get("/certifications", async (context) => {
+  const principal = context.get("principal");
+  const policy = principal.configuration.policy;
+  const authorization = await authorizeStaffSession(
+    context.env.DB,
+    principal.tokenDigest,
+    Date.now(),
+    policy,
+  );
+  if (!authorization.allowed) return contentError(context, authorization.reason);
+  const parsed = parseQuery(context, contentPageQuerySchema);
+  if ("response" in parsed) return parsed.response;
+  const result = await listAuthorizedCertifications(
+    context.env.DB,
+    principal.tokenDigest,
+    Date.now(),
+    policy,
+    {
+      cursor: parsed.value.cursor,
+      pageSize: parsed.value.limit,
+    },
+  );
+  return context.json(certificationListResponseSchema.parse(result));
+});
+
+protectedApi.get(
+  "/certifications/:certificationId/exam-versions",
+  async (context) => {
+    const certificationId = validPathId(context, context.req.param("certificationId"));
+    if (certificationId instanceof Response) return certificationId;
+    const denied = await requireCertification(context, certificationId);
+    if (denied) return denied;
+    const parsed = parseQuery(context, contentPageQuerySchema);
+    if ("response" in parsed) return parsed.response;
+    const principal = context.get("principal");
+    const result = await listExamVersions(context.env.DB, {
+      certificationId,
+      tokenDigest: principal.tokenDigest,
+      now: Date.now(),
+      policy: principal.configuration.policy,
+      cursor: parsed.value.cursor,
+      pageSize: parsed.value.limit,
+    });
+    return context.json(examVersionListResponseSchema.parse(result));
+  },
+);
+
+protectedApi.get(
+  "/certifications/:certificationId/exam-versions/:examVersionId/domains",
+  async (context) => {
+    const certificationId = validPathId(context, context.req.param("certificationId"));
+    const examVersionId = validPathId(context, context.req.param("examVersionId"));
+    if (certificationId instanceof Response) return certificationId;
+    if (examVersionId instanceof Response) return examVersionId;
+    const denied = await requireCertification(context, certificationId);
+    if (denied) return denied;
+    const parsed = parseQuery(context, contentPageQuerySchema);
+    if ("response" in parsed) return parsed.response;
+    const principal = context.get("principal");
+    const result = await listDomains(context.env.DB, {
+      certificationId,
+      examVersionId,
+      tokenDigest: principal.tokenDigest,
+      now: Date.now(),
+      policy: principal.configuration.policy,
+      cursor: parsed.value.cursor,
+      pageSize: parsed.value.limit,
+    });
+    return context.json(domainListResponseSchema.parse(result));
+  },
+);
+
+protectedApi.get(
+  "/certifications/:certificationId/exam-versions/:examVersionId/domains/:domainId/topics",
+  async (context) => {
+    const certificationId = validPathId(context, context.req.param("certificationId"));
+    const examVersionId = validPathId(context, context.req.param("examVersionId"));
+    const domainId = validPathId(context, context.req.param("domainId"));
+    if (certificationId instanceof Response) return certificationId;
+    if (examVersionId instanceof Response) return examVersionId;
+    if (domainId instanceof Response) return domainId;
+    const denied = await requireCertification(context, certificationId);
+    if (denied) return denied;
+    const parsed = parseQuery(context, contentPageQuerySchema);
+    if ("response" in parsed) return parsed.response;
+    const principal = context.get("principal");
+    const result = await listTopics(context.env.DB, {
+      certificationId,
+      examVersionId,
+      domainId,
+      tokenDigest: principal.tokenDigest,
+      now: Date.now(),
+      policy: principal.configuration.policy,
+      cursor: parsed.value.cursor,
+      pageSize: parsed.value.limit,
+    });
+    return context.json(topicListResponseSchema.parse(result));
+  },
+);
+
+protectedApi.get(
+  "/certifications/:certificationId/exam-versions/:examVersionId/questions",
+  async (context) => {
+    const certificationId = validPathId(context, context.req.param("certificationId"));
+    const examVersionId = validPathId(context, context.req.param("examVersionId"));
+    if (certificationId instanceof Response) return certificationId;
+    if (examVersionId instanceof Response) return examVersionId;
+    const denied = await requireCertification(context, certificationId);
+    if (denied) return denied;
+    const parsed = parseQuery(context, questionPageQuerySchema);
+    if ("response" in parsed) return parsed.response;
+    const principal = context.get("principal");
+    const result = await listQuestions(context.env.DB, {
+      certificationId,
+      examVersionId,
+      domainId: parsed.value.domainId,
+      topicId: parsed.value.topicId,
+      tokenDigest: principal.tokenDigest,
+      now: Date.now(),
+      policy: principal.configuration.policy,
+      cursor: parsed.value.cursor,
+      pageSize: parsed.value.limit,
+    });
+    return context.json(questionListResponseSchema.parse(result));
+  },
+);
+
+protectedApi.get(
+  "/certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/revisions",
+  async (context) => {
+    const certificationId = validPathId(context, context.req.param("certificationId"));
+    const examVersionId = validPathId(context, context.req.param("examVersionId"));
+    const questionId = validPathId(context, context.req.param("questionId"));
+    if (certificationId instanceof Response) return certificationId;
+    if (examVersionId instanceof Response) return examVersionId;
+    if (questionId instanceof Response) return questionId;
+    const denied = await requireCertification(context, certificationId);
+    if (denied) return denied;
+    const parsed = parseQuery(context, contentPageQuerySchema);
+    if ("response" in parsed) return parsed.response;
+    const principal = context.get("principal");
+    const result = await listQuestionRevisions(context.env.DB, {
+      certificationId,
+      examVersionId,
+      questionId,
+      tokenDigest: principal.tokenDigest,
+      now: Date.now(),
+      policy: principal.configuration.policy,
+      cursor: parsed.value.cursor,
+      pageSize: parsed.value.limit,
+    });
+    return context.json(questionRevisionListResponseSchema.parse(result));
+  },
+);
 
 protectedApi.post("/certifications/:certificationId/exam-versions", async (context) => {
   const certificationId = validPathId(context, context.req.param("certificationId"));

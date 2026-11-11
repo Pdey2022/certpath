@@ -110,6 +110,86 @@ export const exportQuerySchema = z
   })
   .strict();
 
+const contentPageQueryFields = {
+  cursor: id.optional(),
+  limit: z
+    .string()
+    .regex(/^[1-9]\d*$/)
+    .transform(Number)
+    .pipe(safeInteger.positive().max(50))
+    .optional()
+    .transform((value) => value ?? 25),
+};
+
+export const contentPageQuerySchema = z
+  .object(contentPageQueryFields)
+  .strict();
+
+export const questionPageQuerySchema = z
+  .object({
+    ...contentPageQueryFields,
+    domainId: id,
+    topicId: id,
+    search: z.string().trim().min(1).max(100).optional(),
+  })
+  .strict();
+
+function contentPageSchema<T extends z.ZodType>(item: T) {
+  return z
+    .object({
+      items: z.array(item),
+      nextCursor: id.nullable(),
+    })
+    .strict();
+}
+
+export const certificationListResponseSchema = contentPageSchema(
+  z.object({ id, slug: z.string(), displayName: z.string() }).strict(),
+);
+
+export const examVersionListResponseSchema = contentPageSchema(
+  z.object({ id, versionKey: z.string(), title: z.string() }).strict(),
+);
+
+export const domainListResponseSchema = contentPageSchema(
+  z.object({
+    id,
+    domainKey: z.string(),
+    title: z.string(),
+    order: safeInteger.nonnegative(),
+  }).strict(),
+);
+
+export const topicListResponseSchema = contentPageSchema(
+  z.object({
+    id,
+    topicKey: z.string(),
+    title: z.string(),
+    order: safeInteger.nonnegative(),
+  }).strict(),
+);
+
+export const questionListResponseSchema = contentPageSchema(
+  z.object({
+    id,
+    questionKey: z.string(),
+    currentRevisionId: id,
+    revisionNumber: safeInteger.positive(),
+    lockVersion: safeInteger.positive(),
+    stem: z.string(),
+    workflowState: z.string(),
+  }).strict(),
+);
+
+export const questionRevisionListResponseSchema = contentPageSchema(
+  z.object({
+    id,
+    revisionNumber: safeInteger.positive(),
+    workflowState: z.string(),
+    createdAt: safeInteger,
+  }).strict(),
+);
+
 export const protectedPathIdSchema = id;
 
 export const csrfResponseSchema = z

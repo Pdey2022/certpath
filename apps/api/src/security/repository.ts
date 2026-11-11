@@ -135,6 +135,23 @@ export async function authorizeGlobalAdmin(
   return { allowed: true, userId: session.userId, role: role.role };
 }
 
+export async function authorizeStaffSession(
+  database: SecurityDatabase,
+  tokenDigest: string,
+  now: number,
+  policy: StaffMfaPolicy | undefined,
+): Promise<AuthorizationResult> {
+  const session = await findActiveApplicationSession(database, tokenDigest, now);
+  if (!session) return { allowed: false, reason: "invalid-session" };
+
+  const primary = database.withSession("first-primary");
+  const role = await findActiveRole(primary, session.userId);
+  if (!role) return { allowed: false, reason: "not-staff" };
+  const failure = mfaFailure(session, now, policy);
+  if (failure) return { allowed: false, reason: failure };
+  return { allowed: true, userId: session.userId, role: role.role };
+}
+
 export async function authorizeCertification(
   database: SecurityDatabase,
   tokenDigest: string,
