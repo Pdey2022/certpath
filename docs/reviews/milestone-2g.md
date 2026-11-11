@@ -54,7 +54,7 @@ sign-in, session issuance, import/export UI, learner features or deployment.
 | Worker/D1 review-publication regression | Passed within the API suite: assigned Manager rejection/correction, exact-revision approval, publication and replacement, stale pointer conflict, retirement/history preservation, exact status read and unassigned Manager denial. |
 | Editor workflow and race tests | Passed within the web suite: submit/review/publish/retire actions, preserved review notes on conflict, explicit refresh/retry, publication conflict recovery and a late response after switching questions. |
 | Authenticated browser layout | Passed using an assigned synthetic Manager session and synthetic content in an isolated local Worker/D1 fixture. At 1280×900, review notes and enabled approval/rejection actions were visible. At 390×844, the published revision and retirement action were visible, with no horizontal overflow. Retirement confirmation appeared and was canceled; no browser action changed fixture content. |
-| Ubuntu GitHub Actions | Pending PR creation; final result will be recorded after checks finish on the final commit. |
+| Ubuntu GitHub Actions | Passed on implementation commit `d6a8790a90f2a2dfd92965a29ea54ea867dcf3b4`: [CI run](https://github.com/Pdey2022/certpath/actions/runs/43024110701). The handoff-only update is also being checked on its final commit. |
 
 The browser check used an explicitly configured local MFA policy and a
 temporary localhost certificate. Both the certificate trust entry and
