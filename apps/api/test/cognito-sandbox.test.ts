@@ -300,6 +300,46 @@ describe("Cognito sandbox authorization-code proof harness", () => {
     expect(await loginTransactionCount()).toBe(before);
   });
 
+  it("preflights the tester restriction while sign-in is disabled", async () => {
+    const before = await loginTransactionCount();
+    const disabledBindings = {
+      ...bindings,
+      COGNITO_SANDBOX_ENABLED: "false",
+    };
+    const allowed = await application.fetch(
+      new Request(`${origin}/api/auth/cognito/preflight`, {
+        headers: { "CF-Connecting-IP": allowedClientIp },
+      }),
+      disabledBindings,
+    );
+    const denied = await application.fetch(
+      new Request(`${origin}/api/auth/cognito/preflight`, {
+        headers: {
+          "CF-Connecting-IP": "203.0.113.77",
+          "X-Forwarded-For": allowedClientIp,
+        },
+      }),
+      disabledBindings,
+    );
+    const start = await application.fetch(
+      new Request(`${origin}/api/auth/cognito/start?audience=staff`, {
+        headers: { "CF-Connecting-IP": allowedClientIp },
+      }),
+      disabledBindings,
+    );
+
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toEqual({
+      signInEnabled: false,
+    });
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toMatchObject({
+      error: { code: "sandbox_access_denied" },
+    });
+    expect(start.status).toBe(503);
+    expect(await loginTransactionCount()).toBe(before);
+  });
+
   it("binds client, state, nonce and PKCE to one browser-bound transaction", async () => {
     const identity = await createIdentity("global_admin");
     const result = await login("staff", identity.subject);

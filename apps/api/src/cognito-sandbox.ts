@@ -478,16 +478,40 @@ export function createCognitoSandboxApi(fetcher: Fetcher = fetch) {
 
   router.use("*", async (context, next) => {
     privateHeaders(context);
-    const config = readConfiguration(context.env);
-    if (!config) return errorResponse(context, 503, "auth_not_configured");
+    const allowedClientIps = readAllowedClientIps(
+      context.env.COGNITO_SANDBOX_ALLOWED_CLIENT_IPS,
+    );
+    if (!allowedClientIps) {
+      return errorResponse(context, 503, "sandbox_access_not_configured");
+    }
     const clientIp = canonicalIpAddress(
       context.req.header("CF-Connecting-IP"),
     );
-    if (!clientIp || !config.allowedClientIps.includes(clientIp)) {
+    if (!clientIp || !allowedClientIps.includes(clientIp)) {
       return errorResponse(context, 403, "sandbox_access_denied");
+    }
+    const requestUrl = new URL(context.req.url);
+    if (
+      context.env.COGNITO_SANDBOX_ENABLED !== "true" &&
+      (context.req.method !== "GET" ||
+        requestUrl.pathname !== "/api/auth/cognito/preflight")
+    ) {
+      return errorResponse(context, 503, "auth_not_configured");
+    }
+    if (
+      context.env.COGNITO_SANDBOX_ENABLED === "true" &&
+      !readConfiguration(context.env)
+    ) {
+      return errorResponse(context, 503, "auth_not_configured");
     }
     await next();
   });
+
+  router.get("/preflight", (context) =>
+    context.json({
+      signInEnabled: context.env.COGNITO_SANDBOX_ENABLED === "true",
+    }),
+  );
 
   router.get("/start", async (context) => {
     const config = readConfiguration(context.env);

@@ -1,8 +1,8 @@
 # Cognito staff MFA sandbox review
 
-Status: **local proof harness and access controls implemented; live Cognito
-sandbox untested**.
-No AWS pool, remote Worker, or remote D1 database was created or changed.
+Status: **local staff-proof harness and access controls implemented; live
+staff and learner phases untested**.
+No AWS pool, Cloudflare Worker, or remote D1 database was created or changed.
 
 ## Summary
 
@@ -20,27 +20,27 @@ callback and application API boundary, but the provider endpoints and claims
 are mocked. They do **not** establish Cognito Essentials claim availability or
 prove any live sign-in, email, MFA, SSO, or provider-logout behavior.
 
-Two local-only controls now guard the planned sandbox. The Worker requires an
-exact client-IP allowlist and checks Cloudflare's `CF-Connecting-IP` before
-handling any Cognito route or writing a login transaction. The new
-PreSignUp Lambda handler allows public registration only for the configured
-synthetic learner and administrative creation only for the two configured
-staff addresses. It explicitly leaves both automatic confirmation and email
-verification disabled. Neither control has been exercised against deployed
-Cloudflare ingress or a real Cognito pool.
+The Worker now requires an exact client-IP allowlist before any Cognito route.
+With sign-in disabled, only `GET /api/auth/cognito/preflight` is available:
+the allowed address receives `signInEnabled: false`, while other addresses
+receive 403. Login, callback, CSRF, and logout routes remain disabled. Local
+tests cover this preflight; it has not been checked at Cloudflare's edge.
+
+The runbook separates two phases. The staff-only proof uses one synthetic
+Global Admin and one exam-scoped Manager, disables public signup, and suppresses
+admin invitations. It sends no email and does not need the learner PreSignUp
+Lambda. Learner registration, email verification, and password reset are a
+later phase and remain untested.
 
 The owner approved a **$0 spending cap** and a **5-minute staff MFA freshness
-window**. No AWS CLI or configured AWS credentials were available in this
-environment. Current official pricing confirms that `COGNITO_DEFAULT` uses
-AWS-managed SES resources but does not waive SES email charges. At the current
-Essentials rate, the learner's verification and password-reset emails cost
-about **$0.00032** before retries. AWS account credit eligibility and balance
-are unknown; the current SES pricing page advertises up to $200 in credits
-for eligible new AWS customers, but no account-specific credit check was possible. Wrangler authentication succeeds
-through the workspace command, but it does not report the Cloudflare billing
-plan; the plan and Worker CPU
-headroom are unverified. The existing strict $0 cap is not confirmed;
-provisioning and all potentially billable calls remain stopped.
+window**. AWS CLI is unavailable, so AWS access, account billing, and existing
+Cognito MAU usage cannot be checked. Wrangler authentication succeeds, but
+the Cloudflare plan/quota are unknown; a read-only deployment query reports
+that the expected Worker does not exist. The narrower staff-only phase could
+fit $0 if Cognito Essentials MAUs remain in the published free allowance and
+the account is on Cloudflare Workers Free within its limits, but neither
+condition is verified. No resources were provisioned and sign-in remains
+disabled.
 
 ## Architecture and safeguards
 
@@ -63,19 +63,19 @@ provisioning and all potentially billable calls remain stopped.
   not exercised.
 - `COGNITO_SANDBOX_ALLOWED_CLIENT_IPS` must be a comma-separated list of up
   to 16 exact IPv4 or IPv6 addresses. Empty, malformed, or missing values
-  disable the Cognito route. The route compares the normalized address from
-  `CF-Connecting-IP`; it does not trust `X-Forwarded-For` or CIDR ranges. Local
-  tests inject the Cloudflare header and cannot prove deployed ingress values.
+  block the Cognito routes. The route compares the normalized address from
+  `CF-Connecting-IP`; it does not trust `X-Forwarded-For` or CIDR ranges.
+  While `COGNITO_SANDBOX_ENABLED=false`, the Worker exposes only the preflight
+  endpoint after the IP check. Local tests inject the Cloudflare header and
+  cannot prove deployed ingress values.
 - `apps/api/src/cognito-signup-allowlist.ts` is the proposed Node.js Cognito
   PreSignUp trigger. Configure `COGNITO_SANDBOX_USER_POOL_ID`,
   `COGNITO_SANDBOX_LEARNER_EMAIL`, and
   `COGNITO_SANDBOX_ALLOWED_STAFF_EMAILS` only in Lambda environment settings.
-  The public trigger accepts only the learner; the admin-create trigger
-  accepts only the staff. Public learner signups are not auto-confirmed or
-  auto-verified. Cognito ignores those response flags for `AdminCreateUser`.
-  Staff accounts should be seeded with `AdminCreateUser` and invitation
-  messages suppressed to avoid unneeded email sends. This trigger is not
-  deployed or attached to a user pool.
+  This Lambda is deferred to the learner phase; it is unnecessary when public
+  self-registration is disabled for the staff-only proof. In the later phase,
+  the public trigger accepts only the learner, and the admin-create trigger
+  accepts only the staff.
 - `COGNITO_SANDBOX_ENABLED` is `false` in the checked-in Wrangler config.
   Provider values are blank and secrets are not included in the repository.
   Do not enable this route for production or treat the local harness as a
@@ -84,7 +84,8 @@ provisioning and all potentially billable calls remain stopped.
 ## Files changed
 
 - `apps/api/src/cognito-sandbox.ts` — sandbox-gated login, callback, token
-  validation, session issuance, CSRF, CertPath logout, and pre-D1 IP gate.
+  validation, session issuance, CSRF, CertPath logout, and pre-D1 IP
+  allowlist/preflight.
 - `apps/api/src/cognito-signup-allowlist.ts` — exact-user Cognito PreSignUp
   allowlist for the public learner and admin-seeded staff accounts.
 - `apps/api/src/index.ts` — mounts the route and types its required settings.
@@ -92,7 +93,7 @@ provisioning and all potentially billable calls remain stopped.
   single-use login-transaction storage.
 - `apps/api/test/cognito-sandbox.test.ts` — synthetic signed-token tests
   running through the Worker API and Miniflare D1, including denied-IP
-  requests with no login-transaction write.
+  requests with no login-transaction write and auth-disabled preflight.
 - `apps/api/test/cognito-signup-allowlist.test.ts` — local tests for the
   learner/staff allowlist and the non-auto-verification requirement.
 - `apps/web/wrangler.jsonc` — disabled-by-default sandbox settings and the
@@ -107,125 +108,161 @@ The identity architecture decision remains proposed; no provider was adopted.
 
 | Command or scenario | Result |
 |---|---|
-| `npm exec --workspace @certpath/api -- vitest run --config vitest.config.ts test/cognito-sandbox.test.ts test/cognito-signup-allowlist.test.ts` | Passed: 2 files, 15 tests. |
-| `npm run verify` | Passed on Windows: workspace type checks; 11 API Worker/D1 test files (84 tests); 58 web tests; client and Cloudflare Worker SSR production builds. |
+| `npm exec --workspace @certpath/api -- vitest run --config vitest.config.ts test/cognito-sandbox.test.ts test/cognito-signup-allowlist.test.ts` | Passed: 2 files, 16 tests. |
+| `npm run verify` | Passed on Windows: workspace type checks; 11 API Worker/D1 test files (85 tests); 58 web tests; client and Cloudflare Worker SSR production builds. |
 | `npm exec --workspace @certpath/web -- wrangler whoami` | Passed: Wrangler authenticated. The command does not report the account billing plan. |
 | Authorization-code/PKCE, transaction binding and replay | Passed with synthetic signed tokens and isolated D1 sessions. A callback from another browser is rejected without consuming the valid transaction; the valid callback creates one session and replay is rejected. |
 | Global Admin and Manager staff sessions | Passed with synthetic level-4 TOTP claims. D1 role checks and Manager assigned-versus-unassigned certification authorization were verified. |
 | Wrong client, issuer, nonce, token use, expiry, signature, missing/low assurance, stale/future MFA time | Passed: no staff session was created for the rejected cases. A refreshed-token scenario with stale original `auth_time` was rejected. |
-| Learner signup, verified-email gate, scoped dashboard, and second-exam denial | Passed locally with a synthetic verified identity and a D1 Standard grant for one exam. The granted exam appears in the dashboard; a different exam's attempt list is denied. |
+| Synthetic learner identity, verified-email gate, scoped dashboard, and second-exam denial | Passed locally using synthetic signed tokens and a D1 Standard grant for one exam; this did not exercise Cognito email delivery. |
 | Enrollment-only staff denial and returning login | Passed locally: a synthetic level-1/password-only login creates no staff session; a later fresh level-4 TOTP login for the same D1 Global Admin creates one. |
 | CertPath logout | Passed locally: D1 session revocation prevents subsequent protected API access. |
-| Worker allowlist | Passed locally: an unlisted `CF-Connecting-IP` receives 403 before a D1 login-transaction write, even if `X-Forwarded-For` contains an allowed address. Existing login tests pass with an allowlisted address. Deployed Cloudflare header behavior remains untested. |
-| Cognito signup allowlist | Passed locally: only the configured learner can use public sign-up; only the configured staff addresses can be admin-created; other addresses, pools, and triggers fail closed. Public sign-up is not auto-confirmed or email-verified; Cognito ignores these response flags for `AdminCreateUser`. Lambda deployment, trigger invocation, and real learner verification remain untested. |
-| AWS account and Cloudflare plan for the $0 cap | **Unverified** — AWS CLI is unavailable. Wrangler authentication succeeded, but the command does not report billing plan. No billing checks or cloud resource calls were made. |
-| Live target-pool claim availability; first sign-in/enrollment; returning staff; existing Cognito SSO | **Untested** — no target pool was provisioned under the $0 cap. |
-| Actual learner email verification/password reset, and actual provider logout/revocation effects on a CertPath session | **Untested** — require the live provider sandbox. |
-| Remote Cloudflare Worker and D1 integration | **Untested** — verification used the local Cloudflare Worker test harness and Miniflare D1. |
-| Ubuntu GitHub Actions | Passed on control implementation commit `2d4d80923894a153383451bf6d801f64848f1b52`: [run 43085685495](https://github.com/Pdey2022/certpath/actions/runs/43085685495). |
+| Worker allowlist preflight | Local pass: while sign-in is disabled, an allowlisted IP receives `signInEnabled: false`, an unlisted IP receives 403 (even with an allowed `X-Forwarded-For`), `/start` returns 503, and D1 has no new login transaction. Deployed edge behavior remains untested. |
+| Cognito PreSignUp allowlist | Unit tests passed; intentionally not attached for the staff-only phase because self-registration is disabled. Real Lambda trigger behavior is deferred to the learner phase. |
+| AWS access/billing and Cloudflare plan/quota | **Unverified** — AWS CLI is unavailable; `wrangler whoami` confirms authentication but does not show plan or quota. The read-only deployment query reports that the expected Worker does not exist. No billing checks or cloud resource calls were made. |
+| Live target-pool claims; staff enrollment, returning sign-in, and existing SSO | **Untested** — no target pool or Worker was provisioned under the $0 cap. |
+| Cognito learner registration, email verification, and password reset | **Untested; deferred** until the separate learner email phase. The local synthetic identity test does not count as this test. |
+| Remote Cloudflare Worker/D1 tester restriction and integration | **Untested** — current verification is through the local Worker harness and Miniflare D1; no deployed Worker exists to inspect. |
+| Ubuntu GitHub Actions | Pending for the preflight-route update; the run link will be recorded after CI completes. |
 
 ## Live test setup and teardown checklist
 
 Planning only; checked against official pricing and platform documentation on
 **11 November 2026**. No live resources have been created.
 
-### Cost decision
+### Phase 0 — account and cost gate
 
-| Service | Minimum test usage and current pricing | $0-cap assessment |
+Complete these checks before creating a pool, Worker, D1 database, or Lambda.
+
+| Service | Staff-only usage and published pricing | $0-cap assessment |
 |---|---|---|
-| Cognito Essentials | Three direct MAUs are below the published 10,000 direct-MAU free allowance, assuming the pool stays on Essentials and account-wide usage remains within the allowance. | Expected $0 for these MAUs. |
-| Cognito `COGNITO_DEFAULT` email through SES | The built-in option uses AWS-managed SES resources and avoids a customer SES identity/domain, but Cognito pricing separately bills registration, recovery, and verification email. Current SES Essentials pricing is $0.16 per 1,000 outbound emails; one learner verification plus one reset is approximately **$0.00032**, before retries. Staff invitations can be suppressed during admin creation. | **Not $0 usage.** Credits may offset the charge for eligible accounts, but this account's eligibility and remaining credit are unknown. |
-| Cognito PreSignUp Lambda | Required to restrict public self-registration to the one synthetic learner; the local handler also restricts admin-created accounts to the two synthetic staff addresses. Lambda usage is request/duration metered. | The published Lambda free tier may cover the invocations, but account-wide usage/eligibility is unknown; CloudWatch logging may also be billable. |
-| Cloudflare Worker and D1 | Workers Free includes 100,000 requests/day and 10 ms CPU per invocation. D1 Free includes 5 million rows read/day, 100,000 rows written/day, 5 GB storage, and 10 databases. | Can stay within published Free limits if the account is actually on Free and measured CPU/usage stay within limits. The callback's remote CPU use and actual account plan are unknown. Workers Paid has a $5/month minimum. |
-| Worker tester restriction | Required exact-IP allowlist on `CF-Connecting-IP`, checked before Cognito route work or D1 access. This avoids an additional Access product for the planned single-location test if the client address is stable. | No separate service cost. Must verify the deployed Worker sees the expected edge-provided address and rejects unlisted clients before enabling Cognito. |
+| Cognito Essentials | Two direct staff MAUs are within the published 10,000 direct-MAU free allowance if the pool is Essentials and the account/pool's existing usage has not exhausted that allowance. | **Potentially $0; account usage and billing must be checked first.** |
+| Staff email | Create both users administratively with invitation messages suppressed. Use authenticator-app TOTP, not SMS or email MFA. | No verification, reset, or invitation email is part of this phase, so no SES send is expected. |
+| Cognito PreSignUp Lambda | Not needed for staff-only testing because public self-registration is disabled. | No Lambda invocation or log cost in this phase. |
+| Cloudflare Worker and D1 | Workers Free publishes 100,000 requests/day and 10 ms CPU per invocation. D1 Free publishes 5 million rows read/day, 100,000 rows written/day, 5 GB total storage, and 10 databases. | **Potentially $0** if the account is on Free and usage remains within limits. Verify plan, remaining quota, D1 database count, and deployed Worker CPU; Workers Paid has a $5/month minimum. |
+| Deferred learner email phase | Cognito `COGNITO_DEFAULT` uses AWS-managed SES resources, but email is separately billed. The current SES Essentials rate is $0.16 per 1,000 emails; one verification plus one reset is about **$0.00032**, before retries. | Not included in the staff-only estimate. Requires its own cost approval/credit check before enabling learner signup. |
 
-**Conclusion: not confirmed and remains no-go under the currently approved
-strict $0 cap.** `COGNITO_DEFAULT` is the least-setup email path, not a
-no-charge path: the minimum learner journey has positive SES metered usage.
-Eligible credits might offset it, but the target account's balance is unknown.
-The Cloudflare account's Free plan and remote Worker CPU use are also
-unverified. Confirm the AWS credit/billing state and Cloudflare plan with the
-owner before provisioning; otherwise request approval for a non-zero cap. Do
-not treat a budget alert as a spending cap.
+**Current decision: staff-only cost is plausible but not verified; do not
+provision yet.** AWS CLI is unavailable, so AWS identity, billing, Cognito MAU
+usage, and any applicable credits could not be inspected. Wrangler
+authentication works but does not reveal the account's plan or quota. A
+read-only deployment query confirms that `certpath-foundation` does not
+currently exist in the account. Confirm AWS billing/usage and the Cloudflare
+Free plan/remaining quota with the owner before any resource creation. If
+either account cannot be verified within the $0 cap, keep the test blocked.
 
-### Minimum resources and permissions
+### Minimum resources and permissions for the staff phase
 
-| Provider | Resources | Minimum permissions / notes |
+| Provider | Required resources | Minimum access / cost notes |
 |---|---|---|
-| AWS | One isolated Cognito User Pool in one region on Essentials; required software-token/TOTP MFA; one Cognito-managed hosted-UI domain; separate staff and learner app clients configured for authorization code + PKCE, with no client secret; three synthetic users; one allowlist PreSignUp Lambda. Set email delivery to `COGNITO_DEFAULT`; create staff with invitation sending suppressed. | Use a temporary operator role for the required Cognito pool, domain, app-client, test-user, and Lambda create/read/update/delete operations; scope to the sandbox region and pool where AWS supports resource scoping. Do not use `AdministratorAccess`. Add billing/cost read access for preflight and teardown checks. The Lambda needs a minimal logging role and invoke permission for the target pool. The default email path needs no customer SES identity or sender role, but SES delivery is still billable. |
-| Cloudflare | One separate test Worker deployed to its existing `workers.dev` subdomain; one isolated D1 database with repository migrations; Worker variables for issuer/domain/callback/client IDs, the 300,000 ms/TOTP policy, and exact tester IP allowlist; `CSRF_HMAC_SECRET` and `COGNITO_TRANSACTION_ENCRYPTION_KEY` stored as Worker secrets. No custom domain or DNS zone is required. | Use a short-lived API token scoped to the account with Workers Scripts edit and D1 edit. A separate Access policy is not required if the approved tester IP remains stable and the allowlist is verified. Do not use a global API token. Confirm plan and D1 quota before deploying. |
+| AWS | One isolated Cognito Essentials pool with a Cognito-managed domain, separate staff and learner app clients, public self-registration disabled, TOTP required, and exactly two synthetic staff users. Set `MessageAction=SUPPRESS`; set the synthetic staff email attribute verified administratively because email verification is not under test. | A temporary, region-scoped operator role for the pool, app clients, and two test users, plus billing/MAU read access. Do not use `AdministratorAccess`. No SES identity, PreSignUp Lambda, email MFA, SMS, or invitation delivery is needed. |
+| Cloudflare | One sandbox Worker and isolated D1 database with repository migrations. Worker vars include Cognito issuer/domain/callback/client IDs, the 300,000 ms/TOTP policy, and exact tester IP allowlist. Store `CSRF_HMAC_SECRET` and `COGNITO_TRANSACTION_ENCRYPTION_KEY` as Worker secrets. | A short-lived account token with Workers Scripts edit and D1 edit, only after cost approval. No custom domain or Access product is required for the single-location IP allowlist test. Confirm Workers Free, D1 quota, and CPU budget before creation. |
 
-AWS Cognito MAU free allowance and SES email charges are separate. Avoid SMS
-MFA, custom SES domains, custom domains, paid Cloudflare Workers, and logging
-services not required by the test. The SES Essentials rate assumes ordinary
-outbound messages; retries and any additional setup emails increase usage.
+### Phase 1 — staff MFA proof (no learner email)
+
+After Phase 0 is approved:
+
+1. Use one isolated Cognito Essentials pool with TOTP required. Set
+   `AllowAdminCreateUserOnly=true` to disable public self-registration.
+2. Admin-create exactly one synthetic Global Admin and one synthetic
+   Manager, with `MessageAction=SUPPRESS`. Provide any initial credentials
+   out of band; never put passwords in source, logs, or review evidence.
+   Do not create a learner account or attach the PreSignUp Lambda in this
+   phase.
+3. In D1, seed exactly those two internal staff identities and roles. Assign
+   the Manager to exactly one test certification/exam. Cognito claims do not
+   grant roles or exam permissions.
+4. Keep `COGNITO_SANDBOX_ENABLED=false`, set the exact tester IP allowlist,
+   and deploy only after the account/cost gate. Before enabling sign-in,
+   verify the deployed Worker from both networks:
+   - Approved tester IP: `GET /api/auth/cognito/preflight` returns 200 with
+     `signInEnabled: false`.
+   - Unlisted IP: the same request returns 403 `sandbox_access_denied`, even
+     if the client supplies an allowed `X-Forwarded-For`.
+   - The approved IP receives 503 from `/api/auth/cognito/start` while sign-in
+     is off; neither probe creates a D1 login transaction or CertPath session.
+   - If these results differ, do not enable sign-in. Confirm the Worker sees
+     Cloudflare's edge-provided `CF-Connecting-IP`; never trust a client-set
+     forwarding header.
+5. Only after the preflight passes, enable the sandbox for the bounded test.
+   Test first sign-in and TOTP enrollment, returning staff sign-in, and login
+   from an existing Cognito SSO session for **both** roles.
+6. Pass only if the Worker validates the signed staff-client ID token, exact
+   transaction nonce, issuer, expiry, and `token_use=id`, plus fresh signed
+   `acr=urn:cognito:loa:4`, `amr` containing `pwd`, `otp`, and `mfa`, and
+   `auth_time` within 300 seconds before it creates a CertPath session.
+   Enrollment alone, password-only sign-in, wrong client/nonce, missing or
+   stale evidence, and a refreshed token with stale `auth_time` must create
+   no session. Confirm D1 still controls the Manager's one-exam scope.
+
+### Phase 2 — learner email test (deferred; currently untested)
+
+Only run as a separate, approved phase. Enable public signup with the
+PreSignUp allowlist attached so only the configured synthetic learner can
+register. Complete actual email verification, sign in, and password reset
+using `COGNITO_DEFAULT`; record the two SES sends and their cost. This phase
+is not covered by the staff-only $0 estimate and may exceed the cap without a
+confirmed credit balance or separate owner approval.
 
 ### Acceptance conditions
 
-1. Attach the PreSignUp Lambda to the intended pool. Verify the learner can
-   self-register and complete email verification, while a second email is
-   rejected before Cognito sends mail. Verify only the two staff addresses
-   can be created through the administrative trigger. The Lambda must not
-   auto-confirm or auto-verify public learner signups; Cognito ignores those
-   response flags for `AdminCreateUser`. Use suppressed invitation messages
-   when admin-creating staff.
-2. Verify the deployed Worker accepts only the configured tester IP from
-   `CF-Connecting-IP`, denies another IP, and creates no D1 login transaction
-   for that denied request. Confirm the Cloudflare account is on the Free plan
-   and the Worker remains under its CPU/request quotas.
-3. Seed exactly one synthetic Global Admin and one synthetic Manager in D1.
-   The Manager is assigned to exactly one test certification. Neither role nor
-   assignments come from Cognito claims.
-4. For **each** staff account, a CertPath session is created only after the
-   Worker verifies the signed ID token from the staff client, exact
-   transaction nonce, issuer, expiry and `token_use=id`, plus
-   `acr=urn:cognito:loa:4`, AMR containing `pwd`, `otp`, and `mfa`, and an
-   `auth_time` within the approved 300-second window. Verify first enrollment
-   does not itself pass; then test a completed authenticator-app challenge,
-   returning staff, and an existing Cognito SSO session.
-5. Confirm no staff session is created for a learner-client token, wrong
-   nonce, enrollment-only/password-only result, missing or stale MFA evidence,
-   or refreshed token with stale original `auth_time`. Confirm the resulting
-   Global Admin and Manager permissions are still read from D1 and the Manager
-   is denied for an unassigned exam.
-6. Register one synthetic learner, complete the email-verification challenge,
-   sign in with the learner client, and exercise password reset (count both
-   emails in the SES usage review). Seed one time-bounded Standard grant for
-   the exact test certification and exam version in D1. The dashboard should
-   show that exam; its protected APIs should allow it and deny a second exam.
-7. Use no real identities or question content. Keep raw tokens, passwords,
-   authenticator secrets, email codes, and test addresses out of logs and
-   committed files.
+1. Do not provision until AWS billing/MAU usage and Cloudflare plan/remaining
+   quotas are verified to fit the existing `$0` cap. If either is unknown or
+   over its free allowance, stop and request an owner decision.
+2. In the staff-only phase, public self-registration is disabled, exactly two
+   synthetic staff accounts are admin-created with invitation messages
+   suppressed, and no learner account or learner grant is seeded.
+3. Before enabling sign-in, the deployed preflight returns 200 with
+   `signInEnabled: false` for the allowed tester and 403 for an unlisted
+   tester; `/start` returns 503 while disabled. Neither request creates a D1
+   login transaction or CertPath session.
+4. For both the Global Admin and the exam-scoped Manager, enrollment,
+   returning sign-in, and existing SSO are exercised. A CertPath session is
+   created only after validating the signed staff-client token, exact
+   transaction nonce, issuer, expiry, `token_use=id`, fresh
+   `acr=urn:cognito:loa:4`, AMR containing `pwd`, `otp`, and `mfa`, and
+   `auth_time` within 300 seconds. Enrollment alone, wrong client/nonce,
+   missing or stale evidence, and refreshed tokens with stale `auth_time`
+   create no session. The Manager remains denied for an unassigned exam.
+5. In the separate learner phase only, verify one synthetic learner's
+   registration, email verification, sign-in, scoped Standard grant, and
+   password reset. Until that phase runs, mark all four email/account journey
+   cases **untested**.
+6. Use no real question content or personal identities. Keep raw tokens,
+   passwords, authenticator secrets, email codes, and test addresses out of
+   logs and committed files.
 
 ### Teardown
 
-1. Disable the Cognito sandbox flag and stop the test window; revoke the three
-   CertPath sessions and remove the synthetic D1 identities, roles, assignment,
-   and learner grant.
-2. Delete the three Cognito users, both app clients, hosted-UI domain, and
-   isolated user pool. Remove any temporary Cognito triggers/roles and their
-   logs if added.
-3. Delete the allowlist Lambda and its role/log group, then delete the sandbox
-   Worker and D1 database; remove its secrets and temporary Cloudflare Access
-   policy/API token.
-4. Review AWS SES/Cognito usage and Cloudflare Worker/D1 usage for residual
-   charges, then revoke temporary AWS credentials. Do not delete shared
-   identities, domains, databases, or account-level resources.
+1. Disable `COGNITO_SANDBOX_ENABLED`; revoke the two CertPath staff sessions
+   and remove the two synthetic D1 identities, roles, and Manager assignment.
+2. Delete the two Cognito staff users, app clients, hosted-UI domain, and
+   isolated pool. No learner user or PreSignUp Lambda should exist in the
+   staff-only phase.
+3. Delete the sandbox Worker and D1 database and remove Worker secrets and
+   temporary API tokens.
+4. Review Cognito MAU and Cloudflare Worker/D1 usage for residual charges,
+   then revoke temporary AWS credentials. Do not delete shared identities,
+   domains, databases, or account-level resources.
+5. If the separately approved learner-email phase ran, also delete its learner
+   and PreSignUp Lambda, review SES sends, and clean up its Lambda role/logs.
 
-### Blockers found in review
+### Blockers before provisioning
 
-- **Cost:** the strict $0 cap cannot be guaranteed for the two required email
-  sends. AWS Free Tier credits are conditional, and the Cloudflare plan and
-  CPU headroom are unknown.
-- **Deployment controls not yet verified:** the local Worker allowlist test
-  injects `CF-Connecting-IP`; it does not prove deployed Cloudflare ingress
-  values or remote D1 behavior. The PreSignUp handler is tested as a function,
-  but has not been packaged, deployed, attached to a pool, or tested against
-  real sign-up triggers. Do not enable the feature until both controls pass
-  against the isolated deployment.
-- **Access not yet provisioned:** AWS CLI/account billing access, target-pool
-  configuration, Cloudflare plan, and a remote D1/Worker environment remain
-  unavailable or unverified. No provider claim behavior has been proven.
+- **Account cost gate:** the staff-only proof avoids email charges, but the
+  AWS Essentials MAU allowance, AWS billing state, Cloudflare Free plan, and
+  remaining quotas cannot be verified from this environment. No resources
+  may be created under the current cap until these are confirmed.
+- **Deployed tester gate:** the `certpath-foundation` Worker does not exist in
+  the target Cloudflare account. The local preflight test passes, but the
+  deployed `CF-Connecting-IP` restriction cannot be verified until a Worker
+  is created after the account/cost gate. Keep sign-in disabled until its
+  allowlisted and unlisted preflight requests pass.
+- **Provider proof:** no Cognito pool exists. First enrollment, returning
+  staff, existing SSO, and signed assurance evidence remain untested.
+- **Deferred learner phase:** registration, email verification, and password
+  reset remain untested by design. SES email charges and the PreSignUp Lambda
+  require a separate cost decision before that phase.
 
 ### Official sources
 
@@ -233,6 +270,8 @@ outbound messages; retries and any additional setup emails increase usage.
 - [Amazon SES pricing](https://aws.amazon.com/ses/pricing/) — current SES plans, outbound-email rate, and conditional AWS Free Tier credits.
 - [AWS Lambda pricing](https://aws.amazon.com/lambda/pricing/) — request/duration rates and free-tier allowance for an optional sign-up allowlist.
 - [Cognito email settings](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-email.html) — verification, ForgotPassword, default sender, and SES delivery.
+- [Cognito AdminCreateUser API](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_AdminCreateUser.html) — administrative seeding and invitation suppression.
+- [Cognito AdminCreateUser configuration](https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_AdminCreateUserConfigType.html) — `AllowAdminCreateUserOnly` and self-service sign-up control.
 - [Cognito PreSignUp trigger](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-sign-up.html) — public and admin signup handling, trigger response, and confirmation flags.
 - [Cognito TOTP MFA](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-mfa-totp.html) and [step-up authentication](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-step-up-authentication.html) — software-token MFA and assurance evidence.
 - [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) and [limits](https://developers.cloudflare.com/workers/platform/limits/) — Free/Paid limits and minimum Paid-plan charge.
@@ -250,14 +289,14 @@ architect for the retained Auth0 fallback recommendation.
 
 ## Limitations and unresolved decisions
 
-- The owner-approved `$0` cap blocks provisioning unless an actual no-charge
-  path can be confirmed. `COGNITO_DEFAULT` uses AWS-managed SES resources, but
-  email sends are separately billed; no cost was incurred or assumed to be
-  zero.
-- This is a local server-side harness, not a browser sign-in implementation or
-  a live Cognito proof. Email confirmation, password reset, TOTP enrollment,
-  returning sign-in, SSO, and provider logout still require isolated synthetic
-  accounts in a real target pool.
+- The staff-only proof could fit the `$0` cap if AWS MAUs are within the free
+  allowance and Cloudflare usage remains on Free; neither account condition
+  was verified. `COGNITO_DEFAULT` email sends are separately billed and belong
+  to the deferred learner phase.
+- This is a local server-side harness, not a live Cognito proof. TOTP
+  enrollment, returning staff sign-in, and existing SSO still require
+  synthetic accounts in a real target pool. Learner registration, email
+  verification, and password reset are explicitly deferred and untested.
 - Sandbox session expiry currently follows the verified ID token's `exp`.
   Production CertPath session lifetime and provider-logout behavior remain
   undecided; do not infer them from this sandbox behavior.
@@ -268,7 +307,7 @@ architect for the retained Auth0 fallback recommendation.
 
 1. Run `npm ci`.
 2. Run the focused synthetic boundary tests:
-   `npm exec --workspace @certpath/api -- vitest run --config vitest.config.ts test/cognito-sandbox.test.ts`.
+   `npm exec --workspace @certpath/api -- vitest run --config vitest.config.ts test/cognito-sandbox.test.ts test/cognito-signup-allowlist.test.ts`.
 3. Run `npm run verify`.
 4. Inspect the callback and claim checks in
    `apps/api/src/cognito-sandbox.ts`, the transaction constraints in
@@ -276,8 +315,7 @@ architect for the retained Auth0 fallback recommendation.
    `apps/api/test/cognito-sandbox.test.ts`. Review the allowlist trigger and
    tests in `apps/api/src/cognito-signup-allowlist.ts` and
    `apps/api/test/cognito-signup-allowlist.test.ts`.
-5. Keep `COGNITO_SANDBOX_ENABLED=false` unless the owner explicitly approves
-   a cost-safe target pool and live sandbox execution. Live acceptance must
-   record actual provider evidence for first sign-in/enrollment, returning
-   staff, existing SSO, and the missing/stale-evidence denials before any
-   provider decision.
+5. Keep `COGNITO_SANDBOX_ENABLED=false` unless the account/cost gate is
+   approved. Verify the deployed tester preflight while sign-in is disabled;
+   only then enable sign-in for the staff-only test. Keep learner email tests
+   deferred until separately approved.
