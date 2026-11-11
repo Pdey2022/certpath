@@ -57,6 +57,8 @@ function revision(
   revisionId: string,
   revisionNumber: number,
   stem: string,
+  workflowState = "draft",
+  lockVersion = revisionNumber,
 ) {
   return {
     revisionId,
@@ -66,12 +68,12 @@ function revision(
     domainId: "domain-1",
     topicId: "topic-1",
     revisionNumber,
-    lockVersion: revisionNumber,
+    lockVersion,
     stem,
     difficulty: firstContent.difficulty,
     sourceReference: firstContent.sourceReference,
     licenseReference: firstContent.licenseReference,
-    workflowState: "draft",
+    workflowState,
     options: firstContent.options,
   };
 }
@@ -82,6 +84,7 @@ function questionRow(
   revisionId: string,
   revisionNumber: number,
   lockVersion = revisionNumber,
+  workflowState = "draft",
 ) {
   return {
     id,
@@ -90,7 +93,7 @@ function questionRow(
     revisionNumber,
     lockVersion,
     stem: `Question ${questionKey}`,
-    workflowState: "draft",
+    workflowState,
   };
 }
 
@@ -116,6 +119,21 @@ function installEditorFetch(options: {
   }>;
   detail: (questionId: string, revisionId: string) => Promise<unknown> | unknown;
   correct?: (body: Record<string, unknown>) => Promise<Response> | Response;
+  publication?: (questionId: string) => Promise<unknown> | unknown;
+  submit?: (questionId: string, revisionId: string) => Promise<Response> | Response;
+  review?: (
+    questionId: string,
+    revisionId: string,
+    body: Record<string, unknown>,
+  ) => Promise<Response> | Response;
+  publish?: (
+    questionId: string,
+    body: Record<string, unknown>,
+  ) => Promise<Response> | Response;
+  retire?: (
+    questionId: string,
+    body: Record<string, unknown>,
+  ) => Promise<Response> | Response;
 }) {
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input), browser.location.href);
@@ -145,6 +163,35 @@ function installEditorFetch(options: {
       return jsonResponse({
         items: [{ id: "topic-1", topicKey: "topic", title: "Synthetic topic", order: 0 }],
         nextCursor: null,
+      });
+    }
+    const workflowRevision = path.match(/\/questions\/([^/]+)\/revisions\/([^/]+)\/(submit|review)$/);
+    if (workflowRevision && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      if (workflowRevision[3] === "submit") {
+        return await (options.submit?.(workflowRevision[1], workflowRevision[2]) ??
+          jsonResponse({ revisionId: workflowRevision[2] }));
+      }
+      return await (options.review?.(workflowRevision[1], workflowRevision[2], body) ??
+        jsonResponse({ reviewId: "review-1" }, 201));
+    }
+    const publish = path.match(/\/questions\/([^/]+)\/publish$/);
+    if (publish && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return await (options.publish?.(publish[1], body) ??
+        jsonResponse({ pointerVersion: 1 }));
+    }
+    const retire = path.match(/\/questions\/([^/]+)\/retire$/);
+    if (retire && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return await (options.retire?.(retire[1], body) ??
+        jsonResponse({ pointerVersion: 2 }));
+    }
+    const publication = path.match(/\/questions\/([^/]+)\/publication$/);
+    if (publication) {
+      return jsonResponse(await options.publication?.(publication[1]) ?? {
+        questionId: publication[1],
+        publication: null,
       });
     }
     const exactRevision = path.match(/\/questions\/([^/]+)\/revisions\/([^/]+)$/);
@@ -410,6 +457,12 @@ test("keeps edits after a stale correction and retries only after explicitly loa
         nextCursor: null,
       });
     }
+    if (url.pathname.endsWith("/publication")) {
+      return jsonResponse({
+        questionId: "question-1",
+        publication: null,
+      });
+    }
     if (url.pathname.endsWith("/questions") && init?.method !== "POST") {
       return jsonResponse({
         items: [{
@@ -511,4 +564,422 @@ test("keeps edits after a stale correction and retries only after explicitly loa
     (correctionPayloads[1]?.content as { stem?: string } | undefined)?.stem,
     "My unsaved revised stem?",
   );
+});
+
+test("refreshes exact revision history and question summary after publish, replacement, and retirement", async () => {
+  const revisionStates = new Map([
+    ["revision-1", "approved"],
+    ["revision-2", "approved"],
+  ]);
+  let currentRevisionId = "revision-2";
+  let publication: {
+    revisionId: string;
+    state: "published" | "retired";
+    pointerVersion: number;
+    changedAt: number;
+  } | null = null;
+  const questionSummary = () => questionRow(
+    "question-1",
+    "SYNTHETIC-WORKFLOW",
+    currentRevisionId,
+    2,
+    2,
+    revisionStates.get(currentRevisionId),
+  );
+  installEditorFetch({
+    questions: () => [questionSummary()],
+    revisions: () => [2, 1].map((revisionNumber) => ({
+      id: `revision-${revisionNumber}`,
+      revisionNumber,
+      workflowState: revisionStates.get(`revision-${revisionNumber}`)!,
+      createdAt: revisionNumber,
+    })),
+    detail: (_questionId, revisionId) => revision(
+      revisionId,
+      revisionId === "revision-1" ? 1 : 2,
+      `Synthetic revision ${revisionId.slice(-1)} stem?`,
+      revisionStates.get(revisionId)!,
+      2,
+    ),
+    publication: (questionId) => ({ questionId, publication }),
+    publish: (_questionId, body) => {
+      if (publication) {
+        revisionStates.set(publication.revisionId, "superseded");
+      }
+      const revisionId = String(body.revisionId);
+      revisionStates.set(revisionId, "published");
+      const pointerVersion = (publication?.pointerVersion ?? 0) + 1;
+      publication = {
+        revisionId,
+        state: "published",
+        pointerVersion,
+        changedAt: pointerVersion * 10,
+      };
+      return jsonResponse({ pointerVersion });
+    },
+    retire: () => {
+      assert.ok(publication);
+      revisionStates.set(publication.revisionId, "retired");
+      const pointerVersion = publication.pointerVersion + 1;
+      publication = {
+        revisionId: publication.revisionId,
+        state: "retired",
+        pointerVersion,
+        changedAt: pointerVersion * 10,
+      };
+      return jsonResponse({ pointerVersion });
+    },
+  });
+
+  await openQuestionList();
+  fireEvent.click(await screen.findByRole("button", { name: /SYNTHETIC-WORKFLOW/ }));
+  fireEvent.change(await screen.findByLabelText("Exact revision"), { target: { value: "revision-1" } });
+  await screen.findByText((_, node) =>
+    node?.tagName === "P" &&
+    node.textContent?.trim().replace(/\s+/g, " ") === "Exact revision 1: approved",
+  );
+  const firstStem = screen.getByLabelText("Question stem") as HTMLTextAreaElement;
+  fireEvent.change(firstStem, { target: { value: "Unsaved field value during first publish." } });
+  fireEvent.click(screen.getByRole("button", { name: "Publish approved revision" }));
+  await screen.findByText(/Revision 1 is published/);
+  assert.match(screen.getByText(/Exact revision 1:/).textContent ?? "", /published/);
+  assert.ok(screen.getByText(/revision 1 · pointer version 1/));
+  assert.equal(firstStem.value, "Unsaved field value during first publish.");
+  assert.ok(screen.getByRole("option", { name: "Revision 1 · published" }));
+  assert.match(
+    screen.getByRole("button", { name: /SYNTHETIC-WORKFLOW/ }).textContent ?? "",
+    /Revision 2 · approved/,
+  );
+
+  fireEvent.change(screen.getByLabelText("Exact revision"), { target: { value: "revision-2" } });
+  await screen.findByText((_, node) =>
+    node?.tagName === "P" &&
+    node.textContent?.trim().replace(/\s+/g, " ") === "Exact revision 2: approved",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Replace published revision" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm replacement" }));
+  await screen.findByText(/Revision 2 is published/);
+  assert.match(screen.getByText(/Exact revision 2:/).textContent ?? "", /published/);
+  assert.ok(screen.getByText(/revision 2 · pointer version 2/));
+  assert.ok(screen.getByRole("option", { name: "Revision 1 · superseded" }));
+  assert.ok(screen.getByRole("option", { name: "Revision 2 · published" }));
+  assert.match(
+    screen.getByRole("button", { name: /SYNTHETIC-WORKFLOW/ }).textContent ?? "",
+    /Revision 2 · published/,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Retire published question" }));
+  assert.ok(screen.getByRole("group", { name: "Confirm retirement" }));
+  assert.match(screen.getByText(/removes the question from future selection/).textContent ?? "", /keeps its publication and revision history/);
+  fireEvent.click(screen.getByRole("button", { name: "Confirm retirement" }));
+  await screen.findByText(/question was retired from future selection/);
+  assert.match(screen.getByText(/Exact revision 2:/).textContent ?? "", /retired/);
+  assert.ok(screen.getByText(/revision 2 · pointer version 3/));
+  assert.ok(screen.getByRole("option", { name: "Revision 2 · retired" }));
+  assert.match(
+    screen.getByRole("button", { name: /SYNTHETIC-WORKFLOW/ }).textContent ?? "",
+    /Revision 2 · retired/,
+  );
+});
+
+test("a successful retirement with a failed refresh offers recovery without resubmitting and preserves edits and notes", async () => {
+  const revisionStates = new Map([
+    ["revision-1", "published"],
+    ["revision-2", "submitted"],
+  ]);
+  let publicationReads = 0;
+  let retireCalls = 0;
+  const publication = {
+    revisionId: "revision-1",
+    state: "published" as const,
+    pointerVersion: 1,
+    changedAt: 10,
+  };
+  let currentPublication: typeof publication | {
+    revisionId: string;
+    state: "retired";
+    pointerVersion: number;
+    changedAt: number;
+  } = publication;
+  installEditorFetch({
+    questions: () => [
+      questionRow(
+        "question-1",
+        "SYNTHETIC-REFRESH-FAILURE",
+        "revision-2",
+        2,
+        2,
+        revisionStates.get("revision-2"),
+      ),
+    ],
+    revisions: () => [2, 1].map((revisionNumber) => ({
+      id: `revision-${revisionNumber}`,
+      revisionNumber,
+      workflowState: revisionStates.get(`revision-${revisionNumber}`)!,
+      createdAt: revisionNumber,
+    })),
+    detail: (_questionId, revisionId) => revision(
+      revisionId,
+      revisionId === "revision-1" ? 1 : 2,
+      `Synthetic revision ${revisionId.slice(-1)} stem?`,
+      revisionStates.get(revisionId)!,
+      2,
+    ),
+    publication: (questionId) => {
+      publicationReads += 1;
+      if (publicationReads === 2) throw new Error("Synthetic publication refresh failure.");
+      return { questionId, publication: currentPublication };
+    },
+    retire: () => {
+      retireCalls += 1;
+      revisionStates.set("revision-1", "retired");
+      currentPublication = {
+        revisionId: "revision-1",
+        state: "retired",
+        pointerVersion: 2,
+        changedAt: 20,
+      };
+      return jsonResponse({ pointerVersion: 2 });
+    },
+  });
+
+  await openQuestionList();
+  fireEvent.click(await screen.findByRole("button", { name: /SYNTHETIC-REFRESH-FAILURE/ }));
+  const stem = await screen.findByLabelText("Question stem") as HTMLTextAreaElement;
+  fireEvent.change(stem, { target: { value: "Keep my unsaved question edit." } });
+  const notes = await screen.findByLabelText("Review notes") as HTMLTextAreaElement;
+  fireEvent.change(notes, { target: { value: "Keep my unsaved review notes." } });
+  fireEvent.click(screen.getByRole("button", { name: "Retire published question" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm retirement" }));
+
+  await screen.findByText(/Retirement was saved, but the editor could not refresh/);
+  assert.equal(stem.value, "Keep my unsaved question edit.");
+  assert.equal(notes.value, "Keep my unsaved review notes.");
+  assert.equal(retireCalls, 1);
+  assert.ok(screen.getByRole("button", { name: "Refresh saved workflow state" }));
+  assert.equal(screen.getByRole("button", { name: "Retire published question" }).hasAttribute("disabled"), true);
+
+  fireEvent.click(screen.getByRole("button", { name: "Refresh saved workflow state" }));
+  await screen.findByText(/Workflow state refreshed/);
+  assert.ok(screen.getByText(/revision 1 · pointer version 2/));
+  assert.ok(screen.getByRole("option", { name: "Revision 1 · retired" }));
+  assert.match(screen.getByText(/Exact revision 2:/).textContent ?? "", /submitted/);
+  assert.equal(stem.value, "Keep my unsaved question edit.");
+  assert.equal(notes.value, "Keep my unsaved review notes.");
+  assert.equal(retireCalls, 1);
+});
+
+test("review conflicts preserve notes and require refresh before deliberate retry", async () => {
+  let reviewCalls = 0;
+  let workflowState = "submitted";
+  installEditorFetch({
+    questions: () => [questionRow("question-1", "SYNTHETIC-REVIEW-CONFLICT", "revision-1", 1)],
+    revisions: () => [{
+      id: "revision-1",
+      revisionNumber: 1,
+      workflowState,
+      createdAt: 1,
+    }],
+    detail: (_questionId, revisionId) =>
+      revision(revisionId, 1, firstContent.stem, workflowState),
+    review: (_questionId, _revisionId, body) => {
+      reviewCalls += 1;
+      if (reviewCalls === 1) {
+        return jsonResponse(
+          { error: { code: "conflict", requestId: "review-conflict" } },
+          409,
+        );
+      }
+      workflowState = String(body.decision);
+      return jsonResponse({ reviewId: "review-retry" }, 201);
+    },
+  });
+
+  await openQuestionList();
+  fireEvent.click(await screen.findByRole("button", { name: /SYNTHETIC-REVIEW-CONFLICT/ }));
+  const notes = await screen.findByLabelText("Review notes") as HTMLTextAreaElement;
+  fireEvent.change(notes, { target: { value: "Keep these notes after a conflict." } });
+  fireEvent.click(screen.getByRole("button", { name: "Approve exact revision" }));
+  await screen.findByText(/Review state changed on the server/);
+  assert.equal(notes.value, "Keep these notes after a conflict.");
+  assert.equal(reviewCalls, 1);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh workflow and publication state" }));
+  await screen.findByText(/Workflow state refreshed/);
+  assert.equal(notes.value, "Keep these notes after a conflict.");
+  assert.equal(reviewCalls, 1);
+  fireEvent.click(screen.getByRole("button", { name: "Approve exact revision" }));
+  await screen.findByText((_, node) =>
+    node?.tagName === "P" &&
+    node.textContent?.trim().replace(/\s+/g, " ") === "Exact revision 1: approved",
+  );
+  assert.equal(reviewCalls, 2);
+});
+
+test("publication conflicts retain the selected form and require refreshed pointer confirmation", async () => {
+  let publication = {
+    revisionId: "revision-older",
+    state: "published" as const,
+    pointerVersion: 2,
+    changedAt: 10,
+  };
+  let publishCalls = 0;
+  installEditorFetch({
+    questions: () => [questionRow("question-1", "SYNTHETIC-PUBLISH-CONFLICT", "revision-1", 1)],
+    revisions: () => [{
+      id: "revision-1",
+      revisionNumber: 1,
+      workflowState: "approved",
+      createdAt: 1,
+    }],
+    detail: (_questionId, revisionId) =>
+      revision(revisionId, 1, "The approved exact revision stem?", "approved"),
+    publication: (questionId) => ({ questionId, publication }),
+    publish: (_questionId, body) => {
+      publishCalls += 1;
+      if (publishCalls === 1) {
+        publication = { ...publication, revisionId: "revision-concurrent", pointerVersion: 3 };
+        return jsonResponse(
+          { error: { code: "conflict", requestId: "publish-conflict" } },
+          409,
+        );
+      }
+      assert.equal(body.expectedPointerVersion, 3);
+      publication = {
+        revisionId: String(body.revisionId),
+        state: "published",
+        pointerVersion: 4,
+        changedAt: 20,
+      };
+      return jsonResponse({ pointerVersion: 4 });
+    },
+  });
+
+  await openQuestionList();
+  fireEvent.click(await screen.findByRole("button", { name: /SYNTHETIC-PUBLISH-CONFLICT/ }));
+  const stem = await screen.findByLabelText("Question stem") as HTMLTextAreaElement;
+  assert.equal(stem.value, "The approved exact revision stem?");
+  fireEvent.click(screen.getByRole("button", { name: "Replace published revision" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm replacement" }));
+  await screen.findByText(/Publication state changed on the server/);
+  assert.equal(stem.value, "The approved exact revision stem?");
+  assert.equal(publishCalls, 1);
+  fireEvent.click(screen.getByRole("button", { name: "Refresh workflow and publication state" }));
+  await screen.findByText(/Workflow state refreshed/);
+  assert.ok(screen.getByText(/pointer version 3/));
+  assert.equal(publishCalls, 1);
+  fireEvent.click(screen.getByRole("button", { name: "Replace published revision" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm replacement" }));
+  await screen.findByText(/pointer version 4/);
+  assert.equal(publishCalls, 2);
+});
+
+test("a late publication refresh cannot overwrite the newly selected question", async () => {
+  let publicationReads = 0;
+  let resolvePublication!: (publication: unknown) => void;
+  const pendingPublication = new Promise<unknown>((resolve) => {
+    resolvePublication = resolve;
+  });
+  installEditorFetch({
+    questions: () => [
+      questionRow("question-1", "SYNTHETIC-FIRST-PUBLISH", "revision-1", 1, 1, "approved"),
+      questionRow("question-2", "SYNTHETIC-SECOND-PUBLISH", "revision-2", 1, 1, "approved"),
+    ],
+    revisions: (questionId) => [{
+      id: questionId === "question-1" ? "revision-1" : "revision-2",
+      revisionNumber: 1,
+      workflowState: "approved",
+      createdAt: 1,
+    }],
+    detail: (questionId, revisionId) => ({
+      ...revision(
+        revisionId,
+        1,
+        questionId === "question-1" ? "First approved revision?" : "Second approved revision?",
+        "approved",
+      ),
+      questionId,
+    }),
+    publication: (questionId) => {
+      if (questionId !== "question-1") return { questionId, publication: null };
+      publicationReads += 1;
+      return publicationReads === 1
+        ? { questionId, publication: null }
+        : pendingPublication;
+    },
+    publish: () => jsonResponse({ pointerVersion: 1 }),
+  });
+
+  await openQuestionList();
+  fireEvent.click(await screen.findByRole("button", { name: /SYNTHETIC-FIRST-PUBLISH/ }));
+  await screen.findByRole("button", { name: "Publish approved revision" });
+  fireEvent.click(screen.getByRole("button", { name: "Publish approved revision" }));
+  await waitFor(() => assert.equal(publicationReads, 2));
+
+  fireEvent.click(screen.getByRole("button", { name: /SYNTHETIC-SECOND-PUBLISH/ }));
+  await screen.findByText((_, node) =>
+    node?.tagName === "P" &&
+    node.textContent?.trim().replace(/\s+/g, " ") === "Exact revision 1: approved",
+  );
+  resolvePublication({
+    questionId: "question-1",
+    publication: {
+      revisionId: "revision-1",
+      state: "published",
+      pointerVersion: 1,
+      changedAt: 10,
+    },
+  });
+
+  await waitFor(() => {
+    assert.ok(screen.getByRole("heading", { name: "Edit SYNTHETIC-SECOND-PUBLISH" }));
+    assert.ok(screen.getByText("This question has no publication pointer yet."));
+    assert.equal(screen.queryByText(/pointer version 1/), null);
+  });
+});
+
+test("a late review submission cannot change another selected question", async () => {
+  let resolveSubmit!: (response: Response) => void;
+  const pendingSubmit = new Promise<Response>((resolve) => {
+    resolveSubmit = resolve;
+  });
+  installEditorFetch({
+    questions: () => [
+      questionRow("question-1", "SYNTHETIC-FIRST", "revision-1", 1),
+      questionRow("question-2", "SYNTHETIC-SECOND", "revision-2", 1),
+    ],
+    revisions: (questionId) => [{
+      id: questionId === "question-1" ? "revision-1" : "revision-2",
+      revisionNumber: 1,
+      workflowState: "draft",
+      createdAt: 1,
+    }],
+    detail: (questionId, revisionId) => ({
+      ...revision(
+        revisionId,
+        1,
+        questionId === "question-1" ? "First question revision stem?" : "Second question revision stem?",
+      ),
+      questionId,
+    }),
+    submit: (questionId) =>
+      questionId === "question-1"
+        ? pendingSubmit
+        : jsonResponse({ revisionId: "revision-2" }),
+  });
+
+  await openQuestionList();
+  fireEvent.click(await screen.findByRole("button", { name: /SYNTHETIC-FIRST/ }));
+  await screen.findByRole("button", { name: "Submit saved revision for review" });
+  fireEvent.click(screen.getByRole("button", { name: "Submit saved revision for review" }));
+  await screen.findByRole("button", { name: "Updating workflow…" });
+
+  fireEvent.click(screen.getByRole("button", { name: /SYNTHETIC-SECOND/ }));
+  const stem = await screen.findByLabelText("Question stem") as HTMLTextAreaElement;
+  await waitFor(() => assert.equal(stem.value, "Second question revision stem?"));
+  resolveSubmit(jsonResponse({ revisionId: "revision-1" }));
+  await waitFor(() => {
+    assert.equal(stem.value, "Second question revision stem?");
+    assert.ok(screen.getByRole("button", { name: "Submit saved revision for review" }));
+  });
+  assert.ok(screen.getByRole("heading", { name: /Edit SYNTHETIC-SECOND/ }));
 });

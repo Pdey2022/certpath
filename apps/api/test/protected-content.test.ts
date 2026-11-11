@@ -1062,6 +1062,22 @@ describe("protected content HTTP boundary", () => {
     };
     expect(listedQuestions.items).toHaveLength(1);
     expect(listedQuestions.nextCursor).toBeTruthy();
+    const exactQuestionSummary = await call(
+      manager,
+      `${scopedVersionPath}/questions?domainId=${domainId}` +
+        `&topicId=${topicId}&questionId=${createdQuestion.questionId}`,
+    );
+    expect(exactQuestionSummary.status).toBe(200);
+    assertPrivate(exactQuestionSummary);
+    expect(await exactQuestionSummary.json()).toMatchObject({
+      items: [{
+        id: createdQuestion.questionId,
+        currentRevisionId: createdQuestion.revisionId,
+        revisionNumber: 1,
+        lockVersion: 1,
+      }],
+      nextCursor: null,
+    });
     const secondQuestionPage = await call(
       manager,
       `${scopedVersionPath}/questions?domainId=${domainId}` +
@@ -1465,6 +1481,283 @@ describe("protected content HTTP boundary", () => {
     );
     expect(retired.status).toBe(200);
     expect(await retired.json()).toEqual({ pointerVersion: 3 });
+  });
+
+  it("supports the assigned Manager review, publication replacement, retirement and exact status read", async () => {
+    const manager = await createActor({ role: "manager" });
+    const unassigned = await createActor({ role: "manager", assigned: false });
+    const versionResponse = await call(
+      manager,
+      `${apiRoot}/certifications/${manager.certificationId}/exam-versions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          versionKey: `workflow-${crypto.randomUUID()}`,
+          title: "Synthetic workflow version",
+          syllabusReference: "Synthetic workflow syllabus",
+        }),
+      },
+    );
+    expect(versionResponse.status).toBe(201);
+    const versionId = ((await versionResponse.json()) as { id: string }).id;
+    const scopedVersion = versionPath(manager, versionId);
+    const domainResponse = await call(manager, `${scopedVersion}/domains`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainKey: `workflow-domain-${crypto.randomUUID()}`,
+        title: "Synthetic workflow domain",
+        meaning: "Synthetic stable domain meaning",
+        order: 0,
+      }),
+    });
+    const domainId = ((await domainResponse.json()) as { id: string }).id;
+    const topicResponse = await call(
+      manager,
+      `${scopedVersion}/domains/${domainId}/topics`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          topicKey: `workflow-topic-${crypto.randomUUID()}`,
+          title: "Synthetic workflow topic",
+          meaning: "Synthetic stable topic meaning",
+          order: 0,
+        }),
+      },
+    );
+    const topicId = ((await topicResponse.json()) as { id: string }).id;
+    const questionResponse = await call(manager, `${scopedVersion}/questions`, {
+      method: "POST",
+      body: JSON.stringify({
+        questionKey: `workflow-question-${crypto.randomUUID()}`,
+        domainId,
+        topicId,
+        content: validQuestionContent,
+      }),
+    });
+    expect(questionResponse.status).toBe(201);
+    const question = (await questionResponse.json()) as {
+      questionId: string;
+      revisionId: string;
+      revisionNumber: number;
+    };
+    const questionPath = `${scopedVersion}/questions/${question.questionId}`;
+    const publicationPath = `${questionPath}/publication`;
+    const firstRevisionPath = `${questionPath}/revisions/${question.revisionId}`;
+
+    const initialPublication = await call(manager, publicationPath);
+    expect(initialPublication.status).toBe(200);
+    expect(await initialPublication.json()).toEqual({
+      questionId: question.questionId,
+      publication: null,
+    });
+    assertPrivate(initialPublication);
+    const unassignedPublication = await call(unassigned, publicationPath);
+    expect(unassignedPublication.status).toBe(404);
+    assertPrivate(unassignedPublication);
+
+    expect((await call(manager, `${firstRevisionPath}/submit`, {
+      method: "POST",
+      body: "{}",
+    })).status).toBe(200);
+    const submitted = await call(manager, firstRevisionPath);
+    expect(submitted.status).toBe(200);
+    expect(await submitted.json()).toMatchObject({
+      revisionId: question.revisionId,
+      workflowState: "submitted",
+    });
+    expect((await call(manager, `${firstRevisionPath}/review`, {
+      method: "POST",
+      body: JSON.stringify({ decision: "rejected", notes: "Synthetic correction requested." }),
+    })).status).toBe(201);
+    expect(await (await call(manager, firstRevisionPath)).json()).toMatchObject({
+      workflowState: "rejected",
+    });
+
+    const correctedResponse = await call(manager, `${questionPath}/revisions`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainId,
+        topicId,
+        expectedLockVersion: 1,
+        content: {
+          ...validQuestionContent,
+          stem: "Corrected synthetic reviewed question?",
+        },
+      }),
+    });
+    expect(correctedResponse.status).toBe(201);
+    const corrected = (await correctedResponse.json()) as {
+      revisionId: string;
+      revisionNumber: number;
+    };
+    expect(corrected.revisionNumber).toBe(2);
+    expect(await (await call(manager, firstRevisionPath)).json()).toMatchObject({
+      revisionId: question.revisionId,
+      stem: validQuestionContent.stem,
+      workflowState: "rejected",
+    });
+    expect((await call(manager, `${firstRevisionPath}/review`, {
+      method: "POST",
+      body: JSON.stringify({ decision: "approved", notes: "Wrong revision." }),
+    })).status).toBe(409);
+    const correctedPath = `${questionPath}/revisions/${corrected.revisionId}`;
+    expect((await call(manager, `${correctedPath}/submit`, {
+      method: "POST",
+      body: "{}",
+    })).status).toBe(200);
+    expect(await (await call(manager, correctedPath)).json()).toMatchObject({
+      revisionId: corrected.revisionId,
+      workflowState: "submitted",
+      stem: "Corrected synthetic reviewed question?",
+    });
+    expect((await call(manager, `${correctedPath}/review`, {
+      method: "POST",
+      body: JSON.stringify({ decision: "approved", notes: "Exact revision approved." }),
+    })).status).toBe(201);
+    expect(await (await call(manager, correctedPath)).json()).toMatchObject({
+      workflowState: "approved",
+    });
+
+    const publishPath = `${questionPath}/publish`;
+    const firstPublish = await call(manager, publishPath, {
+      method: "POST",
+      body: JSON.stringify({
+        revisionId: corrected.revisionId,
+        expectedPointerVersion: null,
+      }),
+    });
+    expect(firstPublish.status).toBe(200);
+    expect(await firstPublish.json()).toEqual({ pointerVersion: 1 });
+    expect(await (await call(manager, correctedPath)).json()).toMatchObject({
+      revisionId: corrected.revisionId,
+      workflowState: "published",
+    });
+
+    const replacementResponse = await call(manager, `${questionPath}/revisions`, {
+      method: "POST",
+      body: JSON.stringify({
+        domainId,
+        topicId,
+        expectedLockVersion: 2,
+        content: {
+          ...validQuestionContent,
+          stem: "Approved replacement synthetic question?",
+        },
+      }),
+    });
+    expect(replacementResponse.status).toBe(201);
+    const replacement = (await replacementResponse.json()) as { revisionId: string };
+    const replacementPath = `${questionPath}/revisions/${replacement.revisionId}`;
+    expect((await call(manager, `${replacementPath}/submit`, {
+      method: "POST",
+      body: "{}",
+    })).status).toBe(200);
+    expect((await call(manager, `${replacementPath}/review`, {
+      method: "POST",
+      body: JSON.stringify({ decision: "approved", notes: "Synthetic replacement approved." }),
+    })).status).toBe(201);
+    const replacePublication = await call(manager, publishPath, {
+      method: "POST",
+      body: JSON.stringify({
+        revisionId: replacement.revisionId,
+        expectedPointerVersion: 1,
+      }),
+    });
+    expect(replacePublication.status).toBe(200);
+    expect(await replacePublication.json()).toEqual({ pointerVersion: 2 });
+    expect(await (await call(manager, correctedPath)).json()).toMatchObject({
+      revisionId: corrected.revisionId,
+      workflowState: "superseded",
+    });
+    expect(await (await call(manager, replacementPath)).json()).toMatchObject({
+      revisionId: replacement.revisionId,
+      workflowState: "published",
+    });
+    const publicationStatus = await call(manager, publicationPath);
+    expect(publicationStatus.status).toBe(200);
+    expect(await publicationStatus.json()).toEqual({
+      questionId: question.questionId,
+      publication: {
+        revisionId: replacement.revisionId,
+        state: "published",
+        pointerVersion: 2,
+        changedAt: expect.any(Number),
+      },
+    });
+    assertPrivate(publicationStatus);
+
+    const retirePath = `${questionPath}/retire`;
+    const staleRetirement = await call(manager, retirePath, {
+      method: "POST",
+      body: JSON.stringify({ expectedPointerVersion: 1 }),
+    });
+    expect(staleRetirement.status).toBe(409);
+    assertPrivate(staleRetirement);
+    expect(await (await call(manager, publicationPath)).json()).toMatchObject({
+      publication: {
+        revisionId: replacement.revisionId,
+        state: "published",
+        pointerVersion: 2,
+      },
+    });
+    const retirement = await call(manager, retirePath, {
+      method: "POST",
+      body: JSON.stringify({ expectedPointerVersion: 2 }),
+    });
+    expect(retirement.status).toBe(200);
+    assertPrivate(retirement);
+    expect(await retirement.json()).toEqual({ pointerVersion: 3 });
+    expect(await (await call(manager, replacementPath)).json()).toMatchObject({
+      revisionId: replacement.revisionId,
+      workflowState: "retired",
+    });
+    expect(await (await call(manager, publicationPath)).json()).toMatchObject({
+      publication: {
+        revisionId: replacement.revisionId,
+        state: "retired",
+        pointerVersion: 3,
+      },
+    });
+    expect((await call(manager, replacementPath)).status).toBe(200);
+    const futureSelection = await call(
+      manager,
+      `${scopedVersion}/export`,
+    );
+    expect(futureSelection.status).toBe(200);
+    assertPrivate(futureSelection);
+    expect(await futureSelection.text()).not.toContain(
+      "Approved replacement synthetic question?",
+    );
+    expect((await call(unassigned, publicationPath)).status).toBe(404);
+
+    expect(
+      await database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM content_publication_events
+           WHERE question_id = ?`,
+        )
+        .bind(question.questionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 3 });
+    expect(
+      await database
+        .prepare(
+          `SELECT reviewer_user_id FROM content_reviews
+           WHERE question_revision_id = ? AND decision = 'approved'
+           ORDER BY reviewed_at DESC LIMIT 1`,
+        )
+        .bind(replacement.revisionId)
+        .first<{ reviewer_user_id: string }>(),
+    ).toMatchObject({ reviewer_user_id: manager.userId });
+    expect(
+      await database
+        .prepare(
+          `SELECT changed_by_user_id FROM exam_version_questions
+           WHERE question_id = ?`,
+        )
+        .bind(question.questionId)
+        .first<{ changed_by_user_id: string }>(),
+    ).toMatchObject({ changed_by_user_id: manager.userId });
   });
 
   it("supports bounded import preview, idempotent confirmation, expiry, and scoped export", async () => {

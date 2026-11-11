@@ -20,6 +20,7 @@ import {
   protectedPathIdSchema,
   pointerVersionResponseSchema,
   questionRevisionResponseSchema,
+  questionPublicationResponseSchema,
   questionListResponseSchema,
   questionPageQuerySchema,
   questionRevisionListResponseSchema,
@@ -58,6 +59,7 @@ import {
   listQuestionRevisions,
   listQuestions,
   listTopics,
+  getQuestionPublication,
 } from "./security/content-queries.ts";
 import {
   authorizeCertification,
@@ -712,6 +714,7 @@ protectedApi.get(
       examVersionId,
       domainId: parsed.value.domainId,
       topicId: parsed.value.topicId,
+      questionId: parsed.value.questionId,
       tokenDigest: principal.tokenDigest,
       now: Date.now(),
       policy: principal.configuration.policy,
@@ -936,6 +939,33 @@ protectedApi.get(
       return errorResponse(context, 404, "not_found");
     }
     return context.json(questionRevisionResponseSchema.parse(result.value));
+  },
+);
+
+protectedApi.get(
+  "/certifications/:certificationId/exam-versions/:examVersionId/questions/:questionId/publication",
+  async (context) => {
+    const certificationId = validPathId(context, context.req.param("certificationId"));
+    const examVersionId = validPathId(context, context.req.param("examVersionId"));
+    const questionId = validPathId(context, context.req.param("questionId"));
+    if (certificationId instanceof Response) return certificationId;
+    if (examVersionId instanceof Response) return examVersionId;
+    if (questionId instanceof Response) return questionId;
+    const denied = await requireCertification(context, certificationId);
+    if (denied) return denied;
+    if (!(await questionExistsInVersion(context, certificationId, examVersionId, questionId))) {
+      return errorResponse(context, 404, "not_found");
+    }
+    const publication = await getQuestionPublication(context.env.DB, {
+      certificationId,
+      examVersionId,
+      questionId,
+      tokenDigest: context.get("principal").tokenDigest,
+      now: Date.now(),
+      policy: context.get("principal").configuration.policy,
+    });
+    if (!publication) return errorResponse(context, 404, "not_found");
+    return context.json(questionPublicationResponseSchema.parse(publication));
   },
 );
 

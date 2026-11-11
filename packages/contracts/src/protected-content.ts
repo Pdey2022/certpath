@@ -130,6 +130,7 @@ export const questionPageQuerySchema = z
     ...contentPageQueryFields,
     domainId: id,
     topicId: id,
+    questionId: id.optional(),
     search: z.string().trim().min(1).max(100).optional(),
   })
   .strict();
@@ -246,6 +247,21 @@ export const revisionIdResponseSchema = z.object({ revisionId: id }).strict();
 export const reviewIdResponseSchema = z.object({ reviewId: id }).strict();
 export const pointerVersionResponseSchema = z
   .object({ pointerVersion: safeInteger.positive() })
+  .strict();
+
+export const questionPublicationResponseSchema = z
+  .object({
+    questionId: id,
+    publication: z
+      .object({
+        revisionId: id,
+        state: z.enum(["published", "retired"]),
+        pointerVersion: safeInteger.positive(),
+        changedAt: safeInteger,
+      })
+      .strict()
+      .nullable(),
+  })
   .strict();
 
 export const importPreviewResponseSchema = z

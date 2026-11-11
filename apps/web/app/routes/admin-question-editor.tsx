@@ -3,6 +3,7 @@ import type { Route } from "./+types/admin-question-editor";
 import {
   createCorrection,
   createDraft,
+  getQuestionPublication,
   getQuestionRevision,
   listCertifications,
   listDomains,
@@ -10,6 +11,10 @@ import {
   listQuestionRevisions,
   listQuestions,
   listTopics,
+  publishRevision,
+  retirePublication,
+  reviewRevision,
+  submitRevisionForReview,
   ProtectedApiError,
 } from "../lib/admin-question-editor-api";
 import type {
@@ -18,6 +23,7 @@ import type {
   ExamVersion,
   Question,
   QuestionContent,
+  QuestionPublication,
   QuestionRevision,
   QuestionRevisionSummary,
   Topic,
@@ -26,6 +32,13 @@ import type {
 type Page<T> = {
   items: T[];
   nextCursor: string | null;
+};
+
+type WorkflowConfirmation = {
+  kind: "publish" | "retire";
+  questionId: string;
+  revisionId: string;
+  expectedPointerVersion: number | null;
 };
 
 function emptyPage<T>(): Page<T> {
@@ -124,6 +137,12 @@ export default function AdminQuestionEditor() {
   const [content, setContent] = useState<QuestionContent>(emptyContent);
   const [selectedRevision, setSelectedRevision] = useState<QuestionRevision | null>(null);
   const [latestRevision, setLatestRevision] = useState<QuestionRevision | null>(null);
+  const [publication, setPublication] = useState<QuestionPublication | undefined>(undefined);
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [workflowConflict, setWorkflowConflict] = useState<"revision" | "publication" | null>(null);
+  const [workflowRefreshAvailable, setWorkflowRefreshAvailable] = useState(false);
+  const [workflowConfirmation, setWorkflowConfirmation] = useState<WorkflowConfirmation | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
@@ -144,6 +163,7 @@ export default function AdminQuestionEditor() {
     question: 0,
     revisions: 0,
     revision: 0,
+    workflow: 0,
   });
 
   const selectedQuestion = useMemo(
@@ -164,6 +184,9 @@ export default function AdminQuestionEditor() {
       selectedRevision.revisionId !== selectedQuestion.currentRevisionId);
   const revisionLoading =
     questionId !== "" && selectedRevision?.revisionId !== revisionId;
+  const savedRevisionHasUnsavedEdits =
+    selectedRevision !== null &&
+    JSON.stringify(content) !== JSON.stringify(revisionContent(selectedRevision));
 
   function invalidateForm(): number {
     formGeneration.current += 1;
@@ -172,7 +195,11 @@ export default function AdminQuestionEditor() {
     requests.current.question += 1;
     requests.current.revisions += 1;
     requests.current.revision += 1;
+    requests.current.workflow += 1;
     setSaving(false);
+    setWorkflowBusy(false);
+    setWorkflowRefreshAvailable(false);
+    setWorkflowConfirmation(null);
     return formGeneration.current;
   }
 
@@ -194,6 +221,19 @@ export default function AdminQuestionEditor() {
       formGeneration.current === generation &&
       scopeMatches(scope) &&
       selectedQuestionRef.current === expectedQuestionId
+    );
+  }
+
+  function workflowMatches(
+    generation: number,
+    scope: typeof scopeRef.current,
+    expectedQuestionId: string,
+    expectedRevisionId: string,
+  ): boolean {
+    return (
+      formMatches(generation, scope, expectedQuestionId) &&
+      revisionId === expectedRevisionId &&
+      selectedRevision?.revisionId === expectedRevisionId
     );
   }
 
@@ -362,6 +402,10 @@ export default function AdminQuestionEditor() {
     setRevisionId(question.currentRevisionId);
     setSelectedRevision(null);
     setLatestRevision(null);
+    setPublication(undefined);
+    setReviewNotes("");
+    setWorkflowConflict(null);
+    setWorkflowConfirmation(null);
     setRevisions(emptyPage());
     setQuestionKey(question.questionKey);
     setContent(emptyContent());
@@ -369,7 +413,7 @@ export default function AdminQuestionEditor() {
     setError("");
     setStatus("");
     try {
-      const [page, detail] = await Promise.all([
+      const [page, detail, publicationStatus] = await Promise.all([
         listQuestionRevisions(certificationId, examVersionId, question.id),
         getQuestionRevision(
           certificationId,
@@ -377,6 +421,7 @@ export default function AdminQuestionEditor() {
           question.id,
           question.currentRevisionId,
         ),
+        getQuestionPublication(certificationId, examVersionId, question.id),
       ]);
       if (
         request !== requests.current.question ||
@@ -397,6 +442,7 @@ export default function AdminQuestionEditor() {
             ],
       });
       setSelectedRevision(detail);
+      setPublication(publicationStatus.publication);
       setContent(revisionContent(detail));
       updateQuestionLock(question.id, detail.lockVersion);
       const currentLockVersion = Math.max(question.lockVersion, detail.lockVersion);
@@ -441,6 +487,10 @@ export default function AdminQuestionEditor() {
     setRevisions(emptyPage());
     setSelectedRevision(null);
     setLatestRevision(null);
+    setPublication(undefined);
+    setReviewNotes("");
+    setWorkflowConflict(null);
+    setWorkflowConfirmation(null);
     setError("");
     setStatus("");
     setQuestionKey("");
@@ -471,6 +521,10 @@ export default function AdminQuestionEditor() {
     setRevisions(emptyPage());
     setSelectedRevision(null);
     setLatestRevision(null);
+    setPublication(undefined);
+    setReviewNotes("");
+    setWorkflowConflict(null);
+    setWorkflowConfirmation(null);
     setError("");
     setStatus("");
     setQuestionKey("");
@@ -493,6 +547,10 @@ export default function AdminQuestionEditor() {
     setRevisions(emptyPage());
     setSelectedRevision(null);
     setLatestRevision(null);
+    setPublication(undefined);
+    setReviewNotes("");
+    setWorkflowConflict(null);
+    setWorkflowConfirmation(null);
     setError("");
     setStatus("");
     setQuestionKey("");
@@ -528,6 +586,10 @@ export default function AdminQuestionEditor() {
     setRevisions(emptyPage());
     setSelectedRevision(null);
     setLatestRevision(null);
+    setPublication(undefined);
+    setReviewNotes("");
+    setWorkflowConflict(null);
+    setWorkflowConfirmation(null);
     setQuestionKey("");
     setContent(emptyContent());
     setValidationErrors([]);
@@ -777,6 +839,12 @@ export default function AdminQuestionEditor() {
     const request = ++requests.current.revision;
     const previousRevisionId = selectedRevision?.revisionId ?? "";
     setRevisionId(id);
+    requests.current.workflow += 1;
+    setWorkflowBusy(false);
+    setWorkflowConflict(null);
+    setWorkflowRefreshAvailable(false);
+    setWorkflowConfirmation(null);
+    setReviewNotes("");
     setLatestRevision(null);
     setError("");
     setStatus("");
@@ -853,6 +921,313 @@ export default function AdminQuestionEditor() {
     }
   }
 
+  async function refreshWorkflowData(
+    generation: number,
+    scope: typeof scopeRef.current,
+    expectedQuestionId: string,
+    expectedRevisionId: string,
+    request: number,
+  ) {
+    const affectedQuestion = questions.items.find(
+      (question) => question.id === expectedQuestionId,
+    );
+    if (!affectedQuestion) throw new Error("The selected question summary is unavailable.");
+    const [page, detail, publicationStatus, questionPage] = await Promise.all([
+      listQuestionRevisions(
+        scope.certificationId,
+        scope.examVersionId,
+        expectedQuestionId,
+      ),
+      getQuestionRevision(
+        scope.certificationId,
+        scope.examVersionId,
+        expectedQuestionId,
+        expectedRevisionId,
+      ),
+      getQuestionPublication(
+        scope.certificationId,
+        scope.examVersionId,
+        expectedQuestionId,
+      ),
+      listQuestions({
+        ...scope,
+        questionId: affectedQuestion.id,
+      }),
+    ]);
+    if (
+      request !== requests.current.workflow ||
+      !workflowMatches(generation, scope, expectedQuestionId, expectedRevisionId)
+    ) return false;
+    const refreshedQuestion = questionPage.items.find(
+      (question) => question.id === expectedQuestionId,
+    );
+    if (!refreshedQuestion) {
+      throw new Error("The selected question summary could not be refreshed.");
+    }
+    setRevisions({
+      ...page,
+      items: page.items.some((item) => item.id === expectedRevisionId)
+        ? page.items
+        : [
+            ...page.items,
+            {
+              id: expectedRevisionId,
+              revisionNumber: detail.revisionNumber,
+              workflowState: detail.workflowState,
+              createdAt: 0,
+            },
+          ],
+    });
+    setSelectedRevision(detail);
+    setPublication(publicationStatus.publication);
+    setQuestions((current) => ({
+      ...current,
+      items: current.items.map((question) =>
+        question.id === expectedQuestionId ? refreshedQuestion : question,
+      ),
+    }));
+    return true;
+  }
+
+  async function refreshWorkflowState() {
+    if ((!workflowConflict && !workflowRefreshAvailable) || !questionId || !selectedRevision) return;
+    const expectedQuestionId = questionId;
+    const expectedRevisionId = selectedRevision.revisionId;
+    const scope = { ...scopeRef.current };
+    const generation = formGeneration.current;
+    const request = ++requests.current.workflow;
+    setWorkflowBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      const refreshed = await refreshWorkflowData(
+        generation,
+        scope,
+        expectedQuestionId,
+        expectedRevisionId,
+        request,
+      );
+      if (!refreshed) return;
+      setWorkflowConflict(null);
+      setWorkflowRefreshAvailable(false);
+      setStatus("Workflow state refreshed. Review it and deliberately choose an action again.");
+    } catch (cause) {
+      if (
+        request === requests.current.workflow &&
+        workflowMatches(generation, scope, expectedQuestionId, expectedRevisionId)
+      ) setError(errorMessage(cause));
+    } finally {
+      if (request === requests.current.workflow) setWorkflowBusy(false);
+    }
+  }
+
+  async function submitSelectedForReview() {
+    if (!questionId || !selectedRevision) return;
+    const expectedQuestionId = questionId;
+    const expectedRevisionId = selectedRevision.revisionId;
+    const scope = { ...scopeRef.current };
+    const generation = formGeneration.current;
+    const request = ++requests.current.workflow;
+    setWorkflowBusy(true);
+    setWorkflowConflict(null);
+    setWorkflowConfirmation(null);
+    setError("");
+    setStatus("");
+    try {
+      await submitRevisionForReview(
+        scope.certificationId,
+        scope.examVersionId,
+        expectedQuestionId,
+        expectedRevisionId,
+      );
+      if (!workflowMatches(generation, scope, expectedQuestionId, expectedRevisionId)) return;
+      if (await refreshWorkflowData(generation, scope, expectedQuestionId, expectedRevisionId, request)) {
+        setStatus(`Revision ${selectedRevision.revisionNumber} was submitted for review.`);
+      }
+    } catch (cause) {
+      if (!workflowMatches(generation, scope, expectedQuestionId, expectedRevisionId)) return;
+      if (cause instanceof ProtectedApiError && cause.status === 409) {
+        setWorkflowConflict("revision");
+        setError("The review state changed. Your question fields and review notes are preserved; refresh the revision before choosing an action again.");
+      } else {
+        setError(errorMessage(cause));
+      }
+    } finally {
+      if (request === requests.current.workflow) setWorkflowBusy(false);
+    }
+  }
+
+  async function recordSelectedReview(decision: "approved" | "rejected") {
+    if (!questionId || !selectedRevision) return;
+    if (!reviewNotes.trim()) {
+      setError("Add review notes before approving or rejecting this revision.");
+      return;
+    }
+    const expectedQuestionId = questionId;
+    const expectedRevisionId = selectedRevision.revisionId;
+    const scope = { ...scopeRef.current };
+    const generation = formGeneration.current;
+    const request = ++requests.current.workflow;
+    setWorkflowBusy(true);
+    setWorkflowConflict(null);
+    setWorkflowConfirmation(null);
+    setError("");
+    setStatus("");
+    try {
+      await reviewRevision(
+        scope.certificationId,
+        scope.examVersionId,
+        expectedQuestionId,
+        expectedRevisionId,
+        { decision, notes: reviewNotes },
+      );
+      if (!workflowMatches(generation, scope, expectedQuestionId, expectedRevisionId)) return;
+      if (await refreshWorkflowData(generation, scope, expectedQuestionId, expectedRevisionId, request)) {
+        setReviewNotes("");
+        setStatus(
+          `Revision ${selectedRevision.revisionNumber} was ${decision}. The review decision is recorded separately from publication.`,
+        );
+      }
+    } catch (cause) {
+      if (!workflowMatches(generation, scope, expectedQuestionId, expectedRevisionId)) return;
+      if (cause instanceof ProtectedApiError && cause.status === 409) {
+        setWorkflowConflict("revision");
+        setError("The review state changed. Your question fields and review notes are preserved; refresh the revision before choosing an action again.");
+      } else {
+        setError(errorMessage(cause));
+      }
+    } finally {
+      if (request === requests.current.workflow) setWorkflowBusy(false);
+    }
+  }
+
+  function requestPublishConfirmation() {
+    if (!questionId || !selectedRevision || selectedRevision.workflowState !== "approved") return;
+    const currentPointerVersion = publication?.pointerVersion ?? null;
+    if (publication?.state === "retired") {
+      setError("This question's publication is retired and cannot be republished through the current workflow.");
+      return;
+    }
+    if (publication?.state === "published" && publication.revisionId === selectedRevision.revisionId) return;
+    const confirmation = {
+      kind: "publish" as const,
+      questionId,
+      revisionId: selectedRevision.revisionId,
+      expectedPointerVersion: currentPointerVersion,
+    };
+    if (publication?.state === "published") {
+      setWorkflowConfirmation(confirmation);
+      setError("");
+      return;
+    }
+    void performWorkflowConfirmation(confirmation);
+  }
+
+  function requestRetireConfirmation() {
+    if (!questionId || !selectedRevision || publication?.state !== "published") return;
+    setWorkflowConfirmation({
+      kind: "retire",
+      questionId,
+      revisionId: selectedRevision.revisionId,
+      expectedPointerVersion: publication.pointerVersion,
+    });
+    setError("");
+  }
+
+  async function performWorkflowConfirmation(confirmation: WorkflowConfirmation) {
+    if (
+      confirmation.questionId !== questionId ||
+      confirmation.revisionId !== selectedRevision?.revisionId
+    ) return;
+    const scope = { ...scopeRef.current };
+    const generation = formGeneration.current;
+    const request = ++requests.current.workflow;
+    setWorkflowBusy(true);
+    setWorkflowConfirmation(null);
+    setWorkflowConflict(null);
+    setError("");
+    setStatus("");
+    let mutationSaved = false;
+    try {
+      if (confirmation.kind === "publish") {
+        const currentPointerVersion = publication?.pointerVersion ?? null;
+        if (confirmation.expectedPointerVersion !== currentPointerVersion) {
+          setWorkflowConflict("publication");
+          setError("Publication changed while confirmation was open. Refresh its state and confirm the replacement again.");
+          return;
+        }
+        await publishRevision(
+          scope.certificationId,
+          scope.examVersionId,
+          confirmation.questionId,
+          {
+            revisionId: confirmation.revisionId,
+            expectedPointerVersion: confirmation.expectedPointerVersion,
+          },
+        );
+      } else {
+        if (
+          publication?.state !== "published" ||
+          confirmation.expectedPointerVersion !== publication.pointerVersion
+        ) {
+          setWorkflowConflict("publication");
+          setError("Publication changed while confirmation was open. Refresh its state and confirm retirement again.");
+          return;
+        }
+        await retirePublication(
+          scope.certificationId,
+          scope.examVersionId,
+          confirmation.questionId,
+          { expectedPointerVersion: confirmation.expectedPointerVersion },
+        );
+      }
+      mutationSaved = true;
+      if (!workflowMatches(
+        generation,
+        scope,
+        confirmation.questionId,
+        confirmation.revisionId,
+      )) return;
+      const refreshed = await refreshWorkflowData(
+        generation,
+        scope,
+        confirmation.questionId,
+        confirmation.revisionId,
+        request,
+      );
+      if (!refreshed) return;
+      setWorkflowRefreshAvailable(false);
+      setStatus(
+        confirmation.kind === "publish"
+          ? `Revision ${selectedRevision.revisionNumber} is published. The revision, history, publication pointer, and question summary are refreshed.`
+          : "The question was retired from future selection. Its publication and revision history are preserved.",
+      );
+    } catch (cause) {
+      if (!workflowMatches(
+        generation,
+        scope,
+        confirmation.questionId,
+        confirmation.revisionId,
+      )) return;
+      if (mutationSaved) {
+        setWorkflowRefreshAvailable(true);
+        setError("");
+        setStatus(
+          confirmation.kind === "publish"
+            ? "Publication was saved, but the editor could not refresh its revision, history, publication pointer, and question summary. Refresh the saved workflow state; do not resubmit the publication."
+            : "Retirement was saved, but the editor could not refresh its revision, history, publication pointer, and question summary. Refresh the saved workflow state; do not resubmit the retirement.",
+        );
+      } else if (cause instanceof ProtectedApiError && cause.status === 409) {
+        setWorkflowConflict("publication");
+        setError("Publication changed since it was loaded. Your question fields and review notes are preserved; refresh publication state before choosing an action again.");
+      } else {
+        setError(errorMessage(cause));
+      }
+    } finally {
+      if (request === requests.current.workflow) setWorkflowBusy(false);
+    }
+  }
+
   function addOption() {
     if (content.options.length >= 8) return;
     updateContent("options", [
@@ -885,8 +1260,8 @@ export default function AdminQuestionEditor() {
         <p className="eyebrow">Staff question editor</p>
         <h1>Question editor</h1>
         <p className="protected-editor-intro">
-          This editor reads and saves drafts through the protected service. It does not provide sign-in,
-          review, or publication.
+          This editor reads and saves drafts and manages review and publication through the protected service.
+          It does not provide sign-in.
         </p>
         <p className="protected-demo-separation">
           Separate from the synthetic admin preview. Preview role selectors and demo data do not grant access here.
@@ -1092,6 +1467,168 @@ export default function AdminQuestionEditor() {
                   >
                     Load more revisions
                   </button>
+                )}
+                {questionId && selectedRevision && selectedRevision.revisionId === revisionId && (
+                  <section className="protected-workflow-panel" aria-labelledby="protected-workflow-title">
+                    <h3 id="protected-workflow-title">Review and publication</h3>
+                    <p>
+                      Exact revision {selectedRevision.revisionNumber}: <strong>{selectedRevision.workflowState}</strong>
+                    </p>
+                    {publication === undefined ? (
+                      <p role="status">Loading publication status…</p>
+                    ) : publication ? (
+                      <div className="protected-publication-status">
+                        <p>
+                          Publication: <strong>{publication.state}</strong> · revision{" "}
+                          {revisions.items.find((item) => item.id === publication.revisionId)
+                            ? revisions.items.find((item) => item.id === publication.revisionId)?.revisionNumber
+                            : publication.revisionId} · pointer version {publication.pointerVersion}
+                        </p>
+                        {publication.state === "retired" && (
+                          <p>
+                            Retirement removes this question from future selection and preserves its publication and revision history.
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p>This question has no publication pointer yet.</p>
+                    )}
+                    {["draft", "rejected"].includes(selectedRevision.workflowState) && (
+                      <button
+                        className="button-primary"
+                        type="button"
+                        disabled={workflowBusy || workflowRefreshAvailable || saving || savedRevisionHasUnsavedEdits}
+                        onClick={() => void submitSelectedForReview()}
+                      >
+                        {workflowBusy ? "Updating workflow…" : "Submit saved revision for review"}
+                      </button>
+                    )}
+                    {["draft", "rejected"].includes(selectedRevision.workflowState) &&
+                      savedRevisionHasUnsavedEdits && (
+                        <p className="muted">
+                          Save your current edits as a correction before submitting that new content for review.
+                        </p>
+                      )}
+                    {selectedRevision.workflowState === "submitted" && (
+                      <form
+                        className="protected-review-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void recordSelectedReview("approved");
+                        }}
+                      >
+                        <label>
+                          Review notes
+                          <textarea
+                            rows={3}
+                            maxLength={3000}
+                            value={reviewNotes}
+                            disabled={workflowBusy}
+                            onChange={(event) => setReviewNotes(event.target.value)}
+                            required
+                          />
+                        </label>
+                        <div className="protected-editor-actions">
+                          <button
+                            className="button-primary"
+                            type="submit"
+                            disabled={workflowBusy || workflowRefreshAvailable || !reviewNotes.trim()}
+                          >
+                            Approve exact revision
+                          </button>
+                          <button
+                            className="button-secondary"
+                            type="button"
+                            disabled={workflowBusy || workflowRefreshAvailable || !reviewNotes.trim()}
+                            onClick={() => void recordSelectedReview("rejected")}
+                          >
+                            Reject exact revision
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                    {selectedRevision.workflowState === "approved" &&
+                      publication !== undefined &&
+                      publication?.state !== "retired" &&
+                      publication?.revisionId !== selectedRevision.revisionId && (
+                        <button
+                          className="button-primary"
+                          type="button"
+                          disabled={workflowBusy || workflowRefreshAvailable}
+                          onClick={requestPublishConfirmation}
+                        >
+                          {publication?.state === "published"
+                            ? "Replace published revision"
+                            : "Publish approved revision"}
+                        </button>
+                      )}
+                    {publication?.state === "published" && (
+                      <button
+                        className="button-secondary"
+                        type="button"
+                        disabled={workflowBusy || workflowRefreshAvailable}
+                        onClick={requestRetireConfirmation}
+                      >
+                        Retire published question
+                      </button>
+                    )}
+                    {workflowConfirmation && (
+                      <div className="protected-workflow-confirmation" role="group" aria-labelledby="workflow-confirmation-title">
+                        <h4 id="workflow-confirmation-title">
+                          {workflowConfirmation.kind === "publish"
+                            ? "Confirm publication replacement"
+                            : "Confirm retirement"}
+                        </h4>
+                        <p>
+                          {workflowConfirmation.kind === "publish"
+                            ? "Publishing this approved revision replaces the currently published revision for this exam version."
+                            : "Retirement removes the question from future selection and keeps its publication and revision history."}
+                        </p>
+                        <div className="protected-editor-actions">
+                          <button
+                            className="button-primary"
+                            type="button"
+                            disabled={workflowBusy || workflowRefreshAvailable}
+                            onClick={() => void performWorkflowConfirmation(workflowConfirmation)}
+                          >
+                            Confirm {workflowConfirmation.kind === "publish" ? "replacement" : "retirement"}
+                          </button>
+                          <button
+                            className="button-secondary"
+                            type="button"
+                            disabled={workflowBusy}
+                            onClick={() => setWorkflowConfirmation(null)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {(workflowConflict || workflowRefreshAvailable) && (
+                      <div className="protected-workflow-conflict" role="alert">
+                        <p>
+                          {workflowRefreshAvailable
+                            ? "The change was saved, but its latest state could not be loaded. Your question fields and review notes are retained."
+                            : workflowConflict === "revision"
+                              ? "Review state changed on the server. Your question fields and review notes are retained."
+                              : "Publication state changed on the server. Your question fields and review notes are retained."}{" "}
+                          {workflowRefreshAvailable
+                            ? "Refresh the saved state; this will not resubmit the mutation."
+                            : "Refresh before choosing an action again."}
+                        </p>
+                        <button
+                          className="button-secondary"
+                          type="button"
+                          disabled={workflowBusy}
+                          onClick={() => void refreshWorkflowState()}
+                        >
+                          {workflowRefreshAvailable
+                            ? "Refresh saved workflow state"
+                            : "Refresh workflow and publication state"}
+                        </button>
+                      </div>
+                    )}
+                  </section>
                 )}
                 {questionId && !canEditSavedDraft && (
                   <p className="protected-editor-status" role="note">

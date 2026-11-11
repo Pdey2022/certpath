@@ -7,11 +7,19 @@ import {
   createdDraftResponseSchema,
   createdRevisionResponseSchema,
   domainListResponseSchema,
+  emptyMutationRequestSchema,
   examVersionListResponseSchema,
+  pointerVersionResponseSchema,
+  publishQuestionRequestSchema,
+  questionPublicationResponseSchema,
   questionListResponseSchema,
   questionPageQuerySchema,
+  questionReviewRequestSchema,
   questionRevisionListResponseSchema,
   questionRevisionResponseSchema,
+  retireQuestionRequestSchema,
+  reviewIdResponseSchema,
+  revisionIdResponseSchema,
   topicListResponseSchema,
 } from "@certpath/contracts";
 import type { z } from "zod";
@@ -30,6 +38,8 @@ export type Question =
 export type QuestionRevisionSummary =
   z.infer<typeof questionRevisionListResponseSchema>["items"][number];
 export type QuestionRevision = z.infer<typeof questionRevisionResponseSchema>;
+export type QuestionPublication =
+  z.infer<typeof questionPublicationResponseSchema>["publication"];
 export type QuestionContent = z.infer<
   typeof createQuestionRequestSchema
 >["content"];
@@ -166,6 +176,7 @@ export async function listQuestions(
     examVersionId: string;
     domainId: string;
     topicId: string;
+    questionId?: string;
     search?: string;
     cursor?: string;
   },
@@ -173,6 +184,7 @@ export async function listQuestions(
   const params = questionPageQuerySchema.parse({
     domainId: input.domainId,
     topicId: input.topicId,
+    ...(input.questionId ? { questionId: input.questionId } : {}),
     ...(input.search ? { search: input.search } : {}),
     ...(input.cursor ? { cursor: input.cursor } : {}),
     limit: String(pageSize),
@@ -182,6 +194,7 @@ export async function listQuestions(
     topicId: params.topicId,
     limit: String(params.limit),
   });
+  if (params.questionId) query.set("questionId", params.questionId);
   if (params.search) query.set("search", params.search);
   if (params.cursor) query.set("cursor", params.cursor);
   const path = `/certifications/${safeId(input.certificationId)}/exam-versions/${safeId(input.examVersionId)}/questions?${query}`;
@@ -209,6 +222,15 @@ export async function getQuestionRevision(
 ) {
   const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/questions/${safeId(questionId)}/revisions/${safeId(revisionId)}`;
   return requestJson(path, questionRevisionResponseSchema);
+}
+
+export async function getQuestionPublication(
+  certificationId: string,
+  examVersionId: string,
+  questionId: string,
+) {
+  const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/questions/${safeId(questionId)}/publication`;
+  return requestJson(path, questionPublicationResponseSchema);
 }
 
 async function getCsrfToken(): Promise<string> {
@@ -263,4 +285,45 @@ export function createCorrection(
     createQuestionRevisionRequestSchema,
     createdRevisionResponseSchema,
   );
+}
+
+export function submitRevisionForReview(
+  certificationId: string,
+  examVersionId: string,
+  questionId: string,
+  revisionId: string,
+) {
+  const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/questions/${safeId(questionId)}/revisions/${safeId(revisionId)}/submit`;
+  return postJson(path, {}, emptyMutationRequestSchema, revisionIdResponseSchema);
+}
+
+export function reviewRevision(
+  certificationId: string,
+  examVersionId: string,
+  questionId: string,
+  revisionId: string,
+  input: z.input<typeof questionReviewRequestSchema>,
+) {
+  const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/questions/${safeId(questionId)}/revisions/${safeId(revisionId)}/review`;
+  return postJson(path, input, questionReviewRequestSchema, reviewIdResponseSchema);
+}
+
+export function publishRevision(
+  certificationId: string,
+  examVersionId: string,
+  questionId: string,
+  input: z.input<typeof publishQuestionRequestSchema>,
+) {
+  const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/questions/${safeId(questionId)}/publish`;
+  return postJson(path, input, publishQuestionRequestSchema, pointerVersionResponseSchema);
+}
+
+export function retirePublication(
+  certificationId: string,
+  examVersionId: string,
+  questionId: string,
+  input: z.input<typeof retireQuestionRequestSchema>,
+) {
+  const path = `/certifications/${safeId(certificationId)}/exam-versions/${safeId(examVersionId)}/questions/${safeId(questionId)}/retire`;
+  return postJson(path, input, retireQuestionRequestSchema, pointerVersionResponseSchema);
 }
