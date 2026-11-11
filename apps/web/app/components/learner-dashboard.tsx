@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import {
   getLearnerDashboard,
   LearnerPracticeApiError,
+  signOutLearner,
   type LearnerDashboard,
 } from "../lib/learner-practice-api";
 
@@ -96,9 +97,12 @@ function AttemptCard({
 }
 
 export function LearnerDashboard() {
+  const navigate = useNavigate();
   const [dashboard, setDashboard] = useState<LearnerDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState("");
 
   async function loadDashboard() {
     setLoading(true);
@@ -110,6 +114,19 @@ export function LearnerDashboard() {
       setDashboard(null);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function signOut() {
+    setSigningOut(true);
+    setSignOutError("");
+    try {
+      await signOutLearner();
+      navigate("/sign-in", { replace: true });
+    } catch {
+      setSignOutError("Unable to sign out right now. Please try again.");
+    } finally {
+      setSigningOut(false);
     }
   }
 
@@ -125,6 +142,19 @@ export function LearnerDashboard() {
         Resume saved attempts or review your recent results by certification
         and exam version.
       </p>
+      <button
+        className="button-secondary"
+        type="button"
+        onClick={() => void signOut()}
+        disabled={signingOut}
+      >
+        {signingOut ? "Signing out…" : "Sign out"}
+      </button>
+      {signOutError && (
+        <p className="form-errors" role="alert">
+          {signOutError}
+        </p>
+      )}
 
       {loading && (
         <p className="card" role="status">Loading your authorized progress…</p>

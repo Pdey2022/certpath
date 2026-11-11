@@ -83,10 +83,15 @@ select:focus-visible {
   gap: 0.5rem 1rem;
 }
 
-.public-nav a {
+.public-nav a,
+.public-nav-status {
   min-height: 2.75rem;
   display: inline-flex;
   align-items: center;
+}
+
+.public-nav-status {
+  color: #64748b;
 }
 
 .public-main {
