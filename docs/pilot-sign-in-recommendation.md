@@ -16,11 +16,12 @@ implementation.
 Auth0 is the better fit of the two candidates reviewed because its hosted
 Universal Login supports email/password and Google, and its post-login Actions
 can require an MFA challenge and report the completed method to a following
-Action. A namespaced claim added by that Action can be signed into a short-lived
-JWT for the Worker to validate before it creates a staff session. Cognito's
-documented MFA setting applies to local user-pool users, not federated users;
-it therefore does not, by itself, meet the mandatory-MFA requirement when a
-Global Admin or Manager uses Google sign-in.
+Action. That subsequent Action can place namespaced MFA evidence in the staff
+OIDC ID token. The Worker must validate that ID token against the expected
+client ID and the nonce stored for that exact login transaction before creating
+a session. Cognito's documented MFA setting applies to local user-pool users,
+not federated users; it therefore does not, by itself, meet the mandatory-MFA
+requirement when a Global Admin or Manager uses Google sign-in.
 
 Keep the approved Cloudflare Workers + React Router SSR + same-origin Hono API
 + D1 architecture. Use a provider only to prove identity. The Worker maps the
@@ -36,36 +37,45 @@ Do not put application roles or entitlements in provider claims.
 | Google sign-in | Google social connection via OAuth 2.0 and Universal Login. Requires a Google OAuth client and Auth0 connection configuration. Request only the basic identity data needed. | Google is a supported federated provider. Cognito brokers the provider tokens and issues user-pool tokens. |
 | Recovery | Auth0 database users can use the hosted email password-reset flow. Auth0 documents that a password reset expires the Auth0 session. Google-account recovery stays with Google. | Self-service recovery uses a verified channel. Configure recovery separately from MFA: the MFA delivery channel cannot also be used for Cognito forgot-password codes. Google credentials are recovered at Google. |
 | Mandatory MFA for both staff roles | Can be required for a dedicated staff login client using a blocking post-login Action and an enabled factor. Keep role authorization in D1; the staff login path is not a role grant. Auth0's B2C Essentials plan is the lowest published B2C plan listing Pro MFA. | `MfaConfiguration=ON` can require MFA for local users, but Cognito explicitly states that it does not add MFA for federated users. An upstream Google MFA prompt is not a Cognito assurance guarantee. Cognito would need a separate, application-enforced staff factor for Google staff. |
-| Worker-verifiable MFA evidence | The post-login Action event exposes completed authentication methods. After the required challenge, a following Action can require an `mfa` method and place a namespaced MFA time/method claim in the signed access token. The Worker must validate signature, issuer, audience and time, and reject missing/unsupported evidence. This exact mapping and freshness behavior still requires the sandbox proof. | Cognito's ID-token documentation now describes computed `acr`/`amr` authentication-strength claims, but availability is gradually rolling out and requesting levels requires Essentials or Plus. Do not depend on these claims before verifying the target pool; they also do not remove the federated-user MFA gap. |
+| Worker-verifiable MFA evidence | The post-login Action event exposes completed authentication methods. After the required challenge, a subsequent Action can require an `mfa` method and add namespaced provider-recorded factor and timestamp evidence to the staff ID token. The Worker must validate the ID token signature, issuer, expected staff client audience, transaction nonce, and evidence freshness, rejecting missing or unsupported evidence. Prove the method/timestamp mapping in the sandbox. | Cognito's ID-token documentation now describes computed `acr`/`amr` authentication-strength claims, but availability is gradually rolling out and requesting levels requires Essentials or Plus. Do not depend on these claims before verifying the target pool; they also do not remove the federated-user MFA gap. |
 | Cloudflare Workers compatibility | Standards-based OIDC/OAuth over Fetch and JWT verification with Web Crypto are compatible in principle. Official documentation reviewed does not establish that an Auth0 Node SDK is compatible with Workers. Prefer a small standards-based callback/JWKS proof; use no Node-only APIs in the Worker. | User-pool OIDC endpoints and JWTs are protocol-compatible in principle; this review did not establish AWS SDK or Cognito-specific library compatibility in Workers. The same Fetch/Web Crypto proof is required. |
 | Logout and revocation | Auth0 refresh-token revocation affects provider tokens, not an independently issued CertPath D1 session. Provider logout or password reset must not be assumed to delete the opaque application session. | Cognito can revoke tokens or globally sign out a user, but its JWTs are self-contained and a local signature/expiry-only check can still accept a revoked token. Cognito revocation does not delete a CertPath D1 session. |
 | Pilot cost and published limits | Free lists up to 25,000 MAUs but does not list the needed Pro MFA feature. B2C Essentials starts at **$35/month for 500 MAUs** and lists Pro MFA. This is the likely minimum Auth0 subscription for the proposed staff-MFA proof, not a quote. Higher MAU tiers cost more. | Essentials currently includes 10,000 free direct/social MAUs, then the pricing page's example uses **$0.015 per additional MAU**. SMS MFA uses SNS pricing; verification and recovery email use SES pricing. Pool tier and regional pricing must be checked for the actual account. |
 
 ### Auth0 MFA evidence shape to prove
 
-The proposed staff path uses a separate Auth0 application/client ID, shared
-only with the approved staff flow. A blocking post-login Action challenges
-logins through that client; a subsequent Action checks the provider's
-`event.authentication.methods` for a completed MFA method and adds a
-namespaced claim such as `https://<owned-namespace>/mfa` plus provider-issued
-assurance time and factor. The claim is not an application role and is not
-accepted from the browser separately from the verified signed token.
+Use separate Auth0 application/client IDs for learner and staff login
+transactions. The Worker validates the OIDC ID token against the configured
+issuer's JWKS and allowed signing algorithm, the expected client ID for the
+flow (`aud`), expiry and not-before claims, and the exact `nonce` saved with
+that login transaction. Reject a learner-client ID token on the staff callback
+even when its signature and identity are otherwise valid. Do not accept an
+ID token as an API access token or infer a client from browser input.
 
-At callback, the Worker validates the access token using the configured
-issuer's JWKS and strict algorithm, issuer, API audience, expiry and not-before
-checks. It accepts a staff session only if the expected MFA claim and approved
-freshness policy pass; it then stores the verified MFA time/method in the
-server-owned D1 session. A staff account that authenticates through the learner
-client without MFA evidence must be directed to the staff flow, not granted a
-staff session. Public registration, Google email verification, and provider
-metadata never create either staff role.
+For staff login, a blocking post-login Action requires an MFA challenge. A
+subsequent Action, which runs after the challenge, checks the provider-recorded
+`event.authentication.methods` for the completed MFA factor and its timestamp,
+then writes those values to namespaced claims in the **staff ID token** using
+the ID-token claim API. The Worker accepts staff authentication only when the
+signed claims show a supported provider-recorded factor and a timestamp within
+the approved freshness window. It stores the verified time and method in the
+server-owned D1 session. Missing, unsupported, or stale evidence fails closed.
+The claim is not an application role and is never trusted outside the verified
+ID token.
+
+A staff account that authenticates through the learner client cannot create a
+staff session, even if the account has a staff row in D1; it must complete the
+staff-client flow with current MFA evidence. Public registration, Google email
+verification, and provider metadata never create either staff role.
 
 This is a proof target, not a claim that the Action configuration or assurance
-freshness is already implemented. Auth0 Actions document how to challenge and
-observe methods, and how to add custom token claims; the sandbox must establish
-that this yields a Worker-verifiable, adequately fresh assertion for both
-Global Admin and Manager sign-ins, including Google federation and an existing
-provider SSO session.
+freshness is already implemented. Auth0 documents how to challenge and observe
+methods, add claims to the ID token, and validate an ID token's audience and
+nonce. The sandbox must establish that the Action reports the actual completed
+factor and its provider-recorded timestamp in a Worker-verifiable ID token for
+both Global Admin and Manager sign-ins, including Google federation when a
+provider SSO session already exists. An existing SSO session must not silently
+bypass the required fresh staff factor.
 
 ### Session boundary
 
@@ -96,11 +106,14 @@ synthetic identities, and no real question content. Keep secrets in local
 secret bindings or the sandbox's secret store, never in the repository. Do not
 connect production users or execute the initial Global Admin bootstrap.
 
-1. **Worker callback and token verification:** run the OAuth authorization-code
-   flow with PKCE, state, and nonce through the actual Worker. Fetch the
-   provider metadata/JWKS with Worker `fetch`, validate an Auth0-issued token
-   with Worker Web Crypto, and reject bad state/nonce, wrong issuer/audience,
-   expired tokens, bad signatures, replay, and missing MFA evidence.
+1. **Worker callback and ID-token verification:** run the OAuth
+   authorization-code flow with PKCE, state, and nonce through the actual
+   Worker. Keep the expected staff or learner client ID and nonce bound to the
+   server-side login transaction. Fetch provider metadata/JWKS with Worker
+   `fetch`; validate the OIDC ID token with Worker Web Crypto, checking
+   signature, issuer, expiry/not-before, expected `aud`, and exact transaction
+   nonce. Reject bad state, wrong nonce, wrong issuer/audience, expired tokens,
+   bad signatures, replay, and tokens for the other client.
 2. **Email learner flow:** register a synthetic email/password learner, verify
    the email, sign in, request recovery, complete password reset, and confirm
    the new credential works. Confirm an unverified email cannot be used as an
@@ -109,14 +122,19 @@ connect production users or execute the initial Global Admin bootstrap.
    accounts. Sign in with Google and verify the provider's issuer, subject, and
    verified-email assertion. Confirm a matching email never auto-links to a
    different internal user.
-4. **Both staff MFA paths:** issue two synthetic internal staff identities
-   through test-only D1 fixtures: one Global Admin and one Manager with one
-   exam assignment. Exercise password and Google sign-in through the staff
-   client. Confirm both are challenged with an enrolled independent factor;
-   omitting/canceling MFA, using an unenrolled factor, signing in through the
-   learner client, or presenting a forged/missing/stale claim creates no staff
-   session. Confirm the verified factor/time is stored in D1 and each role is
-   authorized only by its D1 row and current assignment.
+4. **Both staff roles and MFA evidence:** issue two synthetic internal staff
+   identities through test-only D1 fixtures: one Global Admin and one Manager
+   with one exam assignment. Exercise password and Google sign-in through the
+   staff client for both identities, including Google sign-in with an existing
+   provider SSO session. Confirm the subsequent Action runs after the challenge
+   and that the staff ID token contains the actual provider-recorded factor and
+   timestamp. The Worker must verify and persist those exact values in D1.
+   Omitting/canceling MFA, using an unenrolled factor, or receiving missing,
+   unsupported, forged, or stale evidence creates no staff session. Explicitly
+   verify that a correctly signed learner-client ID token cannot create a
+   staff session, and that a wrong transaction nonce cannot create any
+   session. Each role remains authorized only by its D1 row and current
+   assignment.
 5. **Application and provider revocation:** prove application logout revokes
    the D1 session on the next protected request, even with an otherwise valid
    provider token. Separately revoke the provider token/end the provider
@@ -133,10 +151,14 @@ connect production users or execute the initial Global Admin bootstrap.
    grant.
 
 The proof passes only when both provider routes complete in the deployed
-Worker runtime, the staff factor is enforced for each staff role and supported
-login method, the Worker accepts only signed and fresh MFA evidence, D1 remains
-the authority for roles/assignments/grants, and logout/revocation behavior is
-recorded without assuming provider and application sessions are coupled.
+Worker runtime; staff and learner ID tokens are accepted only for their
+expected client and exact transaction nonce; and each staff role, including
+Google sign-in with an existing SSO session, produces verifiable
+provider-recorded factor and timestamp evidence after MFA. Learner-client
+tokens, wrong nonces, and missing or stale MFA evidence must not create staff
+sessions. D1 remains authoritative for roles, assignments, grants, and opaque
+sessions; logout/revocation behavior is recorded without assuming provider
+and application sessions are coupled.
 
 ## Pilot learner access path
 
@@ -216,6 +238,8 @@ public documentation, not a quote or contractual residency statement.
 - [Post-login Action API object](https://auth0.com/docs/actions/reference/post-login/post-login-api-object) — challenge, deny, and token-claim operations.
 - [Create custom token claims](https://auth0.com/docs/secure/tokens/json-web-tokens/create-custom-claims) — namespaced claims in signed tokens.
 - [Validate JSON Web Tokens](https://auth0.com/docs/secure/tokens/json-web-tokens/validate-json-web-tokens) — signature, issuer/JWKS, and claim validation.
+- [Validate ID Tokens](https://auth0.com/docs/secure/tokens/id-tokens/validate-id-tokens) — ID-token audience and exact nonce validation.
+- [Post-login ID-token claim API](https://auth0.com/docs/actions/reference/post-login/post-login-api-object) — `api.idToken.setCustomClaim`.
 - [Verify emails](https://auth0.com/docs/manage-users/user-accounts/verify-emails) — database email verification.
 - [Add Google login](https://auth0.com/docs/authenticate/identity-providers/social-identity-providers/google) — Google OAuth connection requirements.
 - [Change users' passwords](https://auth0.com/docs/authenticate/database-connections/password-change) — password recovery and Auth0 session expiry.
