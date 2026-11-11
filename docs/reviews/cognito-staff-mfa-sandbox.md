@@ -25,8 +25,9 @@ The Worker now requires an exact client-IP allowlist before any Cognito route.
 With sign-in disabled, only `GET /api/auth/cognito/preflight` is available:
 the allowed address receives `signInEnabled: false`, while other addresses
 receive 403. Login, callback, CSRF, and logout routes remain disabled. Local
-tests cover this preflight. A remote preflight response was observed, but it
-does not establish unlisted-network behavior or the deployed source.
+tests cover this preflight. The allowed-network preflight was observed
+remotely; the owner reports a denied mobile-data request, which this agent
+did not independently reproduce. The deployed source remains uninspected.
 
 The runbook separates two phases. The staff-only proof uses one synthetic
 Global Admin and one exam-scoped Manager, disables public signup, and suppresses
@@ -37,9 +38,9 @@ later phase and remain untested.
 The owner approved a **$0 spending cap** and a **5-minute staff MFA freshness
 window**. The user-specified pool could not be verified because AWS access is
 unavailable. A read-only probe found the requested Worker and returned
-`signInEnabled: true`; its tester restriction has not been verified from an
-unlisted network. The Cloudflare plan/quota and AWS billing remain unknown.
-No resources were provisioned or changed.
+`signInEnabled: true` from this environment. The owner reports the mobile-data
+preflight returned 403 after Wi-Fi was disabled. The Cloudflare plan/quota and
+AWS billing remain unknown. No resources were provisioned or changed.
 
 ## Latest live staff attempt — blocked
 
@@ -60,10 +61,12 @@ No resources were provisioned or changed.
   account; no deployment or configuration was changed.
 - The supplied Worker's preflight returned HTTP 200 with
   `signInEnabled: true` from this environment, including when a forged
-  `X-Forwarded-For` header was sent. This only records the response from this
-  network; no unlisted-network request was made, and the deployed source was
-  not inspected. Sign-in is already enabled, contrary to the runbook's
-  precondition. No `/start` request was sent and no remote D1 data was queried.
+  `X-Forwarded-For` header was sent. The owner reports that the same preflight
+  returned 403 from a phone on mobile data with Wi-Fi off; this agent did not
+  independently reproduce that request. The latest deployment ID is unchanged
+  from the previous read-only check, and this agent did not change the IP
+  allowlist. The deployed source and current allowlist value were not inspected.
+  No `/start` request was sent and no remote D1 data was queried.
 - No invitation, password-reset email, SMS, or public signup was triggered.
 
 Before continuing, an AWS operator must sign in to the account that owns the
@@ -71,9 +74,10 @@ pool (for example, `aws sso login --profile <sandbox-profile>`) and have
 `cognito-idp:AdminGetUser` and `cognito-idp:AdminSetUserPassword` scoped to
 `arn:aws:cognito-idp:eu-north-1:<account-id>:userpool/eu-north-1_6uS3EspI9`.
 Password entry and updates must run in a private interactive environment with
-masked input; do not send passwords in chat. The Worker owner must verify the
-deployed IP restriction from an unlisted network and restore the disabled
-preflight condition before any sign-in is attempted.
+masked input; do not send passwords in chat. The Worker is intentionally
+enabled per the owner. No deployment change was observed since the previous
+read-only check; repeat the mobile-data preflight only if the Worker deployment
+or IP allowlist changes.
 
 ## Architecture and safeguards
 
@@ -150,14 +154,14 @@ The identity architecture decision remains proposed; no provider was adopted.
 | Synthetic learner identity, verified-email gate, scoped dashboard, and second-exam denial | Passed locally using synthetic signed tokens and a D1 Standard grant for one exam; this did not exercise Cognito email delivery. |
 | Enrollment-only staff denial and returning login | Passed locally: a synthetic level-1/password-only login creates no staff session; a later fresh level-4 TOTP login for the same D1 Global Admin creates one. |
 | CertPath logout | Passed locally: D1 session revocation prevents subsequent protected API access. |
-| Worker allowlist preflight | Local pass: while sign-in is disabled, an allowlisted IP receives `signInEnabled: false`, an unlisted IP receives 403 (even with an allowed `X-Forwarded-For`), `/start` returns 503, and D1 has no new login transaction. Remote read-only preflight returned HTTP 200 with `signInEnabled: true` from this environment, unchanged by a forged `X-Forwarded-For`; the unlisted-network behavior and deployed source remain unverified. |
+| Worker allowlist preflight | Local pass: while sign-in is disabled, an allowlisted IP receives `signInEnabled: false`, an unlisted IP receives 403 (even with an allowed `X-Forwarded-For`), `/start` returns 503, and D1 has no new login transaction. Remote allowed-network preflight returned HTTP 200 with `signInEnabled: true`, unchanged by a forged `X-Forwarded-For`; the owner reports a 403 from phone-on-mobile-data. The latter was not independently reproduced and the deployed source remains uninspected. |
 | Cognito PreSignUp allowlist | Unit tests passed; intentionally not attached for the staff-only phase because self-registration is disabled. Real Lambda trigger behavior is deferred to the learner phase. |
 | AWS access and staff account statuses | **Unverified/untested** — AWS CLI/SDK, environment credentials, and local AWS profiles were unavailable; neither `AdminGetUser` nor password mutation was attempted. |
 | Cloudflare target Worker | Read-only deployment query found five deployments for the supplied `certpath-staff-mfa-sandbox` Worker. The repository Wrangler config targets `certpath-foundation`; the deployed source and account plan/quota were not inspected. |
-| Deployed Worker sign-in gate | **Blocked** — preflight returned HTTP 200 and `signInEnabled: true` from this environment. No unlisted-network request was made; no login-start request or D1 query was made. Do not continue until the tester restriction is verified and the disabled preflight condition is restored. |
+| Deployed Worker sign-in gate | Allowed-network preflight returned HTTP 200 with `signInEnabled: true`; owner reports an unlisted mobile-data request returned 403. The latest deployment ID is unchanged, and no allowlist change was made by this agent. The deployed source and allowlist value remain uninspected. No login-start request or D1 query was made. |
 | Live target-pool claims; staff enrollment, returning sign-in, and existing SSO | **Untested** — no credentials were changed and no sign-in was attempted. |
 | Cognito learner registration, email verification, and password reset | **Untested; deferred** until the separate learner email phase. The local synthetic identity test does not count as this test. |
-| Remote Cloudflare Worker/D1 tester restriction and integration | **Untested** — the Worker exists, but an unlisted-network request and deployed-source inspection were not possible. No remote D1 query was made. |
+| Remote Cloudflare Worker/D1 tester restriction and integration | **Partially checked** — current allowed-network preflight passed; owner reports the phone-on-mobile-data preflight was denied. The unlisted request was not independently reproduced and deployed source/configuration were not inspected. No remote D1 query was made. |
 | Ubuntu GitHub Actions | Passed on the staff/learner runbook commit `0dc3cd42e04942fbc601d3d21b9cb62abefd5833`: [run 43087694029](https://github.com/Pdey2022/certpath/actions/runs/43087694029). |
 
 ## Live test setup and teardown checklist
@@ -290,11 +294,11 @@ confirmed credit balance or separate owner approval.
   above. A private masked input mechanism is also required before setting
   either synthetic user's permanent password.
 - **Deployed tester gate:** the supplied Worker exists and reports
-  `signInEnabled: true`. Only this environment's preflight was tested; the
-  unlisted-network response and deployed source are unknown. Do not call
-  `/start` until the Worker owner verifies the deployed IP restriction from
-  both allowed and unlisted networks and returns the sandbox to the disabled
-  preflight state.
+  `signInEnabled: true`. The current allowed-network preflight passed and the
+  owner reports a 403 from mobile data; the deployed source and current
+  allowlist value were not independently inspected. No deployment change was
+  observed since the previous deployment check, and this agent made no
+  allowlist changes.
 - **Provider proof:** the user-specified pool's existence and user statuses
   were not verified. First enrollment, returning staff, existing SSO, and
   signed assurance evidence remain untested.
@@ -353,8 +357,8 @@ architect for the retained Auth0 fallback recommendation.
    `apps/api/test/cognito-sandbox.test.ts`. Review the allowlist trigger and
    tests in `apps/api/src/cognito-signup-allowlist.ts` and
    `apps/api/test/cognito-signup-allowlist.test.ts`.
-5. Before any sign-in, verify the supplied Worker's deployed source and
-   tester restriction from both an allowlisted and an unlisted network. Its
-   current preflight reports `signInEnabled: true`; do not call `/start` until
-   the disabled preflight condition is restored and the restriction passes.
-   Keep learner email tests deferred until separately approved.
+5. The supplied Worker is intentionally enabled. The current allowed-network
+   preflight passed, the owner reports a denied phone-on-mobile-data preflight,
+   and no deployment change was observed since the previous check. Repeat the
+   mobile-data preflight if the deployment or IP allowlist changes. Keep
+   learner email tests deferred until separately approved.
