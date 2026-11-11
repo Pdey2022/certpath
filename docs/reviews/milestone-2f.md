@@ -85,7 +85,8 @@ deployment, or real question content.
 | `Set-Location apps\web; npx tsx --test app/routes/admin-question-editor.test.tsx` | Passed: 7 component tests, including revision/list races, out-of-order question/search/revision results, save-while-switching, stale correction recovery and preserving unsaved edits after a subsequent conflict. |
 | `npm run verify` | Passed: API health test; 55 API tests across 8 files; 20 web tests; typechecks; client and SSR builds. |
 | Authenticated browser responsive check | Passed using an assigned synthetic Manager session and synthetic content in a fresh isolated local D1 Worker. Loaded the actual editor form at 390x844 and 1440x900; document widths were 375 and 1425 respectively, with no horizontal overflow. The desktop answer editor used a two-column option layout; mobile collapsed to one column. |
-| Ubuntu GitHub Actions | Passed on implementation commit `d792d1916257f4bfc4425f8967153f4ae5defd21`: [verify run](https://github.com/Pdey2022/certpath/actions/runs/43015938117). |
+| Ubuntu GitHub Actions (initial implementation) | Passed on commit `d792d1916257f4bfc4425f8967153f4ae5defd21`: [verify run](https://github.com/Pdey2022/certpath/actions/runs/43015938117). |
+| Ubuntu GitHub Actions (revision-race correction) | Passed on commit `6d0b189`: [verify run](https://github.com/Pdey2022/certpath/actions/runs/43019454696). |
 
 The Worker/D1 integration test uses isolated test factories to establish an
 assigned Manager session, creates taxonomy and a question through HTTP,
