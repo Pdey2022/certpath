@@ -86,7 +86,7 @@ No dependency was added for this milestone.
 | Learner UI tests | Passed: neutral initial shell, access/session errors, server-acknowledged save state, failed-save recovery with the same request, result review and locked completion, and Save & exit behavior. |
 | Responsive browser inspection | At 1440×900, 375×812 and 320×720, the question screen and controls were inspected. No horizontal overflow was measured at the 320 px viewport. Synthetic protected-API responses were used for this visual pass; it was not an authenticated Worker browser test. |
 | `git diff --check` | Passed after handoff authoring; staged diff will be checked again before commit. |
-| Ubuntu GitHub Actions | Pending PR creation and verification of the final pushed SHA. |
+| Ubuntu GitHub Actions | Passed on implementation commit `74588f7f9ae8aaa8b3a798a3ae5fe2c78354d6a9` in [run 43040602041](https://github.com/Pdey2022/certpath/actions/runs/43040602041). A handoff-only documentation commit follows; its check is reported with the PR. |
 
 No credentials, personal data or real question banks were added.
 
