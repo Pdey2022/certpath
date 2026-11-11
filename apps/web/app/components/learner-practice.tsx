@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useBlocker } from "react-router";
+import { useBlocker, useLocation, useNavigate } from "react-router";
 import {
   getPracticeAttempt,
   LearnerPracticeApiError,
@@ -74,6 +74,8 @@ function SaveStatus({ state, message }: { state: SaveState; message: string }) {
 }
 
 export function LearnerPractice() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [scopes, setScopes] = useState<PracticeScope[]>([]);
   const [scopesReady, setScopesReady] = useState(false);
   const [selectedScopeKey, setSelectedScopeKey] = useState("");
@@ -84,6 +86,7 @@ export function LearnerPractice() {
   const [selectedDomain, setSelectedDomain] = useState("");
   const [difficulty, setDifficulty] = useState("");
   const [attempt, setAttempt] = useState<PracticeAttempt | null>(null);
+  const [linkedAttemptId, setLinkedAttemptId] = useState<string | null>(null);
   const [selectedOptionKey, setSelectedOptionKey] = useState("");
   const [pendingAnswer, setPendingAnswer] = useState<PendingAnswer | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -119,15 +122,65 @@ export function LearnerPractice() {
 
   useEffect(() => {
     let active = true;
+    const requestId = ++attemptRequest.current;
+    const requestedAttemptId = new URLSearchParams(location.search).get("attemptId");
+    setAttempt(null);
+    setLinkedAttemptId(null);
+    activeAttemptId.current = requestedAttemptId;
+    setSelectedOptionKey("");
+    setPendingAnswer(null);
+    pendingAnswerRef.current = null;
+    setConflict(false);
+    setSaveState("idle");
+    setSaveMessage("");
     setLoadError("");
+    setIsLoadingAttempt(Boolean(requestedAttemptId));
     void listPracticeScopes()
-      .then((response) => {
+      .then(async (response) => {
         if (!active) return;
         setScopes(response.items);
         if (response.items[0]) setSelectedScopeKey(scopeKey(response.items[0]));
+        if (!requestedAttemptId) return;
+        try {
+          const linkedAttempt = await getPracticeAttempt(requestedAttemptId);
+          if (!active || attemptRequest.current !== requestId) return;
+          setAttempt(linkedAttempt);
+          setLinkedAttemptId(requestedAttemptId);
+          activeAttemptId.current = linkedAttempt.attempt.id;
+          setSelectedOptionKey("");
+          setSaveState("saved");
+          setSaveMessage(
+            linkedAttempt.attempt.state === "completed"
+              ? "The selected completed result was loaded from the server."
+              : "The selected attempt was loaded with server-acknowledged progress.",
+          );
+          const linkedScope = response.items.find(
+            (scope) =>
+              scope.certificationId === linkedAttempt.attempt.certificationId &&
+              scope.examVersionId === linkedAttempt.attempt.examVersionId,
+          );
+          if (linkedScope) setSelectedScopeKey(scopeKey(linkedScope));
+        } catch (error) {
+          if (active && attemptRequest.current === requestId) {
+            setAttempt(null);
+            setLinkedAttemptId(null);
+            activeAttemptId.current = null;
+            setLoadError(messageFor(error));
+          }
+        } finally {
+          if (active && attemptRequest.current === requestId) {
+            setIsLoadingAttempt(false);
+          }
+        }
       })
       .catch((error: unknown) => {
-        if (active) setLoadError(messageFor(error));
+        if (active && attemptRequest.current === requestId) {
+          setAttempt(null);
+          setLinkedAttemptId(null);
+          activeAttemptId.current = null;
+          setLoadError(messageFor(error));
+          setIsLoadingAttempt(false);
+        }
       })
       .finally(() => {
         if (active) setScopesReady(true);
@@ -135,7 +188,7 @@ export function LearnerPractice() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [location.search]);
 
   useEffect(() => {
     const requestId = ++listRequest.current;
@@ -211,12 +264,16 @@ export function LearnerPractice() {
 
   async function beginPractice(input: StartPracticeInput) {
     if (isStarting) return;
+    if (requestedAttemptId) {
+      await navigate("/app/practice/live", { replace: true });
+    }
     setIsStarting(true);
     setPendingStart(input);
     setLoadError("");
     try {
       const started = await startPractice(input);
       setAttempt(started);
+      setLinkedAttemptId(null);
       activeAttemptId.current = started.attempt.id;
       setSelectedOptionKey("");
       setPendingStart(null);
@@ -250,6 +307,12 @@ export function LearnerPractice() {
   }
 
   async function openAttempt(summary: PracticeAttemptSummary) {
+    if (requestedAttemptId && requestedAttemptId !== summary.id) {
+      await navigate(
+        `/app/practice/live?attemptId=${encodeURIComponent(summary.id)}`,
+      );
+      return;
+    }
     const requestId = ++attemptRequest.current;
     activeAttemptId.current = summary.id;
     setIsLoadingAttempt(true);
@@ -260,6 +323,9 @@ export function LearnerPractice() {
         return;
       }
       setAttempt(restored);
+      setLinkedAttemptId(
+        requestedAttemptId === summary.id ? summary.id : null,
+      );
       setSelectedOptionKey("");
       setPendingAnswer(null);
       pendingAnswerRef.current = null;
@@ -346,18 +412,35 @@ export function LearnerPractice() {
     if (pendingAnswer || selectedOptionKey || saveState === "saving") return;
     activeAttemptId.current = null;
     setAttempt(null);
+    setLinkedAttemptId(null);
     setSelectedOptionKey("");
     setPendingAnswer(null);
     pendingAnswerRef.current = null;
     setSaveState("saved");
     setSaveMessage("Your acknowledged progress remains saved on the server.");
+    if (requestedAttemptId) {
+      void navigate("/app/practice/live", { replace: true });
+    }
   }
 
+  const requestedAttemptId = new URLSearchParams(location.search).get("attemptId");
+  const linkIsPending =
+    requestedAttemptId !== null &&
+    linkedAttemptId !== requestedAttemptId &&
+    !loadError;
+  const visibleAttempt =
+    attempt &&
+    ((requestedAttemptId === null && linkedAttemptId === null) ||
+      (requestedAttemptId !== null &&
+        linkedAttemptId === requestedAttemptId &&
+        attempt.attempt.id === requestedAttemptId))
+      ? attempt
+      : null;
   const currentItem =
-    attempt?.items.find(
-      (item) => item.position === attempt.attempt.currentPosition,
+    visibleAttempt?.items.find(
+      (item) => item.position === visibleAttempt.attempt.currentPosition,
     ) ?? null;
-  const completed = attempt?.attempt.state === "completed";
+  const completed = visibleAttempt?.attempt.state === "completed";
 
   if (!scopesReady) {
     return (
@@ -407,13 +490,13 @@ export function LearnerPractice() {
         </section>
       )}
 
-      {attempt ? (
+      {visibleAttempt ? (
         <div className="practice-column">
           <div className="section-heading">
             <div>
               <p className="eyebrow">
-                {attempt.attempt.currentPosition < attempt.attempt.questionCount
-                  ? `Question ${attempt.attempt.currentPosition + 1} of ${attempt.attempt.questionCount}`
+                {visibleAttempt.attempt.currentPosition < visibleAttempt.attempt.questionCount
+                  ? `Question ${visibleAttempt.attempt.currentPosition + 1} of ${visibleAttempt.attempt.questionCount}`
                   : "Attempt complete"}
               </p>
               <h2>{completed ? "Practice summary" : "Your question"}</h2>
@@ -442,7 +525,7 @@ export function LearnerPractice() {
           {completed ? (
             <article className="card">
               <p className="metric">
-                {attempt.attempt.correctCount} / {attempt.attempt.questionCount} correct
+                {visibleAttempt.attempt.correctCount} / {visibleAttempt.attempt.questionCount} correct
               </p>
               <p>This attempt is complete and locked against further answers.</p>
             </article>
@@ -458,7 +541,7 @@ export function LearnerPractice() {
                   >
                     <input
                       type="radio"
-                      name={`answer-${attempt.attempt.id}-${currentItem.position}`}
+                      name={`answer-${visibleAttempt.attempt.id}-${currentItem.position}`}
                       value={option.key}
                       checked={selectedOptionKey === option.key}
                       onChange={() => chooseAnswer(option.key)}
@@ -512,11 +595,11 @@ export function LearnerPractice() {
             </button>
           )}
 
-          {attempt.items.some((item) => item.isCorrect !== undefined) && (
+          {visibleAttempt.items.some((item) => item.isCorrect !== undefined) && (
             <details className="card section-block">
               <summary>Review submitted answers</summary>
               <ol className="practice-review-list">
-                {attempt.items
+                {visibleAttempt.items
                   .filter((item) => item.isCorrect !== undefined)
                   .map((item) => (
                     <li key={`${item.position}-${item.revisionId}`}>
@@ -538,6 +621,10 @@ export function LearnerPractice() {
             </details>
           )}
         </div>
+      ) : linkIsPending || (isLoadingAttempt && requestedAttemptId) ? (
+        <p className="card" role="status" aria-busy="true">
+          Loading the selected saved attempt…
+        </p>
       ) : (
         <>
           {scopes.length === 0 ? (

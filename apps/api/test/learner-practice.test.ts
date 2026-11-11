@@ -283,6 +283,135 @@ async function createPractice(
 }
 
 describe("protected learner practice Worker/D1 boundary", () => {
+  it("returns bounded authorized progress summaries without question content", async () => {
+    const scope = await createContentScope(database);
+    await Promise.all([
+      publishQuestion(scope, `dashboard-${crypto.randomUUID()}-1`),
+      publishQuestion(scope, `dashboard-${crypto.randomUUID()}-2`),
+    ]);
+    await publishTimedMockQuestions(scope);
+    const learner = await createLearner(scope.certificationId);
+    const { response: created, body } = await createPractice(learner, scope, 2);
+    expect(created.status).toBe(201);
+    const timedMock = await createTimedMock(learner, scope);
+    expect(timedMock.response.status).toBe(201);
+    const saved = await request(
+      learner,
+      `/attempts/${body.attempt.id}/answers`,
+      {
+        method: "POST",
+        body: {
+          expectedVersion: 1,
+          requestId: crypto.randomUUID(),
+          selectedOptionKey: "A",
+        },
+      },
+    );
+    expect(saved.status).toBe(200);
+
+    const dashboardResponse = await request(learner, "/dashboard");
+    assertPrivate(dashboardResponse);
+    expect(dashboardResponse.status).toBe(200);
+    const dashboard = await dashboardResponse.json() as {
+      groups: Array<{
+        certificationId: string;
+        examVersionId: string;
+        resumable: Array<{
+          id: string;
+          kind: string;
+          answeredCount: number;
+          currentPosition: number;
+          deadlineAt?: number;
+        }>;
+        completed: unknown[];
+      }>;
+    };
+    expect(dashboard.groups).toHaveLength(1);
+    expect(dashboard.groups[0]).toMatchObject({
+      certificationId: scope.certificationId,
+      examVersionId: scope.examVersionId,
+      resumable: [
+        {
+          id: body.attempt.id,
+          kind: "practice",
+          answeredCount: 1,
+          currentPosition: 1,
+        },
+        {
+          id: timedMock.body.attempt.id,
+          kind: "timed_mock",
+          deadlineAt: timedMock.body.attempt.deadlineAt,
+        },
+      ],
+      completed: [],
+    });
+    const serialized = JSON.stringify(dashboard);
+    expect(serialized).not.toContain(validQuestionContent.stem);
+    expect(serialized).not.toContain(validQuestionContent.options[0]?.text);
+    expect(serialized).not.toContain(validQuestionContent.options[0]?.explanation);
+
+    vi.setSystemTime(timedMock.body.attempt.deadlineAt);
+    try {
+      const timedOutResult = await request(
+        learner,
+        `/mocks/${timedMock.body.attempt.id}`,
+      );
+      assertPrivate(timedOutResult);
+      expect(timedOutResult.status).toBe(200);
+      expect(await timedOutResult.json()).toMatchObject({
+        attempt: { state: "completed", completionReason: "timed_out" },
+      });
+      const afterTimeout = await request(learner, "/dashboard");
+      expect(await afterTimeout.json()).toMatchObject({
+        groups: [
+          {
+            resumable: [{ kind: "practice", id: body.attempt.id }],
+            completed: [
+              {
+                kind: "timed_mock",
+                id: timedMock.body.attempt.id,
+                completionReason: "timed_out",
+              },
+            ],
+          },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const otherLearner = await createLearner(scope.certificationId);
+    const otherDashboard = await request(otherLearner, "/dashboard");
+    expect(await otherDashboard.json()).toMatchObject({ groups: [{ resumable: [], completed: [] }] });
+
+    const otherScope = await createContentScope(database);
+    await grantTestLearnerAccess(database, learner.userId, otherScope.certificationId);
+    const multipleScopes = await request(learner, "/dashboard");
+    const multipleScopeBody = await multipleScopes.json() as typeof dashboard;
+    expect(multipleScopeBody.groups).toHaveLength(2);
+    expect(
+      multipleScopeBody.groups.find(
+        (group) => group.certificationId === otherScope.certificationId,
+      ),
+    ).toMatchObject({ resumable: [], completed: [] });
+
+    await database
+      .prepare("UPDATE learner_access_grants SET expires_at = ? WHERE user_id = ? AND certification_id = ?")
+      .bind(Date.now() - 1, learner.userId, scope.certificationId)
+      .run();
+    const expiredDashboard = await request(learner, "/dashboard");
+    assertPrivate(expiredDashboard);
+    expect(await expiredDashboard.json()).toMatchObject({
+      groups: [
+        {
+          certificationId: otherScope.certificationId,
+          resumable: [],
+          completed: [],
+        },
+      ],
+    });
+  });
+
   it("creates immutable published snapshots, reveals answers only after submission, resumes, and locks completion", async () => {
     const scope = await createContentScope(database);
     const questions = await Promise.all([

@@ -224,6 +224,41 @@ export const timedMockAttemptResponseSchema = z
   })
   .strict();
 
+export const learnerDashboardAttemptSchema = z
+  .object({
+    id,
+    kind: z.enum(["practice", "timed_mock"]),
+    state: z.enum(["in_progress", "completed"]),
+    questionCount: safeInteger.min(1).max(20),
+    answeredCount: safeInteger.min(0).max(20),
+    currentPosition: safeInteger.min(0).max(20),
+    correctCount: safeInteger.min(0).max(20).optional(),
+    createdAt: safeInteger,
+    updatedAt: safeInteger,
+    completedAt: safeInteger.nullable(),
+    deadlineAt: safeInteger.optional(),
+    completionReason: z.enum(["learner_submitted", "timed_out"]).nullable().optional(),
+  })
+  .strict();
+
+export const learnerDashboardGroupSchema = z
+  .object({
+    certificationId: id,
+    certificationName: z.string().min(1).max(160),
+    examVersionId: id,
+    versionKey: z.string().min(1).max(80),
+    examVersionTitle: z.string().min(1).max(160),
+    resumable: z.array(learnerDashboardAttemptSchema).max(40),
+    completed: z.array(learnerDashboardAttemptSchema).max(40),
+  })
+  .strict();
+
+export const learnerDashboardResponseSchema = z
+  .object({
+    groups: z.array(learnerDashboardGroupSchema).max(200),
+  })
+  .strict();
+
 export type PracticeScopeResponse = z.infer<
   typeof practiceScopeResponseSchema
 >;
@@ -248,4 +283,7 @@ export type TimedMockSubmitRequest = z.infer<
 >;
 export type TimedMockAttemptResponse = z.infer<
   typeof timedMockAttemptResponseSchema
+>;
+export type LearnerDashboardResponse = z.infer<
+  typeof learnerDashboardResponseSchema
 >;
