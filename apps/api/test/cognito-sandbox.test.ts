@@ -21,6 +21,7 @@ const origin = "https://certpath.example.test";
 const issuer = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_testpool";
 const learnerClientId = "synthetic-learner-client";
 const staffClientId = "synthetic-staff-client";
+const allowedClientIp = "198.51.100.10";
 const bindings = {
   DB: database,
   PUBLIC_SITE_ORIGIN: origin,
@@ -28,6 +29,7 @@ const bindings = {
   STAFF_MFA_MAX_AGE_MS: "300000",
   STAFF_MFA_ALLOWED_METHODS: "totp",
   COGNITO_SANDBOX_ENABLED: "true",
+  COGNITO_SANDBOX_ALLOWED_CLIENT_IPS: allowedClientIp,
   COGNITO_ISSUER: issuer,
   COGNITO_DOMAIN: "https://certpath-test.auth.us-east-1.amazoncognito.com",
   COGNITO_CALLBACK_URL: `${origin}/api/auth/cognito/callback`,
@@ -113,6 +115,15 @@ const fetcher: typeof fetch = async (input, init) => {
 
 const application = createApi(fetcher);
 
+async function fetchApi(
+  request: Request,
+  clientIp = allowedClientIp,
+): Promise<Response> {
+  const headers = new Headers(request.headers);
+  headers.set("CF-Connecting-IP", clientIp);
+  return application.fetch(new Request(request, { headers }), bindings);
+}
+
 beforeAll(async () => {
   signingKeys = (await crypto.subtle.generateKey(
     {
@@ -194,11 +205,10 @@ async function beginLogin(
   claimOverrides: Record<string, unknown> = {},
   options: { invalidSignature?: boolean } = {},
 ): Promise<PendingLogin> {
-  const start = await application.fetch(
+  const start = await fetchApi(
     new Request(
       `${origin}/api/auth/cognito/start?audience=${audience}`,
     ),
-    bindings,
   );
   const authorizationUrl = new URL(start.headers.get("Location") ?? origin);
   const state = authorizationUrl.searchParams.get("state") ?? "";
@@ -218,9 +228,8 @@ async function finishLogin(pending: PendingLogin): Promise<LoginResult> {
   const callbackUrl = new URL("/api/auth/cognito/callback", origin);
   callbackUrl.searchParams.set("code", "synthetic-authorization-code");
   callbackUrl.searchParams.set("state", pending.state);
-  const response = await application.fetch(
+  const response = await fetchApi(
     new Request(callbackUrl, { headers: { Cookie: pending.cookie } }),
-    bindings,
   );
   tamperSignature = false;
   nextClaims = null;
@@ -252,7 +261,45 @@ async function sessionCount(userId: string): Promise<number> {
   return result?.count ?? 0;
 }
 
+async function loginTransactionCount(): Promise<number> {
+  const result = await database
+    .prepare("SELECT COUNT(*) AS count FROM cognito_login_transactions")
+    .first<{ count: number }>();
+  return result?.count ?? 0;
+}
+
 describe("Cognito sandbox authorization-code proof harness", () => {
+  it("denies an unlisted client IP before writing a D1 login transaction", async () => {
+    const before = await loginTransactionCount();
+    const response = await fetchApi(
+      new Request(`${origin}/api/auth/cognito/start?audience=learner`, {
+        headers: { "X-Forwarded-For": allowedClientIp },
+      }),
+      "203.0.113.77",
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: { code: "sandbox_access_denied" },
+    });
+    expect(await loginTransactionCount()).toBe(before);
+  });
+
+  it("fails closed when the sandbox has no client IP allowlist", async () => {
+    const before = await loginTransactionCount();
+    const request = new Request(
+      `${origin}/api/auth/cognito/start?audience=learner`,
+      { headers: { "CF-Connecting-IP": allowedClientIp } },
+    );
+    const response = await application.fetch(request, {
+      ...bindings,
+      COGNITO_SANDBOX_ALLOWED_CLIENT_IPS: "",
+    });
+
+    expect(response.status).toBe(503);
+    expect(await loginTransactionCount()).toBe(before);
+  });
+
   it("binds client, state, nonce and PKCE to one browser-bound transaction", async () => {
     const identity = await createIdentity("global_admin");
     const result = await login("staff", identity.subject);
@@ -285,11 +332,10 @@ describe("Cognito sandbox authorization-code proof harness", () => {
     const callback = new URL("/api/auth/cognito/callback", origin);
     callback.searchParams.set("code", "synthetic-authorization-code");
     callback.searchParams.set("state", pending.state);
-    const wrongBrowser = await application.fetch(
+    const wrongBrowser = await fetchApi(
       new Request(callback, {
         headers: { Cookie: "certpath_login_wrong=wrong" },
       }),
-      bindings,
     );
     expect(wrongBrowser.status).toBe(400);
     expect(await sessionCount(identity.userId)).toBe(0);
@@ -297,9 +343,8 @@ describe("Cognito sandbox authorization-code proof harness", () => {
     const successful = await finishLogin(pending);
     expect(successful.response.status).toBe(303);
     expect(await sessionCount(identity.userId)).toBe(1);
-    const replay = await application.fetch(
+    const replay = await fetchApi(
       new Request(callback, { headers: { Cookie: pending.cookie } }),
-      bindings,
     );
     expect(replay.status).toBe(400);
     expect(await sessionCount(identity.userId)).toBe(1);
@@ -381,11 +426,10 @@ describe("Cognito sandbox authorization-code proof harness", () => {
       ),
     ).toEqual({ allowed: false, reason: "certification-unassigned" });
 
-    const response = await application.fetch(
+    const response = await fetchApi(
       new Request(`${origin}/api/admin/content/certifications`, {
         headers: { Cookie: `certpath_session=${rawCookie}` },
       }),
-      bindings,
     );
     const body = await response.text();
     expect(response.status).toBe(200);
@@ -437,11 +481,10 @@ describe("Cognito sandbox authorization-code proof harness", () => {
     );
     expect(result.authorizationUrl.searchParams.has("acr_values")).toBe(false);
     expect(rawCookie).not.toBeNull();
-    const dashboard = await application.fetch(
+    const dashboard = await fetchApi(
       new Request(`${origin}/api/practice/dashboard`, {
         headers: { Cookie: `certpath_session=${rawCookie}` },
       }),
-      bindings,
     );
     expect(dashboard.status).toBe(200);
     const newIdentity = await database
@@ -451,11 +494,10 @@ describe("Cognito sandbox authorization-code proof harness", () => {
     expect(newIdentity?.user_id).toBeTruthy();
     const userId = newIdentity?.user_id ?? "";
     await grantTestLearnerAccess(database, userId, allowedScope.certificationId);
-    const authorizedDashboard = await application.fetch(
+    const authorizedDashboard = await fetchApi(
       new Request(`${origin}/api/practice/dashboard`, {
         headers: { Cookie: `certpath_session=${rawCookie}` },
       }),
-      bindings,
     );
     expect(authorizedDashboard.status).toBe(200);
     expect(await authorizedDashboard.json()).toMatchObject({
@@ -466,12 +508,11 @@ describe("Cognito sandbox authorization-code proof harness", () => {
         },
       ],
     });
-    const deniedExamAttempts = await application.fetch(
+    const deniedExamAttempts = await fetchApi(
       new Request(
         `${origin}/api/practice/attempts?certificationId=${deniedScope.certificationId}&examVersionId=${deniedScope.examVersionId}`,
         { headers: { Cookie: `certpath_session=${rawCookie}` } },
       ),
-      bindings,
     );
     expect(deniedExamAttempts.status).toBe(403);
     const role = await database
@@ -498,14 +539,13 @@ describe("Cognito sandbox authorization-code proof harness", () => {
     const rawCookie = sessionCookie(result.response);
     expect(rawCookie).not.toBeNull();
     const cookie = `certpath_session=${rawCookie}`;
-    const csrfResponse = await application.fetch(
+    const csrfResponse = await fetchApi(
       new Request(`${origin}/api/auth/cognito/csrf`, {
         headers: { Cookie: cookie },
       }),
-      bindings,
     );
     const csrf = (await csrfResponse.json()) as { csrfToken: string };
-    const logout = await application.fetch(
+    const logout = await fetchApi(
       new Request(`${origin}/api/auth/cognito/logout`, {
         method: "POST",
         headers: {
@@ -514,14 +554,12 @@ describe("Cognito sandbox authorization-code proof harness", () => {
           "X-CSRF-Token": csrf.csrfToken,
         },
       }),
-      bindings,
     );
     expect(logout.status).toBe(204);
-    const protectedResponse = await application.fetch(
+    const protectedResponse = await fetchApi(
       new Request(`${origin}/api/admin/content/certifications`, {
         headers: { Cookie: cookie },
       }),
-      bindings,
     );
     expect(protectedResponse.status).toBe(401);
   });

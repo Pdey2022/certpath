@@ -16,6 +16,7 @@ type Bindings = {
   STAFF_MFA_MAX_AGE_MS?: string;
   STAFF_MFA_ALLOWED_METHODS?: string;
   COGNITO_SANDBOX_ENABLED?: string;
+  COGNITO_SANDBOX_ALLOWED_CLIENT_IPS?: string;
   COGNITO_ISSUER?: string;
   COGNITO_DOMAIN?: string;
   COGNITO_CALLBACK_URL?: string;
@@ -37,6 +38,7 @@ interface Configuration {
   staffClientId: string;
   transactionKey: string;
   staffMfaMaxAgeMs: number;
+  allowedClientIps: string[];
 }
 
 interface LoginTransaction {
@@ -180,6 +182,42 @@ function validHttpsUrl(value: string | undefined): URL | null {
   }
 }
 
+function canonicalIpAddress(value: string | undefined): string | null {
+  if (!value || value.length > 45) return null;
+  const octets = value.split(".");
+  if (
+    octets.length === 4 &&
+    octets.every((octet) => /^(0|[1-9]\d{0,2})$/.test(octet)) &&
+    octets.every((octet) => Number(octet) <= 255)
+  ) {
+    return octets.map((octet) => String(Number(octet))).join(".");
+  }
+  if (!value.includes(":")) return null;
+  try {
+    const hostname = new URL(`http://[${value}]/`).hostname;
+    return hostname.startsWith("[") && hostname.endsWith("]")
+      ? hostname.slice(1, -1).toLowerCase()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readAllowedClientIps(value: string | undefined): string[] | null {
+  if (!value || value.length > 512) return null;
+  const entries = value.split(",").map((entry) => entry.trim());
+  if (entries.length === 0 || entries.length > 16) return null;
+  const canonicalEntries = entries.map(canonicalIpAddress);
+  if (canonicalEntries.some((entry) => entry === null)) {
+    return null;
+  }
+  return [
+    ...new Set(
+      canonicalEntries.filter((entry): entry is string => entry !== null),
+    ),
+  ];
+}
+
 function readConfiguration(bindings: Bindings): Configuration | null {
   if (
     bindings.COGNITO_SANDBOX_ENABLED !== "true" ||
@@ -198,6 +236,9 @@ function readConfiguration(bindings: Bindings): Configuration | null {
   const learnerClientId = bindings.COGNITO_LEARNER_CLIENT_ID;
   const staffClientId = bindings.COGNITO_STAFF_CLIENT_ID;
   const staffMfaMaxAgeMs = Number(bindings.STAFF_MFA_MAX_AGE_MS);
+  const allowedClientIps = readAllowedClientIps(
+    bindings.COGNITO_SANDBOX_ALLOWED_CLIENT_IPS,
+  );
   if (
     !origin ||
     origin.origin !== bindings.PUBLIC_SITE_ORIGIN ||
@@ -215,6 +256,7 @@ function readConfiguration(bindings: Bindings): Configuration | null {
     !learnerClientId ||
     !staffClientId ||
     learnerClientId === staffClientId ||
+    !allowedClientIps ||
     !Number.isSafeInteger(staffMfaMaxAgeMs)
   ) {
     return null;
@@ -228,6 +270,7 @@ function readConfiguration(bindings: Bindings): Configuration | null {
     staffClientId,
     transactionKey: bindings.COGNITO_TRANSACTION_ENCRYPTION_KEY,
     staffMfaMaxAgeMs,
+    allowedClientIps,
   };
 }
 
@@ -435,6 +478,14 @@ export function createCognitoSandboxApi(fetcher: Fetcher = fetch) {
 
   router.use("*", async (context, next) => {
     privateHeaders(context);
+    const config = readConfiguration(context.env);
+    if (!config) return errorResponse(context, 503, "auth_not_configured");
+    const clientIp = canonicalIpAddress(
+      context.req.header("CF-Connecting-IP"),
+    );
+    if (!clientIp || !config.allowedClientIps.includes(clientIp)) {
+      return errorResponse(context, 403, "sandbox_access_denied");
+    }
     await next();
   });
 

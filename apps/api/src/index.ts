@@ -12,6 +12,7 @@ type ApiBindings = {
   STAFF_MFA_ALLOWED_METHODS?: string;
   CSRF_HMAC_SECRET?: string;
   COGNITO_SANDBOX_ENABLED?: string;
+  COGNITO_SANDBOX_ALLOWED_CLIENT_IPS?: string;
   COGNITO_ISSUER?: string;
   COGNITO_DOMAIN?: string;
   COGNITO_CALLBACK_URL?: string;
