@@ -123,7 +123,7 @@ The identity architecture decision remains proposed; no provider was adopted.
 | Live target-pool claims; staff enrollment, returning sign-in, and existing SSO | **Untested** — no target pool or Worker was provisioned under the $0 cap. |
 | Cognito learner registration, email verification, and password reset | **Untested; deferred** until the separate learner email phase. The local synthetic identity test does not count as this test. |
 | Remote Cloudflare Worker/D1 tester restriction and integration | **Untested** — current verification is through the local Worker harness and Miniflare D1; no deployed Worker exists to inspect. |
-| Ubuntu GitHub Actions | Pending for the preflight-route update; the run link will be recorded after CI completes. |
+| Ubuntu GitHub Actions | Passed on the staff/learner runbook commit `0dc3cd42e04942fbc601d3d21b9cb62abefd5833`: [run 43087694029](https://github.com/Pdey2022/certpath/actions/runs/43087694029). |
 
 ## Live test setup and teardown checklist
 
