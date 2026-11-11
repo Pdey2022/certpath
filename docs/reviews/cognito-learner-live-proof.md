@@ -8,17 +8,16 @@ there is no deployment version, no test-generated bill, and no resource teardown
 to perform. Learner sign-in was not enabled by this test. The status of any
 separately existing live deployment was not checked or changed.
 
-The $0 out-of-pocket gate remains unconfirmed for the requested test. The owner
-previously reported an active AWS Free account plan and $100.00 in credits,
-but I could not verify the current account state or determine whether the
-isolated Cognito pool, Lambda signup trigger, and email delivery are available
-on that plan. AWS documents that Free accounts can access only selected
-services; paid-only services require an upgrade. The owner reports that the
-official Free-plan service list includes Cognito, Lambda, and SES, but that
-does not verify this account's current plan status or the signed-in identity's
-permissions. Opening the AWS Billing console redirected to AWS sign-in; no AWS
-CLI or credentials are available in this environment. No upgrade or payment
-was requested.
+The current AWS plan state is verified from the owner's read-only CloudShell
+output: plan `FREE`, status `ACTIVE`, $100 USD remaining, expiring May 11, 2027
+at 19:42:29 UTC. The owner reports that Cognito pool creation had previously
+worked in the staff sandbox and that the official Free-plan service list
+includes Cognito, Lambda, and SES. However, the learner pool's
+`COGNITO_DEFAULT` email settings and the pre-sign-up Lambda trigger/function
+settings have not been checked in the account. AWS documents that Free
+accounts can access only selected services and paid-only services require an
+upgrade. No AWS CLI or credentials are available in this environment, and no
+upgrade, payment, resource change, or email operation was requested.
 
 The D1 inventory was successfully queried with Wrangler explicitly configured
 for the Certpath account. It contains one database,
@@ -35,9 +34,10 @@ and no email was sent.
 | Start from `origin/main` at `3227902` or later | Passed | `origin/main` was `322790271d2f6a22fc62ffc405891d0bfa2e3769`; branch `feat/cognito-learner-live-proof` starts there |
 | Read repository instructions and learner sandbox handoff | Passed | Both documents reviewed |
 | AWS CLI and authorized AWS identity | Failed | `aws` CLI and local AWS credential/config files are absent; no AWS console session is available in this environment |
-| Current AWS Free account plan and credit balance | Untested | Previously owner-reported as Free with $100.00 remaining; the AWS console visit redirected to sign-in, so current status was not rechecked |
+| Current AWS Free account plan and credit balance | Passed (owner-provided CloudShell result) | `FREE`, `ACTIVE`, $100 USD remaining, expires May 11, 2027 at 19:42:29 UTC |
 | Public Free-plan service list | Passed (owner-reported) | Owner reports the official list includes Cognito, Lambda, and SES; this does not verify current account state or permissions |
-| Cognito pool, pre-sign-up Lambda trigger, and built-in email settings access | Untested | Account-specific console/API access could not be checked; no pool or trigger was created |
+| Cognito pool creation on this account | Passed (owner-reported) | Essentials pool creation previously worked in the Stockholm staff sandbox; no learner pool was created |
+| Learner `COGNITO_DEFAULT` email and pre-sign-up Lambda trigger settings | Untested | Account-specific settings and Lambda function creation access have not been checked; no pool or trigger was created |
 | Published AWS feature and pricing review | Passed | Cognito supports Essentials user pools and a pre-sign-up Lambda trigger. Cognito email verification and password-recovery messages are separately priced via SES; `COGNITO_DEFAULT` has a daily sending limit. Public documentation does not establish this account's Free-plan access or coverage. |
 | Wrangler authentication and account targeting | Passed | `wrangler d1 list --json --config <temporary config with Certpath account_id>` succeeded; the temporary config change was removed |
 | Cloudflare Workers Free plan and current usage | Passed (owner-reported) | Owner reports Workers Free, 0/100,000 requests and 0/200,000 observability events for November 11, 2026; CPU usage is unavailable |
@@ -70,16 +70,17 @@ and no email was sent.
 - [Cloudflare D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) — D1 Free limits, database count, and overage prices.
 
 The Cloudflare account-targeted D1 inventory is verified, but neither Wrangler
-inventory nor the dashboard snapshot exposed daily row totals. The AWS Free
-plan and credit balance were only reported previously by the owner. The
-current account plan and access to the Cognito and Lambda settings remain
-unverified because the console redirected to sign-in.
+inventory nor the dashboard snapshot exposed daily row totals. The current AWS
+Free plan state is verified from the owner's CloudShell result. Access to the
+learner-specific Cognito email and Lambda trigger settings remains unverified
+because the console redirected to sign-in.
 
 ## Blockers and required access
 
-1. In AWS CloudShell, run the read-only commands below to verify the current
-   Free plan state and Free Tier usage. The list-user-pools and list-functions
-   calls below only test read access; do not share their resource names.
+1. In the signed-in AWS console, verify the learner-specific settings without
+   submitting any create/update form. The list-user-pools and list-functions
+   commands below only test read access; do not share their resource names.
+   The plan-state command is retained to recheck status before provisioning.
 
    ```sh
    aws freetier get-account-plan-state --region us-east-1 \
@@ -93,14 +94,12 @@ unverified because the console redirected to sign-in.
      --query 'Functions[].FunctionName' --output text --no-cli-pager
    ```
 
-   In the AWS Free Tier console, confirm the account is still on the Free plan
-   and review its eligible-service list. In the Cognito console for
-   `eu-north-1`, inspect the user-pool setup screens for the default email
-   provider, verification/reset messages, and pre-sign-up Lambda trigger
-   settings; do not submit a create/update action. Use the Lambda console or
-   IAM Policy Simulator to confirm the required settings/permissions are
-   available. Stop if AWS offers an upgrade/payment or marks a required
-   operation paid-only.
+   In the Cognito console for `eu-north-1`, inspect the user-pool setup screens
+   for the default email provider, verification/reset messages, and pre-sign-up
+   Lambda trigger selector; do not submit a create/update action. Open the
+   Lambda create-function workflow and confirm the required settings are
+   available without submitting it. Stop if AWS offers an upgrade/payment or
+   marks a required operation paid-only.
 
    In AWS Billing, review current-month Cognito, SES, and Lambda usage/charges
    and note the data timestamp. Use the console rather than the Cost Explorer
@@ -118,10 +117,9 @@ unverified because the console redirected to sign-in.
 ## Deployment, billing, and teardown
 
 - Deployment version: **not applicable; nothing was deployed**.
-- Billing evidence: **not verified for this continuation**. The previously
-  reported AWS Free plan and credit balance were not rechecked; the console
-  redirected to sign-in. Test-service settings, usage, month-to-date costs,
-  and reporting timestamp remain unverified.
+- Billing evidence: **partial**. Owner-provided CloudShell output confirms the
+  current Free plan and remaining credits. Learner-specific service settings,
+  usage, month-to-date costs, and reporting timestamp remain unverified.
 - Teardown: **not applicable; no resources were created**. If a later approved
   run provisions resources, first set learner sign-in disabled and verify
   preflight reports disabled; then remove the learner-only Worker, D1 database,
