@@ -20,15 +20,17 @@ Object.defineProperties(globalThis, {
   IS_REACT_ACT_ENVIRONMENT: { configurable: true, writable: true, value: true },
 });
 
-const { cleanup, fireEvent, render, screen, waitFor } =
+const { act, cleanup, fireEvent, render, screen, waitFor } =
   await import("@testing-library/react");
 const { LearnerTimedMock } = await import("./learner-timed-mock");
 const originalFetch = globalThis.fetch;
 const startedAt = 1_800_000_000_000;
+const intervalRestorers: Array<() => void> = [];
 
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  for (const restore of intervalRestorers.splice(0)) restore();
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -42,6 +44,8 @@ function makeAttempt(options: {
   version?: number;
   selectedOptionKey?: string;
   completed?: boolean;
+  deadlineOffsetMs?: number;
+  completionReason?: "learner_submitted" | "timed_out";
 } = {}) {
   const completed = options.completed ?? false;
   return {
@@ -50,7 +54,9 @@ function makeAttempt(options: {
       certificationId: "cert-1",
       examVersionId: "version-1",
       state: completed ? "completed" : "in_progress",
-      completionReason: completed ? "learner_submitted" : null,
+      completionReason: completed
+        ? options.completionReason ?? "learner_submitted"
+        : null,
       version: options.version ?? 1,
       profileVersion: 1,
       durationSeconds: 900,
@@ -59,7 +65,7 @@ function makeAttempt(options: {
       answeredCount: options.selectedOptionKey ? 1 : 0,
       ...(completed ? { correctCount: 1 } : {}),
       startedAt,
-      deadlineAt: startedAt + 900_000,
+      deadlineAt: startedAt + (options.deadlineOffsetMs ?? 900_000),
       completedAt: completed ? startedAt + 1000 : null,
       createdAt: startedAt,
       updatedAt: startedAt + (options.selectedOptionKey ? 1000 : 0),
@@ -113,11 +119,17 @@ const scopeResponse = {
   ],
 };
 
-function installFetch() {
+function installFetch(options: {
+  deadlineOffsetMs?: number;
+  answerGate?: Promise<void>;
+  failResultChecks?: number;
+  completeAfterResultChecks?: number;
+} = {}) {
   let saved = false;
   let completed = false;
   let answerPostCount = 0;
-  let current = makeAttempt();
+  let resultCheckCount = 0;
+  let current = makeAttempt({ deadlineOffsetMs: options.deadlineOffsetMs });
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input), browser.location.href);
     if (url.pathname === "/api/practice/csrf") {
@@ -142,7 +154,7 @@ function installFetch() {
     }
     if (url.pathname === "/api/practice/mocks" && init?.method === "POST") {
       saved = true;
-      current = makeAttempt();
+      current = makeAttempt({ deadlineOffsetMs: options.deadlineOffsetMs });
       return jsonResponse(current, 201);
     }
     if (url.pathname === "/api/practice/mocks/mock-1/answers") {
@@ -153,7 +165,9 @@ function installFetch() {
       current = makeAttempt({
         version: 2,
         selectedOptionKey: body.selectedOptionKey,
+        deadlineOffsetMs: options.deadlineOffsetMs,
       });
+      if (options.answerGate) await options.answerGate;
       return jsonResponse(current);
     }
     if (url.pathname === "/api/practice/mocks/mock-1/submit") {
@@ -162,15 +176,29 @@ function installFetch() {
         version: 3,
         selectedOptionKey: "A",
         completed: true,
+        deadlineOffsetMs: options.deadlineOffsetMs,
       });
       return jsonResponse(current);
     }
     if (url.pathname === "/api/practice/mocks/mock-1") {
-      return jsonResponse(
-        completed
-          ? makeAttempt({ version: 3, selectedOptionKey: "A", completed: true })
-          : current,
-      );
+      resultCheckCount += 1;
+      if (resultCheckCount <= (options.failResultChecks ?? 0)) {
+        return jsonResponse({ error: { code: "service_unavailable" } }, 503);
+      }
+      if (
+        !completed &&
+        resultCheckCount >= (options.completeAfterResultChecks ?? Number.POSITIVE_INFINITY)
+      ) {
+        completed = true;
+        current = makeAttempt({
+          version: 3,
+          selectedOptionKey: "A",
+          completed: true,
+          deadlineOffsetMs: options.deadlineOffsetMs,
+          completionReason: "timed_out",
+        });
+      }
+      return jsonResponse(current);
     }
     throw new Error(`Unexpected timed-mock request: ${init?.method} ${url.pathname}`);
   };
@@ -178,7 +206,46 @@ function installFetch() {
     get answerPostCount() {
       return answerPostCount;
     },
+    get resultCheckCount() {
+      return resultCheckCount;
+    },
   };
+}
+
+function captureCountdownTick() {
+  let tick: (() => void) | null = null;
+  const original = browser.setInterval;
+  browser.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    if (timeout === 1000 && typeof handler === "function") {
+      const callback = handler as (...callbackArgs: unknown[]) => void;
+      tick = () => callback(...args);
+      return 123;
+    }
+    return original.call(
+      browser,
+      handler as (...callbackArgs: unknown[]) => void,
+      timeout,
+      ...args,
+    );
+  }) as typeof browser.setInterval;
+  intervalRestorers.push(() => {
+    browser.setInterval = original;
+  });
+  return {
+    tick: async () => {
+      await act(async () => {
+        tick?.();
+      });
+    },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 function renderMock() {
@@ -276,4 +343,62 @@ test("retains a selected answer after a failed network save and retries the same
   );
   fireEvent.click(screen.getByRole("button", { name: "Retry the same save" }));
   await waitFor(() => assert.ok(screen.getByText("Saved on the server.")));
+});
+
+test("checks for timeout after an in-flight answer save settles", async () => {
+  const answerGate = deferred<void>();
+  const requests = installFetch({
+    deadlineOffsetMs: -1000,
+    answerGate: answerGate.promise,
+    completeAfterResultChecks: 1,
+  });
+  const countdown = captureCountdownTick();
+  await startMock();
+
+  fireEvent.click(screen.getByRole("radio", { name: /Synthetic answer 1/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Save answer" }));
+  await waitFor(() => assert.equal(requests.answerPostCount, 1));
+  await countdown.tick();
+  assert.equal(requests.resultCheckCount, 0);
+
+  answerGate.resolve();
+  await screen.findByRole("heading", { name: "Mock results" });
+  assert.equal(requests.resultCheckCount, 1);
+  assert.ok(screen.getByText("Finalized automatically from answers acknowledged before the deadline."));
+});
+
+test("retries a temporary timeout-result check failure without manual action", async () => {
+  const requests = installFetch({
+    deadlineOffsetMs: -1000,
+    failResultChecks: 1,
+    completeAfterResultChecks: 2,
+  });
+  const countdown = captureCountdownTick();
+  await startMock();
+
+  await countdown.tick();
+  await waitFor(() => assert.equal(requests.resultCheckCount, 1));
+  assert.ok(screen.getByRole("button", { name: "Refresh server state" }));
+
+  await screen.findByRole("heading", { name: "Mock results" }, { timeout: 3000 });
+  assert.equal(requests.resultCheckCount, 2);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(requests.resultCheckCount, 2);
+});
+
+test("stops automatic timeout checks after leaving the attempt", async () => {
+  const requests = installFetch({
+    deadlineOffsetMs: -1000,
+    completeAfterResultChecks: Number.POSITIVE_INFINITY,
+  });
+  const countdown = captureCountdownTick();
+  await startMock();
+
+  fireEvent.click(screen.getByRole("button", { name: "Save & exit" }));
+  await screen.findByRole("heading", { name: "Leave the timed mock?" });
+  fireEvent.click(screen.getByRole("button", { name: "Leave mock" }));
+  await screen.findByRole("heading", { name: "Choose an authorized exam" });
+  await countdown.tick();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(requests.resultCheckCount, 0);
 });

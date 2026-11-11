@@ -29,6 +29,17 @@ type PendingOperation =
       requestId: string;
     };
 
+interface DeadlineRecovery {
+    attemptId: string;
+    active: boolean;
+    checking: boolean;
+    waitingForIdle: boolean;
+    retries: number;
+    retryTimer: number | null;
+}
+
+const deadlineRetryDelays = [500, 1000, 2000] as const;
+
 function scopeKey(scope: Pick<PracticeScope, "certificationId" | "examVersionId">) {
   return `${scope.certificationId}:${scope.examVersionId}`;
 }
@@ -72,6 +83,7 @@ export function LearnerTimedMock() {
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [remainingSeconds, setRemainingSeconds] = useState(0);
@@ -83,6 +95,7 @@ export function LearnerTimedMock() {
   const receivedAt = useRef(0);
   const requestSequence = useRef(0);
   const deadlineCheckAttempt = useRef<string | null>(null);
+  const deadlineRecovery = useRef<DeadlineRecovery | null>(null);
 
   const scope =
     scopes.find((item) => scopeKey(item) === scopeKeyValue) ?? null;
@@ -94,6 +107,115 @@ export function LearnerTimedMock() {
   const hasPendingWork = dirty || Boolean(pendingOperation) || busy;
   const blocker = useBlocker(hasPendingWork && !completed);
 
+  function stopDeadlineRecovery(attemptId?: string) {
+    const recovery = deadlineRecovery.current;
+    if (!recovery || (attemptId && recovery.attemptId !== attemptId)) return;
+    recovery.active = false;
+    if (recovery.retryTimer !== null) {
+      window.clearTimeout(recovery.retryTimer);
+    }
+    deadlineRecovery.current = null;
+  }
+
+  function updateBusy(value: boolean) {
+    busyRef.current = value;
+    setBusy(value);
+    if (!value) {
+      const recovery = deadlineRecovery.current;
+      if (recovery?.active && recovery.waitingForIdle) {
+        recovery.waitingForIdle = false;
+        queueMicrotask(() => void checkAutomaticDeadlineResult(recovery));
+      }
+    }
+  }
+
+  function scheduleDeadlineRetry(recovery: DeadlineRecovery) {
+    if (!recovery.active || deadlineRecovery.current !== recovery) return;
+    const delay = deadlineRetryDelays[recovery.retries];
+    if (delay === undefined) {
+      setStatus(
+        "Automatic result checks are paused. Use Refresh server state to check again.",
+      );
+      return;
+    }
+    recovery.retries += 1;
+    recovery.retryTimer = window.setTimeout(() => {
+      recovery.retryTimer = null;
+      void checkAutomaticDeadlineResult(recovery);
+    }, delay);
+  }
+
+  async function checkAutomaticDeadlineResult(recovery: DeadlineRecovery) {
+    if (!recovery.active || deadlineRecovery.current !== recovery) return;
+    if (saveAttemptId.current !== recovery.attemptId) {
+      stopDeadlineRecovery(recovery.attemptId);
+      return;
+    }
+    if (busyRef.current) {
+      recovery.waitingForIdle = true;
+      return;
+    }
+
+    recovery.checking = true;
+    updateBusy(true);
+    try {
+      const restored = await getTimedMockAttempt(recovery.attemptId);
+      if (
+        !recovery.active ||
+        deadlineRecovery.current !== recovery ||
+        saveAttemptId.current !== recovery.attemptId
+      ) return;
+      installAttempt(restored);
+      setPendingOperation(null);
+      setError("");
+      if (restored.attempt.state === "completed") {
+        setStatus("The server finalized this mock. Its result is shown below.");
+        stopDeadlineRecovery(recovery.attemptId);
+      } else {
+        setStatus("The deadline passed. Checking again for the finalized result.");
+        scheduleDeadlineRetry(recovery);
+      }
+    } catch (cause) {
+      if (recovery.active && deadlineRecovery.current === recovery) {
+        setError(errorMessage(cause));
+        setStatus("The result check failed temporarily. CertPath practice will retry.");
+        scheduleDeadlineRetry(recovery);
+      }
+    } finally {
+      recovery.checking = false;
+      updateBusy(false);
+    }
+  }
+
+  function startDeadlineRecovery(attemptId: string) {
+    let recovery = deadlineRecovery.current;
+    if (!recovery || recovery.attemptId !== attemptId) {
+      stopDeadlineRecovery();
+      recovery = {
+        attemptId,
+        active: true,
+        checking: false,
+        waitingForIdle: false,
+        retries: 0,
+        retryTimer: null,
+      };
+      deadlineRecovery.current = recovery;
+    } else if (
+      recovery.checking ||
+      recovery.waitingForIdle ||
+      recovery.retryTimer !== null ||
+      recovery.retries >= deadlineRetryDelays.length
+    ) {
+      return;
+    }
+
+    if (busyRef.current) {
+      recovery.waitingForIdle = true;
+      return;
+    }
+    void checkAutomaticDeadlineResult(recovery);
+  }
+
   function installAttempt(value: TimedMockAttempt) {
     setAttempt(value);
     setSelectedOptionKey(
@@ -104,6 +226,9 @@ export function LearnerTimedMock() {
     setRemainingSeconds(
       Math.max(0, Math.ceil((value.attempt.deadlineAt - value.serverNow) / 1000)),
     );
+    if (value.attempt.state === "completed") {
+      stopDeadlineRecovery(value.attempt.id);
+    }
   }
 
   async function refreshAttempts(scopeValue = scope) {
@@ -138,6 +263,8 @@ export function LearnerTimedMock() {
     };
   }, []);
 
+  useEffect(() => () => stopDeadlineRecovery(), []);
+
   useEffect(() => {
     let active = true;
     setAttempts([]);
@@ -166,7 +293,7 @@ export function LearnerTimedMock() {
       setRemainingSeconds(left);
       if (left === 0 && deadlineCheckAttempt.current !== attempt.attempt.id) {
         deadlineCheckAttempt.current = attempt.attempt.id;
-        void reloadAttempt(true);
+        startDeadlineRecovery(attempt.attempt.id);
       }
     };
     const timer = window.setInterval(tick, 1000);
@@ -185,7 +312,9 @@ export function LearnerTimedMock() {
 
   async function startMock() {
     if (!scope || busy) return;
-    setBusy(true);
+    stopDeadlineRecovery();
+    deadlineCheckAttempt.current = null;
+    updateBusy(true);
     setError("");
     setStatus("");
     try {
@@ -201,13 +330,15 @@ export function LearnerTimedMock() {
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
-      setBusy(false);
+      updateBusy(false);
     }
   }
 
   async function openMock(summary: TimedMockAttemptSummary) {
+    stopDeadlineRecovery();
+    deadlineCheckAttempt.current = null;
     const requestId = ++requestSequence.current;
-    setBusy(true);
+    updateBusy(true);
     setError("");
     try {
       const restored = await getTimedMockAttempt(summary.id);
@@ -223,15 +354,15 @@ export function LearnerTimedMock() {
     } catch (cause) {
       if (requestSequence.current === requestId) setError(errorMessage(cause));
     } finally {
-      if (requestSequence.current === requestId) setBusy(false);
+      if (requestSequence.current === requestId) updateBusy(false);
     }
   }
 
   async function reloadAttempt(checkExpiry = false) {
-    if (!attempt || busy) return;
+    if (!attempt || busyRef.current) return;
     const id = attempt.attempt.id;
     const requestId = ++requestSequence.current;
-    setBusy(true);
+    updateBusy(true);
     setError("");
     try {
       const restored = await getTimedMockAttempt(id);
@@ -249,13 +380,13 @@ export function LearnerTimedMock() {
     } catch (cause) {
       if (requestSequence.current === requestId) setError(errorMessage(cause));
     } finally {
-      if (requestSequence.current === requestId) setBusy(false);
+      if (requestSequence.current === requestId) updateBusy(false);
     }
   }
 
   async function sendPendingOperation(operation: PendingOperation) {
     if (!attempt || saveAttemptId.current !== attempt.attempt.id) return;
-    setBusy(true);
+    updateBusy(true);
     setError("");
     setStatus("Saving this answer and position on the server.");
     try {
@@ -294,7 +425,7 @@ export function LearnerTimedMock() {
         }
       }
     } finally {
-      setBusy(false);
+      updateBusy(false);
     }
   }
 
@@ -349,7 +480,7 @@ export function LearnerTimedMock() {
   async function submitMock() {
     if (!attempt || busy || dirty || pendingOperation) return;
     setSubmitConfirmation(false);
-    setBusy(true);
+    updateBusy(true);
     setError("");
     const requestId = submitRequestId.current ?? crypto.randomUUID();
     submitRequestId.current = requestId;
@@ -384,11 +515,13 @@ export function LearnerTimedMock() {
         }
       }
     } finally {
-      setBusy(false);
+      updateBusy(false);
     }
   }
 
   function exitMock() {
+    stopDeadlineRecovery();
+    deadlineCheckAttempt.current = null;
     if (attempt) {
       setAttempts((current) =>
         current.map((summary) =>
@@ -397,6 +530,7 @@ export function LearnerTimedMock() {
       );
     }
     setAttempt(null);
+    saveAttemptId.current = null;
     setSelectedOptionKey("");
     setPendingOperation(null);
     setLeaveConfirmation(false);

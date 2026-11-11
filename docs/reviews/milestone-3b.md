@@ -64,6 +64,21 @@ practice and not an official certification exam.
   grant expiry, stale and duplicate writes, deadline-boundary rejection,
   submit/timeout finalization, and insufficient published-question counts.
 
+## PR #12 timeout-recovery correction
+
+When the countdown reaches zero, the UI now queues a result read until any
+in-flight save settles. Temporary read failures or a still-in-progress result
+are retried after bounded delays (500 ms, 1 second, and 2 seconds); the manual
+**Refresh server state** action remains available after those attempts. Recovery
+timers are canceled when the result is loaded or the attempt is left. Server
+deadline enforcement and scoring are unchanged.
+
+Regression tests cover countdown expiry during a deferred answer save,
+automatic recovery after a transient result-read failure without a manual
+click, and stopping automatic checks after leaving. `npm run verify` passed
+with 68 API tests, 48 web tests, and successful client/server builds. Ubuntu CI
+for the correction is tracked on PR #12.
+
 ## Authenticated browser walkthrough
 
 Used local Worker/D1 state with synthetic published questions, two independently
