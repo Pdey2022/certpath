@@ -217,6 +217,47 @@ describe("staging learner authentication", () => {
   }, 30_000);
 });
 
+describe("staging learner authentication configuration", () => {
+  it("fails closed before CSRF when the Lambda verifier endpoint is missing", async () => {
+    const application = createApi(fetch, () => Date.now(), async () => true);
+    const bindings = {
+      DB: database,
+      PUBLIC_SITE_ORIGIN: stagingLearnerAuthOrigin,
+      CSRF_HMAC_SECRET: "staging-test-csrf-secret-with-enough-entropy",
+      STAGING_AUTH_RATE_LIMIT_HMAC_SECRET:
+        "staging-test-rate-limit-secret-with-enough-entropy",
+      STAGING_LEARNER_AUTH_ENABLED: "true",
+      STAGING_LEARNER_EMAIL: "learner@example.test",
+      STAGING_TESTER_IPS: testerIp,
+      AWS_ACCESS_KEY_ID: "AKIAFIXTUREACCESS00",
+      AWS_REGION: "eu-north-1",
+      AWS_SECRET_ACCESS_KEY: "fixture-secret-access-key-not-real",
+      AWS_SESSION_TOKEN: "fixture-session-token-not-real",
+    };
+    const send = (path: string) =>
+      application.fetch(
+        new Request(`${stagingLearnerAuthOrigin}/api${path}`, {
+          headers: {
+            "CF-Connecting-IP": testerIp,
+            Origin: stagingLearnerAuthOrigin,
+          },
+        }),
+        bindings,
+      );
+
+    const preflight = await send("/auth/staging/preflight");
+    expect(preflight.status).toBe(200);
+    expect(await preflight.json()).toEqual({
+      localMailboxEnabled: false,
+      signInEnabled: false,
+    });
+
+    const csrf = await send("/auth/staging/csrf");
+    expect(csrf.status).toBe(503);
+    expect(csrf.headers.get("set-cookie")).toBeNull();
+  });
+});
+
 describe("staging Lambda password verifier", () => {
   it("uses only the explicitly supplied local Worker stub in local-test mode", async () => {
     let capturedHeaders: Headers | undefined;

@@ -43,6 +43,19 @@ provision or deploy resources. The local-only HTTPS integration harness may
 use a self-bound verifier stub and an isolated D1 persistence directory; those
 test bindings are not part of the staging Wrangler config.
 
+The harness needs the complete staging binding set: `STAGING_LOCAL_TEST=true`,
+an HTTPS loopback `PUBLIC_SITE_ORIGIN`, `STAGING_TESTER_IPS`,
+`STAGING_LOCAL_TEST_PASSWORD`, the `STAGING_LAMBDA_TEST_STUB` service binding,
+synthetic temporary AWS credentials with `AWS_REGION=eu-north-1`, and a
+shape-valid `LAMBDA_FUNCTION_URL` such as
+`https://staging-local-stub.lambda-url.eu-north-1.on.aws`. The stub intercepts
+the signed request, so that host is never contacted. Missing any one of them
+makes the Worker fail closed before CSRF: `GET /api/auth/staging/preflight`
+still answers `200` but reports `signInEnabled: false`, while
+`GET /api/auth/staging/csrf` answers `503`. An empty `LAMBDA_FUNCTION_URL`
+produces exactly that pair, so treat it as an incomplete local binding set
+rather than a browser, cookie, or origin fault.
+
 Deployed validation remains blocked. The unchanged scrypt profile has prior
 19–20 ms Worker CPU observations against the Workers Free 10 ms per-request
 limit. No hashing parameters were changed. Obtain reviewed, deployed CPU and
@@ -183,6 +196,31 @@ steps were performed here.
 4. Delete only the isolated staging Worker and D1 resources created for the
    run. Confirm cleanup and review pre/post usage, credits, and any pending
    billing.
+
+## Local HTTPS harness results
+
+The built staging bundle (`npm run build:staging`) was served locally over
+HTTPS with isolated D1, one synthetic `@example.test` learner, one authorized
+exam, and the self-bound verifier stub. Synthetic credentials, the fixture
+password, and signed headers are not reproduced here.
+
+- Unlisted tester IP — `403` before D1 or verifier work.
+- Foreign `Origin` on CSRF — `503`; foreign `Origin` on sign-in — `403
+  invalid_origin`; `/api/auth/local/*` — `404`.
+- Real sign-in form — `GET /api/auth/staging/csrf` `200`, then
+  `POST /api/auth/staging/sign-in` `200`, then `/app/home` and
+  `GET /api/practice/dashboard` `200` with one authorized exam.
+- Session cookie — `__Host-certpath_session` with `Path=/`, `Max-Age=28800`,
+  `HttpOnly`, `Secure`, `SameSite=Lax`; not readable from `document.cookie`,
+  and re-sent automatically after a full reload.
+- Logout — `/api/auth/session/csrf` `200`, `/api/auth/session/logout` `204`,
+  then `GET /api/practice/dashboard` `401`; isolated D1 showed two sessions
+  created and both revoked with none active.
+- Verifier stub calls — one per eligible sign-in and none from the rejected
+  requests.
+
+This proves the local path only. Deployed Worker CPU and memory remain
+unmeasured and block a staging pilot.
 
 ## Local validation
 
