@@ -51,7 +51,9 @@ Illustrative only: every learner and admin screen. Practice answers and the
 timed mocks use separate browser-storage keys for CISSP and CISM (each mock is
 a 3-question, 3-minute synthetic attempt with a wall-clock countdown, auto-submit
 on expiry, a results screen, and same-browser resume; they are not official exams
-or server-enforced timers, and clearing site data discards them); progress, access, customers,
+or server-enforced timers, and clearing site data discards them). The learner
+dashboard shows separate CISSP and CISM mock links that resume, show results, or
+start each exam according to its browser-saved attempt; progress, access, customers,
 payments, and audit data are fixed
 fixtures. The live-API pages (`/app/home`, `/app/practice/live`,
 `/app/mock/live`, `/sign-in`, and related) are not linked and do not work here.
