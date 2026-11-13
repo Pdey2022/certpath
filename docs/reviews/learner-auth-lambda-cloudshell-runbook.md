@@ -1,12 +1,11 @@
 # Learner scrypt Lambda benchmark: CloudShell runbook
 
-**Status:** Local harness prepared; no AWS resources created and no benchmark
-requests sent.
+**Status:** Live rerun passed from a local terminal. Temporary resources were
+removed and verified. See the live results below.
 **Branch/base:** `feat/learner-auth-lambda-proof` from
 `d923abdddafd865421566ffe60c829bd4cf959e2` (`origin/main`).
-**Invoker:** AWS CloudShell using its current AWS session, as selected by the
-owner for this synthetic-only run. This replaces the earlier proposal to use a
-Cloudflare Worker as the caller for this benchmark only.
+**Invoker:** The runbook uses AWS CloudShell. The live rerun used the same
+packaged runner from a local terminal with the named `certpath` profile.
 **Scope:** One temporary Lambda Event Function and IAM-authenticated Function
 URL. No Cloudflare deployment, email, D1, Cognito, learner sign-in, or staff
 MFA.
@@ -43,6 +42,9 @@ verifies what remains; keep the manifest until cleanup is confirmed complete.
 - Never logs request or response bodies, the generated hash, or credentials.
 
 ## Preflight evidence and cost boundary
+
+This table records the initial planning evidence. See the live rerun for
+the latest checks and results.
 
 | Check | Current evidence | Interpretation |
 |---|---|---|
@@ -503,16 +505,40 @@ Local checks completed:
   temporary session token, without printing fixture credentials or
   authorization headers. The test needs a Node.js 22 executable: it uses the
   current one when running on Node 22, otherwise the path in
-  `CERTPATH_NODE22_PATH` (CI sets this). The live benchmark must be rerun
-  separately after review.
+  `CERTPATH_NODE22_PATH` (CI sets this). See the live rerun below.
 
-The CloudShell permission simulation, Function URL regional feature check,
-deployment, Lambda measurements, billing delta, and teardown have not been
-performed by this local preparation.
-Worker-to-Lambda signing and latency are explicitly **untested**; this harness
-uses the CloudShell AWS session as the direct caller. The local hash checks
-execute CertPath's shared hashing module in Node.js, not in a Cloudflare
-Workers runtime, so direct Worker-runtime hash parity is also **untested**.
+## Live rerun on 2026-11-13
+
+The packaged runner from commit `9111410dd3cd2d09d802c71ae36625b5b7a23f7d`
+ran from the local terminal with the named `certpath` AWS CLI profile against
+an isolated Lambda in `eu-north-1`. Preflight confirmed an active AWS Free
+plan, $120 USD in remaining credits, sufficient unreserved concurrency for
+four requests, and passing IAM permission simulations. An unsigned Function
+URL request returned HTTP 403.
+
+| Measurement | Result |
+| --- | --- |
+| Signed requests | 10 of 10 returned HTTP 200, up to 4 in flight |
+| Lambda execution time (AWS REPORT) | 137.06–313.49 ms |
+| Cold starts (AWS REPORT) | 2, with initialization of 98.32 and 115.40 ms |
+| Peak memory (AWS REPORT) | 160 MB with 1,769 MB configured |
+| Local runner round trip | 253.82–770.16 ms |
+
+The runner and Lambda verified each other's hashes. Lambda rejected the
+wrong synthetic password. The scrypt profile stayed at N=32768, r=8, p=1
+with a 32-byte key, 16-byte salt, and 64 MiB maximum memory.
+
+Cleanup verified removal of the Function URL, function, log group, inline
+IAM policy, and IAM role. The cleanup summary recorded zero deletion errors
+and no remaining resources.
+
+The post-run check still showed Free / Active and $120 in remaining credits.
+The filtered Free Tier usage query returned no matching rows. Final billed
+usage and recurring allowance headroom remain unverified.
+
+The live rerun validated direct signing from the local terminal. CloudShell
+execution and Worker-to-Lambda signing, latency, and Worker resource usage
+remain unmeasured.
 
 ### Official AWS references
 
