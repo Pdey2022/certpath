@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import type { Route } from "./+types/admin";
 import { WorkspaceShell } from "../components/workspace-shell";
+import { isUiPreview } from "../lib/preview-mode";
 
 type DemoRole = "global-admin" | "manager";
 type QuestionStatus = "Draft" | "In review" | "Published";
@@ -68,13 +69,13 @@ export function meta(_: Route.MetaArgs) {
 }
 
 function DevRolePanel({ role, onChange }: { role: DemoRole; onChange: (role: DemoRole) => void }) {
-  if (typeof import.meta.env === "undefined" || !import.meta.env.DEV) {
+  if (!isUiPreview && (typeof import.meta.env === "undefined" || !import.meta.env.DEV)) {
     return null;
   }
 
   return (
     <aside className="demo-panel admin-role-panel" aria-labelledby="admin-demo-title">
-      <p className="eyebrow">Development-only demo control</p>
+      <p className="eyebrow">{isUiPreview ? "Preview-only demo control" : "Development-only demo control"}</p>
       <h2 id="admin-demo-title">Preview role selector</h2>
       <p>
         This selector changes presentation only. It is not authentication, authorization, a staff
