@@ -12,6 +12,7 @@ await build({
   entryPoints: [
     { in: resolve(directory, "handler.ts"), out: "handler" },
     { in: resolve(directory, "runner.ts"), out: "runner" },
+    { in: resolve(directory, "cleanup.ts"), out: "cleanup" },
   ],
   format: "esm",
   outdir: outputDirectory,

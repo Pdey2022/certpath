@@ -10,6 +10,9 @@ Cloudflare Worker as the caller for this benchmark only.
 **Scope:** One temporary Lambda Event Function and IAM-authenticated Function
 URL. No Cloudflare deployment, email, D1, Cognito, learner sign-in, or staff
 MFA.
+**Cleanup:** A per-run manifest records the exact resource names before any
+resource is created. `cleanup.mjs` attempts every deletion independently and
+verifies what remains; keep the manifest until cleanup is confirmed complete.
 
 ## What the local harness does
 
@@ -43,9 +46,9 @@ MFA.
 
 | Check | Current evidence | Interpretation |
 |---|---|---|
-| AWS account plan | Owner-confirmed `FREE / ACTIVE`; Billing showed $100 remaining credits and expiry 11 May 2027. | Recheck immediately before the run. Stop if the plan is not Free/Active, credits are exhausted, or AWS asks for payment or an upgrade. |
-| Recurring Free Tier usage | `get-free-tier-usage` returned `[]` twice for Lambda, CloudWatch, and data transfer. | Unknown, not zero usage and not proof of available allowance. |
-| Lambda account quotas | Owner-provided Service Quotas output showed a regional limit of 10 concurrent executions and 8 GB maximum allocated x86_64 MicroVM memory. | The runner caps at four in flight; check that at least four executions are currently unreserved before creating resources and again before invoking. No function-level reserved concurrency is configured. The memory quota's applicability to this Event Function must still be confirmed in the account. |
+| AWS account plan and credits | Rechecked 13 Nov 2026 in the signed-in AWS Free Tier console: the account is identified as a free-plan account and the credit balance shows `$100.00 remaining`; the owner previously confirmed `FREE / ACTIVE` via CLI. No benchmark resources or invocations have been created. | Recheck plan status and balance immediately before the run. Record temporary-credit changes separately from recurring Free Tier usage. Stop if the plan is not Free/Active, credits are exhausted, or AWS asks for payment or an upgrade. |
+| Recurring Free Tier usage | The console shows 0 offers in use; `get-free-tier-usage` returned `[]` twice for Lambda, CloudWatch, and data transfer. | Coverage is unknown, not zero usage and not proof of available allowance. |
+| Lambda account quotas | Owner-provided Service Quotas output showed a regional limit of 10 concurrent executions and 8 GB maximum allocated x86_64 MicroVM memory. | The runner caps at four in flight; check that the account reports at least four unreserved executions before creating resources and again before invoking. This is not a reservation and transient competing load may still cause throttling; the runner stops on HTTP 429. No function-level reserved concurrency is configured. The memory quota's applicability to this Event Function must still be confirmed in the account. |
 | Function URL in `eu-north-1` | Published AWS documentation indicates Stockholm support; the Regional Services feature row has not been independently verified. | Verify the feature row before creating resources. Stop if unavailable or uncertain. |
 | Actual benchmark charges | No benchmark has run. | No charge or credit use has been observed. |
 
@@ -56,11 +59,12 @@ Lambda compute envelope is approximately:
 `10 × 1.769 GB × 3 seconds = 53.1 GB-seconds`
 
 AWS's Free Tier usage result is unknown, so do not claim this is covered by
-recurring free usage. If billable, the Free Plan's temporary credits may cover
-it; record any credit change separately. The Billing screen previously said
-usage was covered by credits. This is not a hard spend cap: if the active Free
-Plan or credit balance changes, stop before provisioning. Review billing again
-after the run because usage and credit reporting can be delayed.
+recurring free usage. The Free Plan's credits are temporary, not a recurring
+allowance; record the starting and ending balance separately. Maintain a
+$0 out-of-pocket cap: stop if the plan or credit state is unclear, the balance
+cannot cover potential billable usage, or AWS indicates any charge or requests
+payment or an upgrade. Review billing after the run because usage and credit
+reporting can be delayed.
 
 ## Required permissions
 
@@ -74,14 +78,16 @@ the actions against their corresponding resource ARN.
 | Read-only preflight | `sts:GetCallerIdentity`, `freetier:GetAccountPlanState`, `freetier:GetFreeTierUsage`, `lambda:GetAccountSettings`, `iam:SimulatePrincipalPolicy`. `iam:ListRoles` is only needed if using the CLI to resolve an assumed-role ARN to its IAM role ARN. |
 | Create/configure | `iam:CreateRole`, `iam:PutRolePolicy`, `iam:PassRole`; `logs:CreateLogGroup`, `logs:PutRetentionPolicy`; `lambda:CreateFunction`, `lambda:GetFunctionConfiguration`, `lambda:CreateFunctionUrlConfig`, `lambda:GetFunctionUrlConfig`. |
 | Invoke/measure | `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` on the function; `logs:FilterLogEvents` on its log group. |
-| Teardown | `lambda:DeleteFunctionUrlConfig`, `lambda:DeleteFunction`; `logs:DeleteLogGroup`; `iam:DeleteRolePolicy`, `iam:DeleteRole`. |
+| Teardown and verification | `lambda:DeleteFunctionUrlConfig`, `lambda:DeleteFunction`, `lambda:GetFunctionUrlConfig`, `lambda:GetFunctionConfiguration`; `logs:DeleteLogGroup`, `logs:DescribeLogGroups`; `iam:DeleteRolePolicy`, `iam:DeleteRole`, `iam:GetRole`, `iam:GetRolePolicy`. |
 
 The Lambda execution role itself needs only `logs:CreateLogStream` and
 `logs:PutLogEvents` on this function's log group. It has no application,
 database, Cognito, email, or credential permissions. For same-account
 `AWS_IAM` Function URLs, the caller's identity policy can grant both invoke
 actions; this runbook does not add a resource-based policy or modify the
-CloudShell caller's permissions.
+CloudShell caller's permissions. Cleanup verification additionally needs
+`logs:DescribeLogGroups`; the function and role verification actions are
+already listed above.
 
 If a simulation result is not `allowed`, stop before the corresponding
 operation and note the exact action and decision. If the simulation API itself
@@ -105,10 +111,10 @@ npm run benchmark:lambda:package
 ```
 
 This creates `apps/api/dist/lambda-scrypt-benchmark/handler.mjs` and
-`runner.mjs`; the directory is ignored by Git. In AWS CloudShell, use
-**Actions → Upload file** to upload both files to the same working directory.
-The runner bundle contains its SigV4 dependencies; no AWS credentials are
-embedded in either bundle.
+`runner.mjs` plus `cleanup.mjs`; the directory is ignored by Git. In AWS
+CloudShell, use **Actions → Upload file** to upload all three files to the
+same working directory. The runner bundle contains its SigV4 dependencies; no
+AWS credentials are embedded in any bundle.
 
 ### 2. Confirm account, region, and quota
 
@@ -156,15 +162,37 @@ does not pass, stop here.
 Choose a unique suffix and construct these resource names locally:
 
 ```bash
-SUFFIX="$(date -u +%Y%m%d%H%M%S)"
+SUFFIX="$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 6)"
 FUNCTION_NAME="certpath-scrypt-lambda-proof-$SUFFIX"
 ROLE_NAME="${FUNCTION_NAME}-exec"
 LOG_GROUP="/aws/lambda/$FUNCTION_NAME"
+ROLE_POLICY_NAME="CertPathScryptBenchmarkLogs"
+RUN_MANIFEST="$HOME/${FUNCTION_NAME}-resources.json"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 FUNCTION_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FUNCTION_NAME}"
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
 LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${LOG_GROUP}"
+
+if [[ -e "$RUN_MANIFEST" ]]; then
+  printf 'STOP: manifest already exists: %s\n' "$RUN_MANIFEST" >&2
+  exit 1
+fi
+jq -n \
+  --arg region "$AWS_REGION" \
+  --arg functionName "$FUNCTION_NAME" \
+  --arg logGroup "$LOG_GROUP" \
+  --arg roleName "$ROLE_NAME" \
+  --arg rolePolicyName "$ROLE_POLICY_NAME" \
+  '{region:$region,functionName:$functionName,logGroup:$logGroup,roleName:$roleName,rolePolicyName:$rolePolicyName}' \
+  > "$RUN_MANIFEST"
+chmod 600 "$RUN_MANIFEST"
+printf 'Run resource manifest: %s\n' "$RUN_MANIFEST"
 ```
+
+The manifest is written before any resource-creation command. It contains only
+the exact names for this run, not credentials. Keep this CloudShell session and
+manifest; use the manifest for cleanup even if setup or the benchmark stops
+partway through.
 
 Use the IAM Policy Simulator for the current CloudShell user or role. For a
 CLI simulation, `--policy-source-arn` must be the IAM user/role ARN, not an
@@ -220,7 +248,7 @@ simulate_actions() {
 
 simulate_actions '*' \
   freetier:GetAccountPlanState freetier:GetFreeTierUsage \
-  lambda:GetAccountSettings
+  lambda:GetAccountSettings logs:DescribeLogGroups
 simulate_actions "$FUNCTION_ARN" \
   ContextKeyName=lambda:FunctionUrlAuthType,ContextKeyValues=AWS_IAM,ContextKeyType=string \
   ContextKeyName=lambda:InvokedViaFunctionUrl,ContextKeyValues=true,ContextKeyType=boolean \
@@ -288,7 +316,7 @@ JSON
 
 aws iam put-role-policy \
   --role-name "$ROLE_NAME" \
-  --policy-name CertPathScryptBenchmarkLogs \
+  --policy-name "$ROLE_POLICY_NAME" \
   --policy-document file://execution-role-policy.json
 
 sleep 8
@@ -341,7 +369,8 @@ and maximum observed in-flight count. It contains no password or hash. A
 nonzero exit, timeout, HTTP 403, HTTP 429 throttling response, resource-limit
 error, or failed check ends the run; do not retry and do not continue to a
 higher concurrency. Requests already started in the current wave are allowed
-to finish before the runner exits.
+to finish before the runner exits. If setup or the runner exits nonzero, skip
+to cleanup using the same saved manifest; do not continue the benchmark.
 
 Collect the Lambda `REPORT` lines after the invocation logs appear:
 
@@ -362,24 +391,21 @@ unavailable; do not rerun scrypt just to recover metrics.
 
 ### 6. Tear down and verify
 
-Run teardown even if the benchmark failed. Only run each delete command for
-resources that were successfully created; keep the variable values from the
-same CloudShell session:
+Run cleanup after successful completion, a setup failure, a benchmark failure,
+or a prior cleanup failure. The script uses the saved manifest and attempts
+each deletion independently, including resources whose creation may have
+failed or returned ambiguously:
 
 ```bash
-aws lambda delete-function-url-config --function-name "$FUNCTION_NAME"
-aws lambda delete-function --function-name "$FUNCTION_NAME"
-aws logs delete-log-group --log-group-name "$LOG_GROUP"
-aws iam delete-role-policy \
-  --role-name "$ROLE_NAME" \
-  --policy-name CertPathScryptBenchmarkLogs
-aws iam delete-role --role-name "$ROLE_NAME"
+node cleanup.mjs "$RUN_MANIFEST"
 ```
 
-Verify the Function URL config, function, log group, role, and inline policy
-are absent. A deletion denial is a teardown blocker: retain the exact AWS
-error/action and continue cleanup only for independent resources. Do not
-report teardown complete until each created resource is confirmed absent.
+The cleanup output lists any delete errors and every resource still present
+or whose absence could not be verified. It verifies the Function URL config,
+function, log group, role, and inline policy using the exact names saved before
+setup. If cleanup exits nonzero, keep the manifest, resolve the reported
+permission or service issue, and rerun the same cleanup command. Do not report
+teardown complete until the script confirms no resources remain.
 
 Finally recheck the account plan/credit balance and Billing/Cost Explorer.
 Record (a) recurring Free Tier coverage as **unknown** unless the account
@@ -392,10 +418,12 @@ staff MFA remains parked; both Cognito sandboxes remain untouched.
 Local checks completed:
 
 - `npm run verify` — passed: API typecheck, contract typecheck, 1 API smoke
-  test, 95 API tests, 12 Lambda harness tests, 64 web tests, and client/server
+  test, 95 API tests, 16 Lambda harness tests, 64 web tests, and client/server
   production builds.
-- `npm run benchmark:lambda:package` — passed and produced `handler.mjs` and
-  `runner.mjs`.
+- `npm run benchmark:lambda:package` — passed and produced `handler.mjs`,
+  `runner.mjs`, and `cleanup.mjs`.
+- Mocked AWS CLI cleanup tests — passed for partial setup, benchmark failure,
+  failed deletion with exact leftovers, and retry after the failure clears.
 - Bundle smoke test with `LAMBDA_FUNCTION_URL` and `AWS_REGION` unset — passed:
   the runner emitted its expected missing-configuration error, with no module
   resolution or bundling error. No AWS request was sent.
