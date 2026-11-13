@@ -6,8 +6,16 @@ import { createCognitoLearnerSandboxApi } from "./cognito-learner-sandbox.ts";
 import {
   createApplicationSessionApi,
   createLocalLearnerAuthApi,
+  createStagingLearnerAuthApi,
+  stagingLearnerAuthOrigin,
+  type StagingPasswordVerifier,
 } from "./local-learner-auth.ts";
 import type { SecurityDatabase } from "./security/database.ts";
+import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
+import {
+  isStagingLocalTestOrigin,
+  stagingTesterGate,
+} from "./security/staging-gate.ts";
 
 type ApiBindings = {
   DB: SecurityDatabase;
@@ -18,6 +26,19 @@ type ApiBindings = {
   LOCAL_LEARNER_AUTH_ENABLED?: string;
   LOCAL_TEST_MAIL_ENABLED?: string;
   LOCAL_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
+  STAGING_LEARNER_AUTH_ENABLED?: string;
+  STAGING_TESTER_IPS?: string;
+  STAGING_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
+  STAGING_LEARNER_EMAIL?: string;
+  STAGING_LOCAL_TEST?: string;
+  STAGING_LAMBDA_TEST_STUB?: {
+    fetch(input: URL | RequestInfo, init?: RequestInit): Promise<Response>;
+  };
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_REGION?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  AWS_SESSION_TOKEN?: string;
+  LAMBDA_FUNCTION_URL?: string;
   COGNITO_LEARNER_SANDBOX_ENABLED?: string;
   COGNITO_LEARNER_ALLOWED_CLIENT_IPS?: string;
   COGNITO_LEARNER_ISSUER?: string;
@@ -30,8 +51,30 @@ type ApiBindings = {
 export function createApi(
   fetcher: typeof fetch = fetch,
   now: () => number = Date.now,
+  stagingVerifier?: StagingPasswordVerifier,
 ) {
   const application = new Hono<{ Bindings: ApiBindings }>().basePath("/api");
+  const verifyStagingPassword =
+    stagingVerifier ??
+    createLambdaPasswordVerifier(fetcher, () => new Date(now()));
+
+  application.use("*", async (context, next) => {
+    if (context.env?.STAGING_LEARNER_AUTH_ENABLED === "true") {
+      const allowedOrigin =
+        context.env.PUBLIC_SITE_ORIGIN === stagingLearnerAuthOrigin ||
+        (context.env.STAGING_LOCAL_TEST === "true" &&
+          isStagingLocalTestOrigin(context.env.PUBLIC_SITE_ORIGIN));
+      if (!allowedOrigin) {
+        return context.json(
+          { error: { code: "service_unavailable" } },
+          503,
+        );
+      }
+      const rejected = stagingTesterGate(context.req.raw, context.env);
+      if (rejected) return rejected;
+    }
+    await next();
+  });
 
   application.get("/health", (context) => {
     const response = healthResponseSchema.parse({ status: "ok" });
@@ -44,6 +87,10 @@ export function createApi(
     createCognitoLearnerSandboxApi(fetcher),
   );
   application.route("/auth/local", createLocalLearnerAuthApi(now));
+  application.route(
+    "/auth/staging",
+    createStagingLearnerAuthApi(now, verifyStagingPassword),
+  );
   application.route("/auth/session", createApplicationSessionApi(now));
   application.route("/admin/content", protectedContentApi);
   application.route("/practice", learnerPracticeApi);
@@ -51,3 +98,4 @@ export function createApi(
 }
 
 export const api = createApi();
+export { stagingTesterGate } from "./security/staging-gate.ts";

@@ -19,13 +19,24 @@ import type { SecurityDatabase } from "./security/database.ts";
 import {
   constantTimeEqual,
   createCsrfToken,
+  LEGACY_SESSION_COOKIE,
+  opaqueCookieToken,
   sessionCookieToken,
+  sessionCookieName,
   sessionDigest,
+  STAGING_SESSION_COOKIE,
+  type SessionCookieName,
 } from "./security/http-session.ts";
 import {
   findActiveApplicationSession,
 } from "./security/repository.ts";
 import { revokeOwnApplicationSession } from "./security/mutations.ts";
+import {
+  createLambdaPasswordVerifier,
+  LambdaPasswordVerificationError,
+  type LambdaPasswordVerifierBindings,
+} from "./security/lambda-password-verifier.ts";
+import { isStagingLocalTestOrigin } from "./security/staging-gate.ts";
 
 type LocalAuthBindings = {
   DB: SecurityDatabase;
@@ -34,8 +45,24 @@ type LocalAuthBindings = {
   LOCAL_LEARNER_AUTH_ENABLED?: string;
   LOCAL_TEST_MAIL_ENABLED?: string;
   LOCAL_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
+  STAGING_LEARNER_AUTH_ENABLED?: string;
+  STAGING_TESTER_IPS?: string;
+  STAGING_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
+  STAGING_LEARNER_EMAIL?: string;
+  STAGING_LOCAL_TEST?: string;
+  STAGING_LAMBDA_TEST_STUB?: LambdaPasswordVerifierBindings["STAGING_LAMBDA_TEST_STUB"];
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_REGION?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  AWS_SESSION_TOKEN?: string;
+  LAMBDA_FUNCTION_URL?: string;
 };
 type LocalAuthContext = Context<{ Bindings: LocalAuthBindings }>;
+export type StagingPasswordVerifier = (
+  password: string,
+  encodedHash: string,
+  bindings: LambdaPasswordVerifierBindings,
+) => Promise<boolean>;
 
 type JsonBody =
   | { ok: true; value: unknown }
@@ -49,11 +76,15 @@ type RateAction =
   | "password_reset";
 
 export const localPasswordIssuer = "https://local-password.certpath.invalid";
+export const stagingPasswordIssuer = "https://staging-password.certpath.invalid";
+export const stagingLearnerAuthOrigin =
+  "https://learner-auth-staging.certpath.workers.dev";
 const verificationLifetimeMs = 24 * 60 * 60 * 1000;
 const passwordResetLifetimeMs = 30 * 60 * 1000;
 const learnerSessionLifetimeMs = 8 * 60 * 60 * 1000;
 const maxJsonBodyBytes = 6 * 1024;
 const maxActiveRateLimitRows = 5_000;
+const stagingSignInCsrfCookie = "__Host-certpath_signin_csrf";
 
 const ratePolicies: Record<
   RateAction,
@@ -201,6 +232,39 @@ function localAuthIsConfigured(
   );
 }
 
+function stagingAuthIsConfigured(bindings: LocalAuthBindings): boolean {
+  const csrfSecret = bindings.CSRF_HMAC_SECRET;
+  const rateSecret = bindings.STAGING_AUTH_RATE_LIMIT_HMAC_SECRET;
+  const learnerEmail = normalizeEmail(bindings.STAGING_LEARNER_EMAIL ?? "");
+  const testerIps = bindings.STAGING_TESTER_IPS
+    ?.split(",")
+    .map((ip) => ip.trim())
+    .filter(Boolean);
+  const allowedOrigin =
+    bindings.PUBLIC_SITE_ORIGIN === stagingLearnerAuthOrigin ||
+    (bindings.STAGING_LOCAL_TEST === "true" &&
+      isStagingLocalTestOrigin(bindings.PUBLIC_SITE_ORIGIN));
+  const localStubConfigured =
+    bindings.STAGING_LOCAL_TEST !== "true" ||
+    Boolean(bindings.STAGING_LAMBDA_TEST_STUB);
+  return (
+    bindings.STAGING_LEARNER_AUTH_ENABLED === "true" &&
+    allowedOrigin &&
+    learnerEmail.endsWith("@example.test") &&
+    Boolean(testerIps?.length) &&
+    Boolean(rateSecret && new TextEncoder().encode(rateSecret).byteLength >= 32) &&
+    Boolean(csrfSecret && new TextEncoder().encode(csrfSecret).byteLength >= 32) &&
+    localStubConfigured &&
+    Boolean(
+      bindings.AWS_ACCESS_KEY_ID &&
+        bindings.AWS_SECRET_ACCESS_KEY &&
+        bindings.AWS_SESSION_TOKEN &&
+        bindings.AWS_REGION === "eu-north-1" &&
+        bindings.LAMBDA_FUNCTION_URL,
+    )
+  );
+}
+
 function validRequestOrigin(
   request: Request,
   expectedOrigin: string,
@@ -307,12 +371,238 @@ function sessionCookie(
   value: string,
   maxAgeSeconds: number,
   secure: boolean,
+  name: SessionCookieName = LEGACY_SESSION_COOKIE,
 ): string {
-  return `certpath_session=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
+  return `${name}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
 }
 
-function clearSessionCookie(secure: boolean): string {
-  return `certpath_session=; Path=/; Max-Age=0; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
+function clearSessionCookie(
+  secure: boolean,
+  name: SessionCookieName = LEGACY_SESSION_COOKIE,
+): string {
+  return `${name}=; Path=/; Max-Age=0; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
+}
+
+function signInCsrfCookie(value: string): string {
+  return `${stagingSignInCsrfCookie}=${value}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Strict`;
+}
+
+function clearSignInCsrfCookie(): string {
+  return `${stagingSignInCsrfCookie}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`;
+}
+
+function registerSignInRoute(
+  router: Hono<{ Bindings: LocalAuthBindings }>,
+  now: () => number,
+  mode: "local" | "staging",
+  stagingVerifier?: StagingPasswordVerifier,
+): void {
+  let dummyHash: Promise<string> | null = null;
+  const isStaging = mode === "staging";
+
+  router.post("/sign-in", async (context) => {
+    const origin = context.env.PUBLIC_SITE_ORIGIN;
+    const rateSecret = isStaging
+      ? context.env.STAGING_AUTH_RATE_LIMIT_HMAC_SECRET
+      : context.env.LOCAL_AUTH_RATE_LIMIT_HMAC_SECRET;
+    const configured = isStaging
+      ? stagingAuthIsConfigured(context.env)
+      : localAuthIsConfigured(
+          origin,
+          context.env.LOCAL_LEARNER_AUTH_ENABLED,
+          context.env.LOCAL_TEST_MAIL_ENABLED,
+          rateSecret,
+          context.env.CSRF_HMAC_SECRET,
+        );
+    if (!configured || !origin || !rateSecret) {
+      return jsonResponseError(context, 503, "service_unavailable");
+    }
+    if (!validRequestOrigin(context.req.raw, origin, true)) {
+      return jsonResponseError(context, 403, "invalid_origin");
+    }
+
+    if (isStaging) {
+      const csrfSecret = context.env.CSRF_HMAC_SECRET;
+      const cookieHeader = context.req.header("Cookie") ?? null;
+      const nonce = opaqueCookieToken(cookieHeader, stagingSignInCsrfCookie);
+      const supplied = context.req.header("X-CSRF-Token");
+      if (!csrfSecret || !nonce || !supplied) {
+        return jsonResponseError(context, 400, "invalid_csrf");
+      }
+      const expected = await createCsrfToken(
+        origin,
+        await sessionDigest(nonce),
+        new TextEncoder().encode(csrfSecret),
+      );
+      if (!constantTimeEqual(supplied, expected)) {
+        return jsonResponseError(context, 400, "invalid_csrf");
+      }
+    }
+
+    const input = await readValidatedBody(context, learnerSignInRequestSchema);
+    if (isResponse(input)) return input;
+    const email = normalizeEmail(input.email);
+    const lookupEmail = isStaging
+      ? normalizeEmail(context.env.STAGING_LEARNER_EMAIL ?? "")
+      : isSyntheticEmail(email)
+        ? email
+        : null;
+    const timestamp = now();
+    if (
+      !(await incrementRateLimit(
+        context.env.DB,
+        rateSecret,
+        "sign_in",
+        context.req.raw,
+        isSyntheticEmail(email) ? email : null,
+        timestamp,
+      ))
+    ) {
+      return jsonResponseError(context, 429, "rate_limited");
+    }
+
+    const issuer = isStaging ? stagingPasswordIssuer : localPasswordIssuer;
+    const row = lookupEmail
+      ? await context.env.DB
+          .prepare(
+            `SELECT c.user_id, c.password_hash, c.updated_at,
+                    c.email_verified_at, u.status,
+                    EXISTS (
+                      SELECT 1 FROM staff_roles
+                      WHERE user_id = c.user_id AND active = 1
+                    ) AS has_active_staff_role
+             FROM learner_password_credentials AS c
+             JOIN auth_identities AS identity
+               ON identity.issuer = ?
+              AND identity.subject = c.subject
+              AND identity.user_id = c.user_id
+             JOIN users AS u ON u.id = c.user_id
+             WHERE c.email_normalized = ?`,
+          )
+          .bind(issuer, lookupEmail)
+          .first<{
+            user_id: string;
+            password_hash: string | null;
+            updated_at: number;
+            email_verified_at: number | null;
+            status: "active" | "disabled";
+            has_active_staff_role: number;
+          }>()
+      : null;
+
+    if (isStaging && (!row?.password_hash || !stagingVerifier)) {
+      return jsonResponseError(context, 503, "service_unavailable");
+    }
+
+    let passwordMatches = false;
+    try {
+      if (isStaging) {
+        passwordMatches = await stagingVerifier!(
+          input.password,
+          row!.password_hash!,
+          context.env,
+        );
+      } else if (row?.password_hash) {
+        passwordMatches = await verifyLearnerPassword(
+          input.password,
+          row.password_hash,
+        );
+      } else {
+        dummyHash ??= hashLearnerPassword(crypto.randomUUID());
+        passwordMatches = await verifyLearnerPassword(
+          input.password,
+          await dummyHash,
+        );
+      }
+    } catch (error) {
+      if (
+        error instanceof PasswordHashUnavailableError ||
+        error instanceof LambdaPasswordVerificationError
+      ) {
+        return jsonResponseError(context, 503, "service_unavailable");
+      }
+      throw error;
+    }
+
+    const accountMatches = !isStaging || email === lookupEmail;
+    if (
+      !row ||
+      !accountMatches ||
+      row.password_hash === null ||
+      !passwordMatches ||
+      row.status !== "active" ||
+      row.email_verified_at === null ||
+      row.has_active_staff_role !== 0
+    ) {
+      return jsonResponseError(context, 401, "invalid_credentials");
+    }
+
+    const rawSessionToken = createRawToken();
+    const tokenDigest = await sessionDigest(rawSessionToken);
+    const operationId = `sign-in:${crypto.randomUUID()}`;
+    const expiry = timestamp + learnerSessionLifetimeMs;
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(
+        `INSERT INTO app_sessions (
+           token_digest, user_id, created_at, expires_at, revoked_at,
+           revocation_operation_id, revoked_by_user_id, mfa_method,
+           mfa_verified_at
+         )
+         SELECT ?, c.user_id, ?, ?, NULL, NULL, NULL, NULL, NULL
+         FROM learner_password_credentials AS c
+         JOIN users AS u ON u.id = c.user_id
+         WHERE c.user_id = ?
+           AND c.password_hash = ?
+           AND c.updated_at = ?
+           AND c.email_verified_at IS NOT NULL
+           AND u.status = 'active'
+           AND EXISTS (
+             SELECT 1 FROM auth_identities
+             WHERE issuer = ? AND subject = c.subject AND user_id = c.user_id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM staff_roles
+             WHERE user_id = c.user_id AND active = 1
+           )
+         RETURNING token_digest`,
+      ).bind(
+        tokenDigest,
+        timestamp,
+        expiry,
+        row.user_id,
+        row.password_hash,
+        row.updated_at,
+        issuer,
+      ),
+      context.env.DB.prepare(
+        `INSERT INTO audit_events (
+           operation_id, actor_user_id, actor_ref, action, subject_type,
+           subject_id, certification_id, reason, occurred_at
+         )
+         SELECT ?, user_id, NULL, 'learner_signed_in', 'user',
+                user_id, NULL, 'Learner signed in', ?
+         FROM app_sessions
+         WHERE token_digest = ?
+         RETURNING operation_id`,
+      ).bind(operationId, timestamp, tokenDigest),
+    ]);
+    if (!results.every((result) => result.meta.changes === 1)) {
+      return jsonResponseError(context, 401, "invalid_credentials");
+    }
+    context.header(
+      "Set-Cookie",
+      sessionCookie(
+        rawSessionToken,
+        8 * 60 * 60,
+        isStaging || new URL(context.req.url).protocol === "https:",
+        isStaging ? STAGING_SESSION_COOKIE : LEGACY_SESSION_COOKIE,
+      ),
+    );
+    if (isStaging) {
+      context.header("Set-Cookie", clearSignInCsrfCookie(), { append: true });
+    }
+    return context.json({ redirectTo: "/app/home" });
+  });
 }
 
 function actionLink(origin: string, path: string, token: string): string {
@@ -322,7 +612,6 @@ function actionLink(origin: string, path: string, token: string): string {
 export function createLocalLearnerAuthApi(now: () => number = Date.now) {
   const router = new Hono<{ Bindings: LocalAuthBindings }>();
   const mail = new LocalTestMailAdapter();
-  let dummyHash: Promise<string> | null = null;
 
   router.use("*", async (context, next) => {
     context.header("Cache-Control", "no-store");
@@ -779,161 +1068,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     return context.json(responseMessage(responseMessages.passwordReset));
   });
 
-  router.post("/sign-in", async (context) => {
-    const origin = context.env.PUBLIC_SITE_ORIGIN;
-    const rateSecret = context.env.LOCAL_AUTH_RATE_LIMIT_HMAC_SECRET;
-    if (
-      !localAuthIsConfigured(
-        origin,
-        context.env.LOCAL_LEARNER_AUTH_ENABLED,
-        context.env.LOCAL_TEST_MAIL_ENABLED,
-        rateSecret,
-        context.env.CSRF_HMAC_SECRET,
-      ) ||
-      !rateSecret
-    ) {
-      return jsonResponseError(context, 503, "service_unavailable");
-    }
-    if (!validRequestOrigin(context.req.raw, origin, true)) {
-      return jsonResponseError(context, 403, "invalid_origin");
-    }
-    const input = await readValidatedBody(context, learnerSignInRequestSchema);
-    if (isResponse(input)) return input;
-    const email = normalizeEmail(input.email);
-    const timestamp = now();
-    if (
-      !(await incrementRateLimit(
-        context.env.DB,
-        rateSecret,
-        "sign_in",
-        context.req.raw,
-        isSyntheticEmail(email) ? email : null,
-        timestamp,
-      ))
-    ) {
-      return jsonResponseError(context, 429, "rate_limited");
-    }
-
-    const row = isSyntheticEmail(email)
-      ? await context.env.DB
-          .prepare(
-            `SELECT c.user_id, c.password_hash, c.updated_at,
-                    c.email_verified_at, u.status,
-                    EXISTS (
-                      SELECT 1 FROM staff_roles
-                      WHERE user_id = c.user_id AND active = 1
-                    ) AS has_active_staff_role
-             FROM learner_password_credentials AS c
-             JOIN auth_identities AS identity
-               ON identity.issuer = ?
-              AND identity.subject = c.subject
-              AND identity.user_id = c.user_id
-             JOIN users AS u ON u.id = c.user_id
-             WHERE c.email_normalized = ?`,
-          )
-          .bind(localPasswordIssuer, email)
-          .first<{
-            user_id: string;
-            password_hash: string | null;
-            updated_at: number;
-            email_verified_at: number | null;
-            status: "active" | "disabled";
-            has_active_staff_role: number;
-          }>()
-      : null;
-    let passwordMatches = false;
-    try {
-      if (row?.password_hash) {
-        passwordMatches = await verifyLearnerPassword(
-          input.password,
-          row.password_hash,
-        );
-      } else {
-        dummyHash ??= hashLearnerPassword(crypto.randomUUID());
-        passwordMatches = await verifyLearnerPassword(
-          input.password,
-          await dummyHash,
-        );
-      }
-    } catch (error) {
-      if (error instanceof PasswordHashUnavailableError) {
-        return jsonResponseError(context, 503, "service_unavailable");
-      }
-      throw error;
-    }
-    if (
-      !row ||
-      row.password_hash === null ||
-      !passwordMatches ||
-      row.status !== "active" ||
-      row.email_verified_at === null ||
-      row.has_active_staff_role !== 0
-    ) {
-      return jsonResponseError(context, 401, "invalid_credentials");
-    }
-
-    const rawSessionToken = createRawToken();
-    const tokenDigest = await sessionDigest(rawSessionToken);
-    const operationId = `sign-in:${crypto.randomUUID()}`;
-    const expiry = timestamp + learnerSessionLifetimeMs;
-    const results = await context.env.DB.batch([
-      context.env.DB.prepare(
-        `INSERT INTO app_sessions (
-           token_digest, user_id, created_at, expires_at, revoked_at,
-           revocation_operation_id, revoked_by_user_id, mfa_method,
-           mfa_verified_at
-         )
-         SELECT ?, c.user_id, ?, ?, NULL, NULL, NULL, NULL, NULL
-         FROM learner_password_credentials AS c
-         JOIN users AS u ON u.id = c.user_id
-         WHERE c.user_id = ?
-           AND c.password_hash = ?
-           AND c.updated_at = ?
-           AND c.email_verified_at IS NOT NULL
-           AND u.status = 'active'
-           AND EXISTS (
-             SELECT 1 FROM auth_identities
-             WHERE issuer = ? AND subject = c.subject AND user_id = c.user_id
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM staff_roles
-             WHERE user_id = c.user_id AND active = 1
-           )
-         RETURNING token_digest`,
-      ).bind(
-        tokenDigest,
-        timestamp,
-        expiry,
-        row.user_id,
-        row.password_hash,
-        row.updated_at,
-        localPasswordIssuer,
-      ),
-      context.env.DB.prepare(
-        `INSERT INTO audit_events (
-           operation_id, actor_user_id, actor_ref, action, subject_type,
-           subject_id, certification_id, reason, occurred_at
-         )
-         SELECT ?, user_id, NULL, 'learner_signed_in', 'user',
-                user_id, NULL, 'Learner signed in', ?
-         FROM app_sessions
-         WHERE token_digest = ?
-         RETURNING operation_id`,
-      ).bind(operationId, timestamp, tokenDigest),
-    ]);
-    if (!results.every((result) => result.meta.changes === 1)) {
-      return jsonResponseError(context, 401, "invalid_credentials");
-    }
-    context.header(
-      "Set-Cookie",
-      sessionCookie(
-        rawSessionToken,
-        8 * 60 * 60,
-        new URL(context.req.url).protocol === "https:",
-      ),
-    );
-    return context.json({ redirectTo: "/app/home" });
-  });
+  registerSignInRoute(router, now, "local");
 
   router.get("/test-inbox", (context) => {
     const origin = context.env.PUBLIC_SITE_ORIGIN;
@@ -961,6 +1096,55 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     );
   });
 
+  return router;
+}
+
+export function createStagingLearnerAuthApi(
+  now: () => number = Date.now,
+  verifyPassword: StagingPasswordVerifier = createLambdaPasswordVerifier(),
+) {
+  const router = new Hono<{ Bindings: LocalAuthBindings }>();
+
+  router.use("*", async (context, next) => {
+    context.header("Cache-Control", "no-store");
+    context.header("Referrer-Policy", "no-referrer");
+    context.header("X-Content-Type-Options", "nosniff");
+    await next();
+  });
+
+  router.get("/preflight", (context) => {
+    const enabled = stagingAuthIsConfigured(context.env);
+    return context.json(
+      localLearnerAuthPreflightResponseSchema.parse({
+        signInEnabled: enabled,
+        localMailboxEnabled: false,
+      }),
+    );
+  });
+
+  router.get("/csrf", async (context) => {
+    const origin = context.env.PUBLIC_SITE_ORIGIN;
+    const secret = context.env.CSRF_HMAC_SECRET;
+    if (
+      !stagingAuthIsConfigured(context.env) ||
+      !origin ||
+      !secret ||
+      !validRequestOrigin(context.req.raw, origin, false)
+    ) {
+      return jsonResponseError(context, 503, "service_unavailable");
+    }
+
+    const nonce = createRawToken();
+    const csrfToken = await createCsrfToken(
+      origin,
+      await sessionDigest(nonce),
+      new TextEncoder().encode(secret),
+    );
+    context.header("Set-Cookie", signInCsrfCookie(nonce));
+    return context.json({ csrfToken });
+  });
+
+  registerSignInRoute(router, now, "staging", verifyPassword);
   return router;
 }
 
@@ -1008,14 +1192,23 @@ export function createApplicationSessionApi(now: () => number = Date.now) {
   router.post("/logout", async (context) => {
     const origin = context.env.PUBLIC_SITE_ORIGIN;
     const secret = context.env.CSRF_HMAC_SECRET;
+    const cookieHeader = context.req.header("Cookie") ?? null;
+    const cookieName =
+      sessionCookieName(cookieHeader) ??
+      (context.env.STAGING_LEARNER_AUTH_ENABLED === "true"
+        ? STAGING_SESSION_COOKIE
+        : LEGACY_SESSION_COOKIE);
+    const secure =
+      context.env.STAGING_LEARNER_AUTH_ENABLED === "true" ||
+      new URL(context.req.url).protocol === "https:";
     if (!origin || !secret || new TextEncoder().encode(secret).byteLength < 32) {
       return context.json({ error: { code: "service_unavailable" } }, 503);
     }
-    const rawToken = sessionCookieToken(context.req.header("Cookie") ?? null);
+    const rawToken = sessionCookieToken(cookieHeader);
     if (!rawToken) {
       context.header(
         "Set-Cookie",
-        clearSessionCookie(new URL(context.req.url).protocol === "https:"),
+        clearSessionCookie(secure, cookieName),
       );
       return context.body(null, 204);
     }
@@ -1028,7 +1221,7 @@ export function createApplicationSessionApi(now: () => number = Date.now) {
     if (!session) {
       context.header(
         "Set-Cookie",
-        clearSessionCookie(new URL(context.req.url).protocol === "https:"),
+        clearSessionCookie(secure, cookieName),
       );
       return context.body(null, 204);
     }
@@ -1058,7 +1251,7 @@ export function createApplicationSessionApi(now: () => number = Date.now) {
     }
     context.header(
       "Set-Cookie",
-      clearSessionCookie(new URL(context.req.url).protocol === "https:"),
+      clearSessionCookie(secure, cookieName),
     );
     return context.body(null, 204);
   });

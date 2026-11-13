@@ -1,0 +1,27 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "learner-auth-staging",
+	"compatibility_date": "2026-11-10",
+	"main": "./workers/staging-app.ts",
+	"workers_dev": true,
+	"preview_urls": false,
+	"vars": {
+		"INDEXING_ENABLED": "false",
+		"PUBLIC_SITE_ORIGIN": "https://learner-auth-staging.certpath.workers.dev",
+		"STAGING_LEARNER_AUTH_ENABLED": "true",
+		"STAGING_LEARNER_EMAIL": "learner@example.test",
+		"AWS_REGION": "eu-north-1"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "certpath-learner-staging",
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "../../db/migrations"
+		}
+	],
+	"observability": {
+		"enabled": false
+	},
+	"upload_source_maps": true
+}

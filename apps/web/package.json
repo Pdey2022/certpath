@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "react-router build",
+    "build:staging": "node scripts/staging-command.mjs",
     "build:preview": "node scripts/preview-command.mjs build",
     "deploy:preview": "node scripts/preview-command.mjs deploy",
     "dev": "react-router dev",

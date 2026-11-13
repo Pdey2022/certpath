@@ -1,7 +1,12 @@
 import { useState, type FormEvent } from "react";
 import type { Route } from "./+types/learner-sign-in";
 import { Link, useNavigate } from "react-router";
-import { LearnerAuthApiError, registerLearner, signInLearner } from "../lib/learner-auth-api";
+import {
+  isStagingLearnerAuth,
+  LearnerAuthApiError,
+  registerLearner,
+  signInLearner,
+} from "../lib/learner-auth-api";
 import {
   PublicLayout,
   useLearnerSignInAvailability,
@@ -35,13 +40,16 @@ function messageForError(error: unknown): string {
     return "Too many attempts. Wait a while before trying again.";
   }
   if (error.code === "synthetic_email_required") {
-    return "Use a synthetic address ending in @example.test for this local proof.";
+    return isStagingLearnerAuth()
+      ? "Use the pre-provisioned synthetic staging learner account."
+      : "Use a synthetic address ending in @example.test for this local proof.";
   }
   return "Sign-in could not be completed. Please try again.";
 }
 
 function LearnerSignInContent() {
   const availability = useLearnerSignInAvailability();
+  const isStaging = isStagingLearnerAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState<AuthMode>("sign_in");
   const [email, setEmail] = useState("");
@@ -79,39 +87,40 @@ function LearnerSignInContent() {
         {availability === "enabled" && (
           <section className="card setup-card" aria-label="Email and password sign-in">
             <p className="intro">
-              This local proof accepts synthetic addresses ending in
-              {" "}@example.test. Passwords are verified by CertPath in the
-              local Worker; email is delivered only to the local test inbox.
-              Choose a password when you verify your email.
+              {isStaging
+                ? "Sign in with the pre-provisioned synthetic staging learner. Passwords are verified by the isolated staging service."
+                : "This local proof accepts synthetic addresses ending in @example.test. Passwords are verified by CertPath in the local Worker; email is delivered only to the local test inbox. Choose a password when you verify your email."}
             </p>
-            <div className="button-row" role="group" aria-label="Account action">
-              <button
-                type="button"
-                className={mode === "sign_in" ? "button-primary" : "button-secondary"}
-                aria-pressed={mode === "sign_in"}
-                onClick={() => {
-                  setMode("sign_in");
-                  setPassword("");
-                  setError("");
-                  setMessage("");
-                }}
-              >
-                Sign in
-              </button>
-              <button
-                type="button"
-                className={mode === "register" ? "button-primary" : "button-secondary"}
-                aria-pressed={mode === "register"}
-                onClick={() => {
-                  setMode("register");
-                  setPassword("");
-                  setError("");
-                  setMessage("");
-                }}
-              >
-                Create account
-              </button>
-            </div>
+            {!isStaging && (
+              <div className="button-row" role="group" aria-label="Account action">
+                <button
+                  type="button"
+                  className={mode === "sign_in" ? "button-primary" : "button-secondary"}
+                  aria-pressed={mode === "sign_in"}
+                  onClick={() => {
+                    setMode("sign_in");
+                    setPassword("");
+                    setError("");
+                    setMessage("");
+                  }}
+                >
+                  Sign in
+                </button>
+                <button
+                  type="button"
+                  className={mode === "register" ? "button-primary" : "button-secondary"}
+                  aria-pressed={mode === "register"}
+                  onClick={() => {
+                    setMode("register");
+                    setPassword("");
+                    setError("");
+                    setMessage("");
+                  }}
+                >
+                  Create account
+                </button>
+              </div>
+            )}
             {error && <p className="form-errors" role="alert">{error}</p>}
             {message && (
               <p className="card" role="status">
@@ -132,7 +141,7 @@ function LearnerSignInContent() {
                     onChange={(event) => setEmail(event.currentTarget.value)}
                   />
                 </label>
-                {mode === "sign_in" && (
+                {(mode === "sign_in" || isStaging) && (
                   <label>
                     Password
                     <input
@@ -152,20 +161,22 @@ function LearnerSignInContent() {
                 <button className="button-primary" type="submit" disabled={busy}>
                   {busy
                     ? "Please wait…"
-                    : mode === "register"
+                    : mode === "register" && !isStaging
                       ? "Send verification email"
                       : "Sign in"}
                 </button>
-                {mode === "sign_in" && (
+                {!isStaging && mode === "sign_in" && (
                   <Link className="button-link" to="/recover-password">
                     Forgot password?
                   </Link>
                 )}
               </div>
             </form>
-            <p>
-              <Link to="/local-inbox">Open the synthetic local test inbox</Link>
-            </p>
+            {!isStaging && (
+              <p>
+                <Link to="/local-inbox">Open the synthetic local test inbox</Link>
+              </p>
+            )}
           </section>
         )}
         {availability === "checking" && (

@@ -1,11 +1,29 @@
 import {
+  csrfResponseSchema,
   localLearnerAuthMessageResponseSchema,
   localLearnerAuthPreflightResponseSchema,
   localLearnerSignInResponseSchema,
   localTestInboxResponseSchema,
 } from "@certpath/contracts";
 
-const authRoot = "/api/auth/local";
+const localAuthRoot = "/api/auth/local";
+const stagingAuthRoot = "/api/auth/staging";
+const stagingAuthOrigin =
+  "https://learner-auth-staging.certpath.workers.dev";
+const localStagingAuthOrigin =
+  import.meta.env?.VITE_CERTPATH_STAGING_LOCAL_ORIGIN;
+
+export function isStagingLearnerAuth(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    (window.location.origin === stagingAuthOrigin ||
+      window.location.origin === localStagingAuthOrigin)
+  );
+}
+
+function authRoot(): string {
+  return isStagingLearnerAuth() ? stagingAuthRoot : localAuthRoot;
+}
 
 export class LearnerAuthApiError extends Error {
   constructor(
@@ -23,7 +41,7 @@ async function requestJson<T>(
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${authRoot}${path}`, {
+    response = await fetch(`${authRoot()}${path}`, {
       ...init,
       credentials: "same-origin",
       cache: "no-store",
@@ -73,11 +91,21 @@ export function registerLearner(email: string) {
   );
 }
 
-export function signInLearner(email: string, password: string) {
+export async function signInLearner(email: string, password: string) {
+  const headers = isStagingLearnerAuth()
+    ? {
+        "X-CSRF-Token": (await requestJson("/csrf", csrfResponseSchema))
+          .csrfToken,
+      }
+    : undefined;
   return requestJson(
     "/sign-in",
     localLearnerSignInResponseSchema,
-    { method: "POST", body: JSON.stringify({ email, password }) },
+    {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+      headers,
+    },
   );
 }
 

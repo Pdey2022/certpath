@@ -1,4 +1,8 @@
-const SESSION_COOKIE = "certpath_session";
+export const LEGACY_SESSION_COOKIE = "certpath_session";
+export const STAGING_SESSION_COOKIE = "__Host-certpath_session";
+export type SessionCookieName =
+  | typeof LEGACY_SESSION_COOKIE
+  | typeof STAGING_SESSION_COOKIE;
 
 function decodeBase64Url(value: string): Uint8Array | null {
   if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return null;
@@ -27,15 +31,42 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return buffer;
 }
 
-export function sessionCookieToken(cookieHeader: string | null): string | null {
+function cookieNames(cookieHeader: string | null): SessionCookieName[] {
+  if (!cookieHeader) return [];
+  return cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .map((part) => part.slice(0, part.indexOf("=")))
+    .filter(
+      (name): name is SessionCookieName =>
+        name === LEGACY_SESSION_COOKIE || name === STAGING_SESSION_COOKIE,
+    );
+}
+
+export function sessionCookieName(
+  cookieHeader: string | null,
+): SessionCookieName | null {
+  const names = cookieNames(cookieHeader);
+  return names.length === 1 ? names[0] : null;
+}
+
+export function opaqueCookieToken(
+  cookieHeader: string | null,
+  name: string,
+): string | null {
   if (!cookieHeader) return null;
   const matches = cookieHeader
     .split(";")
     .map((part) => part.trim())
-    .filter((part) => part.startsWith(`${SESSION_COOKIE}=`));
+    .filter((part) => part.startsWith(`${name}=`));
   if (matches.length !== 1) return null;
-  const value = matches[0].slice(SESSION_COOKIE.length + 1);
+  const value = matches[0].slice(name.length + 1);
   return decodeBase64Url(value) ? value : null;
+}
+
+export function sessionCookieToken(cookieHeader: string | null): string | null {
+  const name = sessionCookieName(cookieHeader);
+  return name ? opaqueCookieToken(cookieHeader, name) : null;
 }
 
 export async function sessionDigest(rawToken: string): Promise<string> {
