@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router";
 import type { Route } from "./+types/learner";
 
 import { PracticeDemo } from "../components/practice-demo";
+import { DemoTimedMock } from "../components/demo-timed-mock";
 import { WorkspaceShell } from "../components/workspace-shell";
 import {
   demoToday,
@@ -199,7 +200,7 @@ function LearnerHome() {
         </article>
         <article className="card">
           <h2>Mock preview</h2>
-          <p>Review timing and navigation instructions before a static preview.</p>
+          <p>Review the rules, then take a timed sample mock saved in this browser.</p>
           <Link to="/app/exams/cissp/mock">View mock setup</Link>
         </article>
         <article className="card">
@@ -388,46 +389,19 @@ function MockSetup({
   active: boolean;
 }) {
   return active ? (
-    <section className="card">
-      <p className="eyebrow">Mock interface preview · not a live attempt</p>
-      <h2>{certification} mock question preview</h2>
-      <p>
-        Static timer illustration: <strong>1:59 remaining</strong>. It does not run or persist.
-      </p>
-      <p>
-        This sample screen illustrates a question, answer navigation, and a leave warning only.
-        No mock attempt or result is created.
-      </p>
-      <div className="question-card">
-        <h3>Which approach best supports a consistent review of a proposed control?</h3>
-        <label className="answer-option">
-          <input type="radio" name="mock-sample" />
-          <span>Compare its expected risk reduction with its context and operating cost</span>
-        </label>
-        <label className="answer-option">
-          <input type="radio" name="mock-sample" />
-          <span>Select it solely because another organization uses it</span>
-        </label>
-      </div>
-      <div className="button-row">
-        <Link className="button-secondary" to={`/app/exams/${certification.toLowerCase()}/mock`}>
-          Leave preview
-        </Link>
-        <span className="muted">Leaving a real non-pausable exam would not stop its server timer.</span>
-      </div>
-    </section>
+    <DemoTimedMock leaveTo={`/app/exams/${certification.toLowerCase()}/mock`} />
   ) : (
     <section className="card setup-card">
       <p className="eyebrow">Mock instructions · {certification}</p>
       <h2>Before you begin</h2>
       <ul className="instruction-list">
-        <li>This interface preview has a static timer display; no production timer runs.</li>
-        <li>A real mock profile would define its duration, question count and navigation rules.</li>
-        <li>A real non-pausable timer continues while away; leaving does not imply a pause.</li>
-        <li>Saved answers and resume behavior shown here are illustrative only.</li>
+        <li>This synthetic mock has 3 sample questions and a 3-minute countdown.</li>
+        <li>The timer does not pause: it keeps running if you refresh or leave this page.</li>
+        <li>When time expires, your saved answers are submitted automatically.</li>
+        <li>The attempt is saved in this browser only, so you can resume it here. Nothing is sent to a server.</li>
       </ul>
       <Link className="button-primary" to={`/app/exams/${certification.toLowerCase()}/mock/active`}>
-        Open static mock preview
+        Open timed mock
       </Link>
     </section>
   );
