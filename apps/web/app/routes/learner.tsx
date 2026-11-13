@@ -5,6 +5,7 @@ import type { Route } from "./+types/learner";
 import { PracticeDemo } from "../components/practice-demo";
 import { DemoTimedMock } from "../components/demo-timed-mock";
 import { DemoMockDashboardLinks } from "../components/demo-mock-dashboard-links";
+import { DemoAdaptiveMock } from "../components/demo-adaptive-mock";
 import { WorkspaceShell } from "../components/workspace-shell";
 import {
   demoToday,
@@ -489,7 +490,15 @@ function ProPreview({
                   Extend same-exam Standard to cover the full period. Extension pricing is not configured.
                 </p>
               ) : state === "eligible" ? (
-                <p className="muted">Purchase is not available in this prototype.</p>
+                <>
+                  <p className="muted">Purchase is not available in this prototype.</p>
+                  <Link
+                    className="button-secondary"
+                    to={`/app/exams/${sample.exam.toLowerCase()}/pro/preview`}
+                  >
+                    Open CertPath demo
+                  </Link>
+                </>
               ) : state === "expired" ? (
                 <p className="muted">Expired Pro does not remove Standard access.</p>
               ) : (
@@ -503,15 +512,10 @@ function ProPreview({
         <ProPreparationPreview certification={certification} />
       )}
       {showSession && (
-        <div className="question-card section-block">
-          <p className="eyebrow">Static preview · no attempt</p>
-          <h3>Illustrative adaptive-preparation question</h3>
-          <p>Static timer illustration: 1:59. No scoring, selection engine, or persistence.</p>
-          <p>Leaving this preview returns to the Pro setup; it does not affect progress.</p>
-          <Link className="button-secondary" to={`/app/exams/${certification.toLowerCase()}/pro/preview`}>
-            Back to Pro setup
-          </Link>
-        </div>
+        <DemoAdaptiveMock
+          exam={certification === "CISM" ? "cism" : "cissp"}
+          leaveTo={`/app/exams/${certification.toLowerCase()}/pro/preview`}
+        />
       )}
     </section>
   );
@@ -520,22 +524,21 @@ function ProPreview({
 function ProPreparationPreview({ certification }: { certification: string }) {
   return (
     <section className="card section-block">
-      <p className="eyebrow">Pro preparation · interface preview</p>
+      <p className="eyebrow">CertPath demo · adaptive Pro mock</p>
       <h2>{certification} simulation setup</h2>
       <ul className="instruction-list">
-        <li>A real profile would show the configured duration and number of questions here.</li>
-        <li>Navigation and leaving rules depend on the approved exam profile.</li>
-        <li>Leaving a real timed simulation would not necessarily pause its timer.</li>
-        <li>Resume would restore server-acknowledged answers and authoritative remaining time.</li>
+        <li>The demo uses the three existing synthetic questions, each once.</li>
+        <li>A correct answer targets Intermediate next; an incorrect answer targets Foundational when available.</li>
+        <li>Submitted answers are locked. The attempt resumes from this browser's saved state.</li>
       </ul>
       <p className="notice" role="note">
-        No adaptive engine, live timer, readiness prediction, or attempt is implemented.
+        This synthetic demo does not grant Pro access. Its small illustrative heuristic is not a validated adaptive exam, official score, or readiness prediction.
       </p>
       <div className="button-row">
-        <Link className="button-primary" to="/app/exams/cissp/pro/preview/session">
-          Preview static question screen
+        <Link className="button-primary" to={`/app/exams/${certification.toLowerCase()}/pro/preview/session`}>
+          Start adaptive mock demo
         </Link>
-        <Link className="button-secondary" to="/app/exams/cissp/pro">
+        <Link className="button-secondary" to={`/app/exams/${certification.toLowerCase()}/pro`}>
           Back to Pro states
         </Link>
       </div>
