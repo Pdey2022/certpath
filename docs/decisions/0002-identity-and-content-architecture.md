@@ -49,13 +49,16 @@ attempts/bookmarks remain later slices.
 ## CertPath-owned learner authentication direction under local test
 
 The current proof tests CertPath-owned email/password authentication for
-learners rather than adopting a production identity provider. The local Worker
-supports synthetic `@example.test` registration, email verification, password
-sign-in, password recovery, opaque D1 sessions, and session revocation after a
-password reset. Verification and reset messages are held by an in-memory local
-test inbox; no live email, external identity provider, cloud resource, or
-deployment was used. The feature remains disabled unless explicit local-only
-Worker bindings are set.
+learners rather than adopting a production identity provider. Registration
+accepts an email address only; the learner chooses a password while completing
+email verification. Consuming the single-use verification token and activating
+the password hash happen in one atomic D1 batch. The local Worker supports
+synthetic `@example.test` registration, email verification, password sign-in,
+password recovery, opaque D1 sessions, and session revocation after a password
+reset. Verification and reset messages are held by an in-memory local test
+inbox; no live email, external identity provider, cloud resource, or deployment
+was used. The feature remains disabled unless explicit local-only Worker
+bindings are set.
 
 The proof uses the maintained, dependency-free JavaScript implementation in
 `@noble/hashes` 2.0.1 with scrypt (`N=32768`, `r=8`, `p=1`, 16-byte random

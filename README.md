@@ -36,7 +36,10 @@ to browser storage.
 ### Local learner-auth proof
 
 The CertPath-owned email/password flow is a local-only proof, not a production
-sign-in option. To try it, copy `apps/web/.dev.vars.example` to
+sign-in option. Registration starts with an email address only. The learner
+chooses a password when completing email verification; token consumption and
+password activation happen in one atomic D1 batch. To try it, copy
+`apps/web/.dev.vars.example` to
 `apps/web/.dev.vars`, replace both placeholder values with different random
 local-only secrets, confirm `PUBLIC_SITE_ORIGIN` matches the local URL Wrangler
 prints, then set `LOCAL_LEARNER_AUTH_ENABLED` and `LOCAL_TEST_MAIL_ENABLED` to

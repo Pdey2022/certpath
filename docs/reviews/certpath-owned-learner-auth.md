@@ -2,8 +2,9 @@
 
 ## Result
 
-The local Worker/D1 proof implements learner registration, email verification,
-email/password sign-in, password recovery/reset, and sign-out. It uses only
+The local Worker/D1 proof implements email-only learner registration, email
+verification with password selection, email/password sign-in, password
+recovery/reset, and sign-out. It uses only
 synthetic `@example.test` identities and an in-memory local test inbox. No
 cloud resources, live identity-provider endpoints, real accounts, or email
 delivery were used. The feature remains disabled unless explicitly enabled
@@ -25,9 +26,12 @@ with local-only bindings.
   inbox holds synthetic email links in memory and is available only when its
   local test binding is enabled.
 - Registration creates a learner without staff roles or exam grants. The
-  issuer/subject identity mapping is created only after email verification;
-  matching email addresses never link existing accounts. Existing D1 session,
-  role, and grant authorization remains authoritative.
+  learner chooses a password after opening the verification link. A single
+  atomic D1 batch consumes the single-use token, installs the salted password
+  hash, marks email verified, creates the issuer/subject identity mapping, and
+  audits verification. Repeated registration accepts no password and cannot
+  alter an existing credential; matching email addresses never link accounts.
+  Existing D1 session, role, and grant authorization remains authoritative.
 - Password reset revokes the learner's active CertPath sessions. Sign-out uses
   the existing CSRF-protected session revocation flow.
 - Local authentication refuses to enable on a non-loopback origin. The local
@@ -46,7 +50,8 @@ provider or rollout decision.
   `apps/api/src/security/password-hashing.ts`,
   `apps/api/test/local-learner-auth.test.ts`,
   `apps/api/test/schema.test.ts`,
-  `db/migrations/0008_local_learner_auth.sql`.
+  `db/migrations/0008_local_learner_auth.sql`,
+  `db/migrations/0009_defer_learner_password_until_verification.sql`.
 - Web flow and contracts: `apps/web/app/components/learner-dashboard.test.tsx`,
   `apps/web/app/components/learner-email-actions.tsx`,
   `apps/web/app/components/learner-sign-in.test.tsx`,
@@ -72,14 +77,17 @@ All commands ran locally on Windows in the feature worktree.
 
 | Command | Result |
 |---|---|
-| `npx tsx --test app\components\learner-dashboard.test.tsx` (from `apps\web`) | Passed: 3 tests, including CSRF-protected sign-out through the session revocation endpoint. |
-| `npm run verify` | Passed: workspace type checks, including Wrangler and React Router type generation; API health test passed; 12 API Vitest files and 91 tests passed; web suite passed all 62 tests; production client and Worker SSR builds completed. |
+| `npx vitest run --config vitest.config.ts test\local-learner-auth.test.ts test\schema.test.ts` (from `apps\api`) | Passed: 2 files and 13 tests covering email-only registration, password selection during verification, password reset, session revocation, logout, and schema constraints. |
+| `npx tsx --test app\components\learner-sign-in.test.tsx app\components\learner-dashboard.test.tsx` (from `apps\web`) | Passed: 8 tests, including email-only registration, password selection at verification, and CSRF-protected sign-out. |
+| `npm run verify` | Passed: workspace type checks, including Wrangler and React Router type generation; API health test passed; 12 API Vitest files and 92 tests passed; web suite passed all 64 tests; production client and Worker SSR builds completed. |
 | `git diff --check` | Passed: no whitespace errors. |
 
 The local Worker/D1 tests include the scrypt runtime compatibility check,
 verified and unverified sign-in, password reset and revocation, sign-out,
-single-use/expired action links, duplicate registration, rate limits, staff
-authorization denial, and exam-grant access boundaries.
+single-use/expired action links, duplicate registration, and a regression
+proving a pre-verification password is rejected, not stored, and cannot
+replace the password chosen during verification. They also cover rate limits,
+staff authorization denial, and exam-grant access boundaries.
 
 ## Known limitations and unresolved decisions
 

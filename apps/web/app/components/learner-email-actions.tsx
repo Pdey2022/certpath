@@ -33,37 +33,38 @@ function takeFragmentToken(): string | null {
 }
 
 export function LearnerVerifyEmailRoute() {
-  const [message, setMessage] = useState("Checking the verification link…");
+  const [token, setToken] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    let active = true;
-    const token = takeFragmentToken();
-    if (!token) {
-      setMessage("");
+    const verificationToken = takeFragmentToken();
+    if (!verificationToken) {
       setError("This verification link is missing or invalid.");
-      return () => {
-        active = false;
-      };
+      return;
     }
-    void verifyLearnerEmail(token).then(
-      (result) => {
-        if (active) {
-          setMessage(result.message);
-          setError("");
-        }
-      },
-      (cause: unknown) => {
-        if (active) {
-          setMessage("");
-          setError(errorText(cause));
-        }
-      },
-    );
-    return () => {
-      active = false;
-    };
+    setToken(verificationToken);
   }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token) return;
+    setBusy(true);
+    setMessage("");
+    setError("");
+    try {
+      const result = await verifyLearnerEmail(token, password);
+      setMessage(result.message);
+      setToken(null);
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setPassword("");
+      setBusy(false);
+    }
+  }
 
   return (
     <PublicLayout>
@@ -72,6 +73,26 @@ export function LearnerVerifyEmailRoute() {
           <h1>Verify your email</h1>
           {message && <p role="status">{message}</p>}
           {error && <p className="form-errors" role="alert">{error}</p>}
+          {token && (
+            <form className="editor-form" autoComplete="off" onSubmit={submit}>
+              <label>
+                Choose a password
+                <input
+                  type="password"
+                  name="password"
+                  autoComplete="new-password"
+                  required
+                  minLength={12}
+                  maxLength={1024}
+                  value={password}
+                  onChange={(event) => setPassword(event.currentTarget.value)}
+                />
+              </label>
+              <button className="button-primary" type="submit" disabled={busy}>
+                {busy ? "Please wait…" : "Verify email and set password"}
+              </button>
+            </form>
+          )}
           <Link to="/sign-in">Return to learner sign in</Link>
         </section>
       </main>

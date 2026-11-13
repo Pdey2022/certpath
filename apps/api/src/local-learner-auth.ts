@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import {
   learnerEmailRequestSchema,
-  learnerEmailTokenRequestSchema,
+  learnerEmailVerificationRequestSchema,
   learnerPasswordResetRequestSchema,
   learnerRegistrationRequestSchema,
   learnerSignInRequestSchema,
@@ -389,15 +389,6 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     }
     await pruneExpiredActionTokens(context.env.DB, timestamp);
 
-    let passwordHash: string;
-    try {
-      passwordHash = await hashLearnerPassword(input.password);
-    } catch (error) {
-      if (error instanceof PasswordHashUnavailableError) {
-        return jsonResponseError(context, 503, "service_unavailable");
-      }
-      throw error;
-    }
     const userId = crypto.randomUUID();
     const subject = crypto.randomUUID();
     const token = createRawToken();
@@ -419,7 +410,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
            user_id, email, email_normalized, subject, password_hash,
            email_verified_at, created_at, updated_at
          )
-         SELECT ?, ?, ?, ?, ?, NULL, ?, ?
+        SELECT ?, ?, ?, ?, NULL, NULL, ?, ?
          WHERE EXISTS (SELECT 1 FROM users WHERE id = ?)
            AND NOT EXISTS (
              SELECT 1 FROM learner_password_credentials
@@ -432,7 +423,6 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
         input.email.trim(),
         email,
         subject,
-        passwordHash,
         timestamp,
         timestamp,
         userId,
@@ -494,7 +484,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     }
     const input = await readValidatedBody(
       context,
-      learnerEmailTokenRequestSchema,
+      learnerEmailVerificationRequestSchema,
     );
     if (isResponse(input)) return input;
     const timestamp = now();
@@ -510,6 +500,15 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     ) {
       return jsonResponseError(context, 429, "rate_limited");
     }
+    let passwordHash: string;
+    try {
+      passwordHash = await hashLearnerPassword(input.password);
+    } catch (error) {
+      if (error instanceof PasswordHashUnavailableError) {
+        return jsonResponseError(context, 503, "service_unavailable");
+      }
+      throw error;
+    }
     const tokenDigest = await sessionDigest(input.token);
     const operationId = `verify:${crypto.randomUUID()}`;
     const results = await context.env.DB.batch([
@@ -524,6 +523,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
              SELECT 1 FROM learner_password_credentials
              WHERE user_id = learner_auth_tokens.user_id
                AND email_verified_at IS NULL
+               AND password_hash IS NULL
            )
          RETURNING user_id`,
       ).bind(timestamp, operationId, tokenDigest, timestamp),
@@ -535,18 +535,20 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
          WHERE t.consumed_operation_id = ?
            AND t.purpose = 'verify_email'
            AND c.email_verified_at IS NULL
+           AND c.password_hash IS NULL
          RETURNING user_id`,
       ).bind(localPasswordIssuer, timestamp, operationId),
       context.env.DB.prepare(
         `UPDATE learner_password_credentials
-         SET email_verified_at = ?, updated_at = ?
+         SET password_hash = ?, email_verified_at = ?, updated_at = ?
          WHERE user_id = (
            SELECT user_id FROM learner_auth_tokens
            WHERE consumed_operation_id = ? AND purpose = 'verify_email'
          )
            AND email_verified_at IS NULL
+           AND password_hash IS NULL
          RETURNING user_id`,
-      ).bind(timestamp, timestamp, operationId),
+      ).bind(passwordHash, timestamp, timestamp, operationId),
       context.env.DB.prepare(
         `INSERT INTO audit_events (
            operation_id, actor_user_id, actor_ref, action, subject_type,
@@ -832,7 +834,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
           .bind(localPasswordIssuer, email)
           .first<{
             user_id: string;
-            password_hash: string;
+            password_hash: string | null;
             updated_at: number;
             email_verified_at: number | null;
             status: "active" | "disabled";
@@ -841,7 +843,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
       : null;
     let passwordMatches = false;
     try {
-      if (row) {
+      if (row?.password_hash) {
         passwordMatches = await verifyLearnerPassword(
           input.password,
           row.password_hash,
@@ -861,6 +863,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     }
     if (
       !row ||
+      row.password_hash === null ||
       !passwordMatches ||
       row.status !== "active" ||
       row.email_verified_at === null ||

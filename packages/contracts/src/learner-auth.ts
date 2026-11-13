@@ -4,10 +4,7 @@ const emailInput = z.string().trim().email().max(254);
 const passwordInput = z.string().min(1).max(1024);
 
 export const learnerRegistrationRequestSchema = z
-  .object({
-    email: emailInput,
-    password: z.string().min(12).max(1024),
-  })
+  .object({ email: emailInput })
   .strict();
 
 export const learnerSignInRequestSchema = z
@@ -21,8 +18,11 @@ export const learnerEmailRequestSchema = z
   .object({ email: emailInput })
   .strict();
 
-export const learnerEmailTokenRequestSchema = z
-  .object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) })
+export const learnerEmailVerificationRequestSchema = z
+  .object({
+    token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    password: z.string().min(12).max(1024),
+  })
   .strict();
 
 export const learnerPasswordResetRequestSchema = z

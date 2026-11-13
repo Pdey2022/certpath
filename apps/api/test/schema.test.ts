@@ -133,7 +133,7 @@ describe("local security D1 schema", () => {
   it("keeps local credentials and action tokens in hash-only tables", async () => {
     const credentialColumns = await database
       .prepare("PRAGMA table_info(learner_password_credentials)")
-      .all<{ name: string }>();
+      .all<{ name: string; notnull: number }>();
     expect(credentialColumns.results.map((column) => column.name)).toContain(
       "password_hash",
     );
@@ -143,6 +143,10 @@ describe("local security D1 schema", () => {
     expect(credentialColumns.results.map((column) => column.name)).not.toContain(
       "raw_password",
     );
+    expect(
+      credentialColumns.results.find((column) => column.name === "password_hash")
+        ?.notnull,
+    ).toBe(0);
 
     const tokenColumns = await database
       .prepare("PRAGMA table_info(learner_auth_tokens)")

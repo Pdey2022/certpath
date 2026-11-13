@@ -65,11 +65,11 @@ export function getLearnerAuthPreflight() {
   return requestJson("/preflight", localLearnerAuthPreflightResponseSchema);
 }
 
-export function registerLearner(email: string, password: string) {
+export function registerLearner(email: string) {
   return requestJson(
     "/register",
     localLearnerAuthMessageResponseSchema,
-    { method: "POST", body: JSON.stringify({ email, password }) },
+    { method: "POST", body: JSON.stringify({ email }) },
   );
 }
 
@@ -81,11 +81,11 @@ export function signInLearner(email: string, password: string) {
   );
 }
 
-export function verifyLearnerEmail(token: string) {
+export function verifyLearnerEmail(token: string, password: string) {
   return requestJson(
     "/verify-email",
     localLearnerAuthMessageResponseSchema,
-    { method: "POST", body: JSON.stringify({ token }) },
+    { method: "POST", body: JSON.stringify({ token, password }) },
   );
 }
 

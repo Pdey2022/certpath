@@ -57,7 +57,7 @@ function LearnerSignInContent() {
     setMessage("");
     try {
       if (mode === "register") {
-        const result = await registerLearner(email, password);
+        const result = await registerLearner(email);
         setMessage(result.message);
       } else {
         const result = await signInLearner(email, password);
@@ -82,6 +82,7 @@ function LearnerSignInContent() {
               This local proof accepts synthetic addresses ending in
               {" "}@example.test. Passwords are verified by CertPath in the
               local Worker; email is delivered only to the local test inbox.
+              Choose a password when you verify your email.
             </p>
             <div className="button-row" role="group" aria-label="Account action">
               <button
@@ -90,6 +91,7 @@ function LearnerSignInContent() {
                 aria-pressed={mode === "sign_in"}
                 onClick={() => {
                   setMode("sign_in");
+                  setPassword("");
                   setError("");
                   setMessage("");
                 }}
@@ -102,6 +104,7 @@ function LearnerSignInContent() {
                 aria-pressed={mode === "register"}
                 onClick={() => {
                   setMode("register");
+                  setPassword("");
                   setError("");
                   setMessage("");
                 }}
@@ -129,26 +132,28 @@ function LearnerSignInContent() {
                     onChange={(event) => setEmail(event.currentTarget.value)}
                   />
                 </label>
-                <label>
-                  Password
-                  <input
-                    type="password"
-                    name="password"
-                    autoComplete="off"
-                    required
-                    minLength={mode === "register" ? 12 : 1}
-                    maxLength={1024}
-                    value={password}
-                    onChange={(event) => setPassword(event.currentTarget.value)}
-                  />
-                </label>
+                {mode === "sign_in" && (
+                  <label>
+                    Password
+                    <input
+                      type="password"
+                      name="password"
+                      autoComplete="off"
+                      required
+                      minLength={1}
+                      maxLength={1024}
+                      value={password}
+                      onChange={(event) => setPassword(event.currentTarget.value)}
+                    />
+                  </label>
+                )}
               </div>
               <div className="button-row">
                 <button className="button-primary" type="submit" disabled={busy}>
                   {busy
                     ? "Please wait…"
                     : mode === "register"
-                      ? "Create learner account"
+                      ? "Send verification email"
                       : "Sign in"}
                 </button>
                 {mode === "sign_in" && (

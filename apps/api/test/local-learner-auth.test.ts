@@ -101,10 +101,9 @@ async function dashboard(rawToken: string) {
   );
 }
 
-async function registerAndVerify(address: string) {
+async function registerAndVerify(address: string, password = startPassword) {
   const registered = await post("/auth/local/register", {
     email: address,
-    password: startPassword,
   });
   expect(registered.status).toBe(202);
   const verification = (await inbox(address)).messages.find(
@@ -112,7 +111,7 @@ async function registerAndVerify(address: string) {
   );
   expect(verification).toBeTruthy();
   const token = tokenFromLink(verification!.link);
-  const verified = await post("/auth/local/verify-email", { token });
+  const verified = await post("/auth/local/verify-email", { token, password });
   expect(verified.status).toBe(200);
   return token;
 }
@@ -193,12 +192,11 @@ describe("CertPath-owned local learner authentication", () => {
     const address = email("flow");
     const registration = await post("/auth/local/register", {
       email: address,
-      password: startPassword,
     });
     expect(registration.status).toBe(202);
     const accountState = await database
       .prepare(
-        `SELECT c.user_id,
+        `SELECT c.user_id, c.password_hash, c.email_verified_at,
                 (SELECT COUNT(*) FROM staff_roles WHERE user_id = c.user_id) AS staff_roles,
                 (SELECT COUNT(*) FROM learner_access_grants WHERE user_id = c.user_id) AS grants,
                 (SELECT COUNT(*) FROM auth_identities
@@ -209,6 +207,8 @@ describe("CertPath-owned local learner authentication", () => {
       .bind(localPasswordIssuer, address)
       .first<{
         user_id: string;
+        password_hash: string | null;
+        email_verified_at: number | null;
         staff_roles: number;
         grants: number;
         local_identities: number;
@@ -216,6 +216,8 @@ describe("CertPath-owned local learner authentication", () => {
     expect(accountState?.staff_roles).toBe(0);
     expect(accountState?.grants).toBe(0);
     expect(accountState?.local_identities).toBe(0);
+    expect(accountState?.password_hash).toBeNull();
+    expect(accountState?.email_verified_at).toBeNull();
 
     const unverifiedSignIn = await post(
       "/auth/local/sign-in",
@@ -238,10 +240,22 @@ describe("CertPath-owned local learner authentication", () => {
     expect(verification?.kind).toBe("verify_email");
     expect(new URL(verification!.link).search).toBe("");
     const verificationToken = tokenFromLink(verification!.link);
-    expect((await post("/auth/local/verify-email", { token: verificationToken })).status)
-      .toBe(200);
-    expect((await post("/auth/local/verify-email", { token: verificationToken })).status)
-      .toBe(400);
+    expect(
+      (
+        await post("/auth/local/verify-email", {
+          token: verificationToken,
+          password: startPassword,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/auth/local/verify-email", {
+          token: verificationToken,
+          password: nextPassword,
+        })
+      ).status,
+    ).toBe(400);
     const verifiedIdentity = await database
       .prepare(
         `SELECT subject FROM auth_identities
@@ -257,7 +271,7 @@ describe("CertPath-owned local learner authentication", () => {
         "SELECT password_hash FROM learner_password_credentials WHERE email_normalized = ?",
       )
       .bind(address)
-      .first<{ password_hash: string }>();
+      .first<{ password_hash: string | null }>();
     expect(initialHash?.password_hash).toMatch(/^\$scrypt\$/);
     expect(initialHash?.password_hash).not.toContain(startPassword);
 
@@ -397,16 +411,116 @@ describe("CertPath-owned local learner authentication", () => {
     expect(signedOutSession?.revoked_at).not.toBeNull();
   }, 30_000);
 
+  it("does not activate a password supplied before email verification or change one on repeated registration", async () => {
+    const address = email("password-after-verification");
+    const preVerificationPassword = `synthetic-${crypto.randomUUID()}-early-password`;
+    const chosenPassword = `synthetic-${crypto.randomUUID()}-verified-password`;
+    const rejectedRegistration = await post("/auth/local/register", {
+      email: address,
+      password: preVerificationPassword,
+    });
+    expect(rejectedRegistration.status).toBe(400);
+    expect((await inbox(address)).messages).toHaveLength(0);
+
+    expect(
+      (
+        await database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM learner_password_credentials WHERE email_normalized = ?",
+          )
+          .bind(address)
+          .first<{ count: number }>()
+      )?.count,
+    ).toBe(0);
+
+    expect(
+      (await post("/auth/local/register", { email: address })).status,
+    ).toBe(202);
+    const pending = await database
+      .prepare(
+        "SELECT password_hash, email_verified_at FROM learner_password_credentials WHERE email_normalized = ?",
+      )
+      .bind(address)
+      .first<{ password_hash: string | null; email_verified_at: number | null }>();
+    expect(pending).toEqual({ password_hash: null, email_verified_at: null });
+    expect(
+      (
+        await post(
+          "/auth/local/sign-in",
+          { email: address, password: preVerificationPassword },
+          "198.51.100.71",
+        )
+      ).status,
+    ).toBe(401);
+
+    const verification = (await inbox(address)).messages.find(
+      (message) => message.kind === "verify_email",
+    );
+    expect(verification).toBeTruthy();
+    const token = tokenFromLink(verification!.link);
+    expect(
+      (
+        await post("/auth/local/verify-email", {
+          token,
+          password: chosenPassword,
+        })
+      ).status,
+    ).toBe(200);
+    const activeHash = await database
+      .prepare(
+        "SELECT password_hash FROM learner_password_credentials WHERE email_normalized = ?",
+      )
+      .bind(address)
+      .first<{ password_hash: string | null }>();
+    expect(activeHash?.password_hash).toMatch(/^\$scrypt\$/);
+
+    expect((await post("/auth/local/register", { email: address })).status).toBe(
+      202,
+    );
+    expect(
+      (
+        await post("/auth/local/register", {
+          email: address,
+          password: preVerificationPassword,
+        })
+      ).status,
+    ).toBe(400);
+    const hashAfterRepeatedRegistration = await database
+      .prepare(
+        "SELECT password_hash FROM learner_password_credentials WHERE email_normalized = ?",
+      )
+      .bind(address)
+      .first<{ password_hash: string | null }>();
+    expect(hashAfterRepeatedRegistration?.password_hash).toBe(
+      activeHash?.password_hash,
+    );
+    expect(
+      (
+        await post(
+          "/auth/local/sign-in",
+          { email: address, password: preVerificationPassword },
+          "198.51.100.72",
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await post(
+          "/auth/local/sign-in",
+          { email: address, password: chosenPassword },
+          "198.51.100.73",
+        )
+      ).status,
+    ).toBe(200);
+  }, 30_000);
+
   it("rejects duplicate registration, expired links, and repeated recovery attempts", async () => {
     const address = email("expiry");
-    const registered = await post("/auth/local/register", {
-      email: address,
-      password: startPassword,
-    });
+    const registered = await post("/auth/local/register", { email: address });
     expect(registered.status).toBe(202);
     const duplicate = await post(
       "/auth/local/register",
-      { email: address, password: nextPassword },
+      { email: address },
       "198.51.100.51",
     );
     expect(duplicate.status).toBe(202);
@@ -414,7 +528,7 @@ describe("CertPath-owned local learner authentication", () => {
       (
         await post(
           "/auth/local/register",
-          { email: address, password: nextPassword },
+          { email: address },
           "198.51.100.53",
         )
       ).status,
@@ -423,7 +537,7 @@ describe("CertPath-owned local learner authentication", () => {
       (
         await post(
           "/auth/local/register",
-          { email: address, password: nextPassword },
+          { email: address },
           "198.51.100.54",
         )
       ).status,
@@ -433,7 +547,10 @@ describe("CertPath-owned local learner authentication", () => {
     const token = tokenFromLink(messages.messages[0]!.link);
 
     clock = Date.now() + 24 * 60 * 60 * 1000 + 1;
-    expect((await post("/auth/local/verify-email", { token })).status).toBe(400);
+    expect(
+      (await post("/auth/local/verify-email", { token, password: startPassword }))
+        .status,
+    ).toBe(400);
 
     const resetAddress = email("reset-expiry");
     await registerAndVerify(resetAddress);

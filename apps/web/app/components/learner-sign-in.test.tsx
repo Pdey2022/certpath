@@ -18,16 +18,18 @@ Object.defineProperties(globalThis, {
   IS_REACT_ACT_ENVIRONMENT: { configurable: true, writable: true, value: true },
 });
 
-const { cleanup, render, screen } =
+const { cleanup, fireEvent, render, screen } =
   await import("@testing-library/react");
 const { default: LearnerSignInRoute } = await import(
   "../routes/learner-sign-in"
 );
+const { LearnerVerifyEmailRoute } = await import("./learner-email-actions");
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
+  browser.history.replaceState(null, "", "/sign-in");
 });
 
 function preflightResponse(body: unknown, status = 200): Response {
@@ -92,6 +94,76 @@ test("offers the learner email and password entry when enabled", async () => {
   assert.ok(screen.getByLabelText("Password"));
   assert.ok(screen.getByRole("link", { name: "Open the synthetic local test inbox" }));
   assert.deepEqual(paths, ["/api/auth/local/preflight"]);
+});
+
+test("registration requests only an email and asks the learner to set a password after verification", async () => {
+  const paths: string[] = [];
+  const registrationBodies: unknown[] = [];
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input), browser.location.href).pathname;
+    paths.push(path);
+    if (path === "/api/auth/local/preflight") {
+      return preflightResponse({
+        signInEnabled: true,
+        localMailboxEnabled: true,
+      });
+    }
+    registrationBodies.push(JSON.parse(String(init?.body)));
+    return preflightResponse({
+      message: "If the address is eligible, check the local test inbox.",
+    });
+  };
+
+  renderSignIn();
+  fireEvent.click(await screen.findByRole("button", { name: "Create account" }));
+  assert.equal(screen.queryByLabelText("Password"), null);
+  fireEvent.change(screen.getByLabelText("Email address"), {
+    target: { value: "learner@example.test" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Send verification email" }));
+  await screen.findByText("If the address is eligible, check the local test inbox.");
+
+  assert.deepEqual(registrationBodies, [{ email: "learner@example.test" }]);
+  assert.deepEqual(paths, [
+    "/api/auth/local/preflight",
+    "/api/auth/local/register",
+  ]);
+});
+
+test("verification waits for password selection and submits token and password together", async () => {
+  const token = "a".repeat(43);
+  const calls: Array<{ path: string; body: unknown }> = [];
+  browser.history.replaceState(null, "", `/verify-email#token=${token}`);
+  globalThis.fetch = async (input, init) => {
+    calls.push({
+      path: new URL(String(input), browser.location.href).pathname,
+      body: JSON.parse(String(init?.body)),
+    });
+    return preflightResponse({ message: "Email verified. You can now sign in." });
+  };
+  const router = createMemoryRouter(
+    [{ path: "/verify-email", element: createElement(LearnerVerifyEmailRoute) }],
+    { initialEntries: ["/verify-email"] },
+  );
+  render(createElement(RouterProvider, { router }));
+
+  const password = await screen.findByLabelText("Choose a password");
+  assert.deepEqual(calls, []);
+  assert.equal(browser.location.hash, "");
+  fireEvent.change(password, {
+    target: { value: "synthetic-verified-password" },
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Verify email and set password" }),
+  );
+  await screen.findByText("Email verified. You can now sign in.");
+
+  assert.deepEqual(calls, [
+    {
+      path: "/api/auth/local/verify-email",
+      body: { token, password: "synthetic-verified-password" },
+    },
+  ]);
 });
 
 test("fails closed when sign-in availability cannot be checked", async () => {
