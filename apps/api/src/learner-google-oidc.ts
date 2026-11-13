@@ -598,7 +598,10 @@ export function createGoogleLearnerAuthApi(fetcher: Fetcher = fetch) {
   });
 
   router.get("/preflight", (context) =>
-    context.json({ signInEnabled: readConfiguration(context.env) !== null }),
+    context.json({
+      signInEnabled: readConfiguration(context.env) !== null,
+      localMailboxEnabled: false,
+    }),
   );
 
   router.get("/start", async (context) => {

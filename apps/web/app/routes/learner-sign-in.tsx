@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { Route } from "./+types/learner-sign-in";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import {
+  getGoogleSignInPreflight,
   isStagingLearnerAuth,
   LearnerAuthApiError,
   registerLearner,
@@ -60,9 +61,35 @@ function googleErrorMessage(code: string): string {
   return "Google sign-in could not be completed. Please try again.";
 }
 
+type GoogleAvailability = "checking" | "enabled" | "disabled";
+
+function useGoogleSignInAvailability(isStaging: boolean): GoogleAvailability {
+  const [availability, setAvailability] = useState<GoogleAvailability>(
+    isStaging ? "checking" : "disabled",
+  );
+  useEffect(() => {
+    if (!isStaging) return;
+    let active = true;
+    void getGoogleSignInPreflight()
+      .then((result) => {
+        if (active) {
+          setAvailability(result.signInEnabled ? "enabled" : "disabled");
+        }
+      })
+      .catch(() => {
+        if (active) setAvailability("disabled");
+      });
+    return () => {
+      active = false;
+    };
+  }, [isStaging]);
+  return availability;
+}
+
 function LearnerSignInContent() {
   const availability = useLearnerSignInAvailability();
   const isStaging = isStagingLearnerAuth();
+  const googleAvailability = useGoogleSignInAvailability(isStaging);
   const [searchParams] = useSearchParams();
   const googleError = searchParams.get("error");
   const navigate = useNavigate();
@@ -99,6 +126,28 @@ function LearnerSignInContent() {
       <section className="hero" aria-labelledby="learner-sign-in-title">
         <p className="eyebrow">Learner access</p>
         <h1 id="learner-sign-in-title">Learner sign in</h1>
+        {isStaging && googleAvailability === "enabled" && (
+          <section className="card setup-card" aria-label="Google sign-in">
+            <p className="intro">
+              Sign in with the invited Google account for this pilot. CertPath
+              links one pre-provisioned learner and creates no new account.
+            </p>
+            {googleError && (
+              <p className="form-errors" role="alert">
+                {googleErrorMessage(googleError)}
+              </p>
+            )}
+            <div
+              className="button-row"
+              role="group"
+              aria-label="Google sign-in"
+            >
+              <a className="button-primary" href="/api/auth/google/start">
+                Continue with Google
+              </a>
+            </div>
+          </section>
+        )}
         {availability === "enabled" && (
           <section className="card setup-card" aria-label="Email and password sign-in">
             <p className="intro">
@@ -136,21 +185,10 @@ function LearnerSignInContent() {
                 </button>
               </div>
             )}
-            {googleError && (
+            {googleError && availability !== "enabled" && (
               <p className="form-errors" role="alert">
                 {googleErrorMessage(googleError)}
               </p>
-            )}
-            {isStaging && (
-              <div
-                className="button-row"
-                role="group"
-                aria-label="Google sign-in"
-              >
-                <a className="button-primary" href="/api/auth/google/start">
-                  Continue with Google
-                </a>
-              </div>
             )}
             {error && <p className="form-errors" role="alert">{error}</p>}
             {message && (
@@ -215,7 +253,7 @@ function LearnerSignInContent() {
             Checking whether learner sign-in is enabled…
           </p>
         )}
-        {availability === "disabled" && (
+        {availability === "disabled" && googleAvailability !== "enabled" && (
           <p className="card" role="status">
             Learner sign-in is currently disabled.
           </p>

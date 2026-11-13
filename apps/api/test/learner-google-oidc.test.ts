@@ -282,6 +282,57 @@ describe("invite-only Google sign-in", () => {
     expect(pending.cookie).toMatch(/^__Host-certpath_google_login=[A-Za-z0-9_-]{43}$/);
   });
 
+  it("stays enabled while password sign-in and the Lambda verifier are unconfigured", async () => {
+    const passwordlessBindings = {
+      DB: database,
+      PUBLIC_SITE_ORIGIN: origin,
+      CSRF_HMAC_SECRET: "synthetic-google-csrf-secret-for-tests-only",
+      STAGING_LEARNER_AUTH_ENABLED: "true",
+      STAGING_LEARNER_EMAIL: "learner@example.test",
+      STAGING_AUTH_RATE_LIMIT_HMAC_SECRET:
+        "synthetic-google-rate-limit-secret-for-tests-only",
+      LEARNER_GOOGLE_OIDC_ENABLED: "true",
+      GOOGLE_OIDC_CLIENT_ID: clientId,
+      GOOGLE_OIDC_CLIENT_SECRET: clientSecret,
+      GOOGLE_OIDC_REDIRECT_URI: `${origin}/api/auth/google/callback`,
+      GOOGLE_OIDC_TRANSACTION_KEY:
+        "synthetic-google-transaction-key-for-tests-only",
+    };
+    const ip = nextIp();
+    const allowed = { ...passwordlessBindings, STAGING_TESTER_IPS: ip };
+    const send = (path: string) =>
+      application.fetch(
+        new Request(`${origin}${path}`, {
+          headers: { "CF-Connecting-IP": ip },
+        }),
+        allowed,
+      );
+
+    const passwordPreflight = await send("/api/auth/staging/preflight");
+    expect(passwordPreflight.status).toBe(200);
+    expect(await passwordPreflight.json()).toMatchObject({
+      signInEnabled: false,
+    });
+
+    const googlePreflight = await send("/api/auth/google/preflight");
+    expect(googlePreflight.status).toBe(200);
+    expect(await googlePreflight.json()).toEqual({
+      signInEnabled: true,
+      localMailboxEnabled: false,
+    });
+
+    const start = await send("/api/auth/google/start");
+    expect(start.status).toBe(302);
+    const authorizeUrl = new URL(start.headers.get("Location") ?? "");
+    expect(authorizeUrl.origin).toBe("https://accounts.google.com");
+    expect(authorizeUrl.searchParams.get("client_id")).toBe(clientId);
+    expect(authorizeUrl.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(start.headers.get("Set-Cookie")).toContain(
+      "__Host-certpath_google_login=",
+    );
+  });
+
   it("signs in the invited learner and authorizes only the granted exam", async () => {
     const subject = `google-${crypto.randomUUID()}`;
     const { userId } = await invitedLearner(subject);

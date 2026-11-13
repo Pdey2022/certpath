@@ -139,6 +139,9 @@ Local implementation only; nothing is deployed and no Google client exists.
 - Staging configuration is variable-only and disabled by default
   (`LEARNER_GOOGLE_OIDC_ENABLED=false`, empty client ID and redirect URI). The
   client secret and transaction key are Worker secrets.
+- The staging sign-in page reads `/api/auth/google/preflight` on its own, so the
+  Google button appears and starts the flow even when password sign-in reports
+  disabled because the Lambda verifier is unconfigured.
 - Local tests: `apps/api/test/learner-google-oidc.test.ts` (18 cases, mocked
   Google JWKS and token endpoints, isolated D1),
   `apps/api/test/google-invite.test.ts` (6 cases), and

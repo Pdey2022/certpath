@@ -60,11 +60,49 @@ test("offers Google sign-in on the staging origin and keeps the synthetic learne
   });
   assert.equal(google.getAttribute("href"), "/api/auth/google/start");
   assert.ok(screen.getByLabelText("Email address"));
-  assert.deepEqual(paths, ["/api/auth/staging/preflight"]);
+  assert.deepEqual(paths.slice().sort(), [
+    "/api/auth/google/preflight",
+    "/api/auth/staging/preflight",
+  ]);
   assert.equal(
     screen.queryByRole("link", { name: "Open the synthetic local test inbox" }),
     null,
   );
+});
+
+test("offers Google sign-in when password sign-in is unavailable", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input), browser.location.href).pathname;
+    calls.push(path);
+    if (path === "/api/auth/google/preflight") {
+      return new Response(
+        JSON.stringify({ signInEnabled: true, localMailboxEnabled: false }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response(
+      JSON.stringify({ signInEnabled: false, localMailboxEnabled: false }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  renderSignIn();
+
+  const google = await screen.findByRole("link", {
+    name: "Continue with Google",
+  });
+  assert.equal(google.getAttribute("href"), "/api/auth/google/start");
+  assert.equal(screen.queryByLabelText("Email address"), null);
+  assert.equal(screen.queryByLabelText("Password"), null);
+  assert.equal(
+    screen.queryByText("Learner sign-in is currently disabled."),
+    null,
+  );
+  assert.deepEqual(calls.sort(), [
+    "/api/auth/google/preflight",
+    "/api/auth/staging/preflight",
+  ]);
 });
 
 test("explains that an uninvited Google account cannot sign in", async () => {
