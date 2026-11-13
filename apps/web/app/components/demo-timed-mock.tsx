@@ -5,8 +5,8 @@ import {
   demoMockDurationMs,
   demoMockStorageKey,
   formatRemaining,
+  loadDemoMockAttempt,
   moveDemoMock,
-  parseDemoMock,
   remainingMs,
   scoreDemoMock,
   settleDemoMock,
@@ -21,8 +21,7 @@ const letters = ["A", "B", "C", "D", "E", "F"];
 
 function load(storageKey: string): DemoMockAttempt | null {
   try {
-    const attempt = parseDemoMock(window.localStorage.getItem(storageKey));
-    return attempt ? settleDemoMock(attempt, Date.now()) : null;
+    return loadDemoMockAttempt(window.localStorage.getItem(storageKey), Date.now());
   } catch {
     return null;
   }

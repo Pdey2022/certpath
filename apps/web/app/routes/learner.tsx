@@ -4,6 +4,7 @@ import type { Route } from "./+types/learner";
 
 import { PracticeDemo } from "../components/practice-demo";
 import { DemoTimedMock } from "../components/demo-timed-mock";
+import { DemoMockDashboardLinks } from "../components/demo-mock-dashboard-links";
 import { WorkspaceShell } from "../components/workspace-shell";
 import {
   demoToday,
@@ -192,17 +193,13 @@ function LearnerHome() {
         </div>
       </section>
 
-      <section className="card-grid section-block">
+      <section className="card-grid section-block" aria-label="Study tools and progress">
         <article className="card">
           <h2>Practice</h2>
           <p>Try original illustrative sample questions with explanations.</p>
           <Link to="/app/practice/setup">Set up practice</Link>
         </article>
-        <article className="card">
-          <h2>Mock preview</h2>
-          <p>Review the rules, then take a timed sample mock saved in this browser.</p>
-          <Link to="/app/exams/cissp/mock">View mock setup</Link>
-        </article>
+        <DemoMockDashboardLinks />
         <article className="card">
           <h2>Progress</h2>
           <p>See first-seen and repeated-question sample statistics separately.</p>

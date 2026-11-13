@@ -127,3 +127,11 @@ export function parseDemoMock(serialized: string | null): DemoMockAttempt | null
         (value.submitReason === "manual" || value.submitReason === "expired"));
   return valid ? (value as DemoMockAttempt) : null;
 }
+
+export function loadDemoMockAttempt(
+  serialized: string | null,
+  now: number,
+): DemoMockAttempt | null {
+  const attempt = parseDemoMock(serialized);
+  return attempt ? settleDemoMock(attempt, now) : null;
+}
