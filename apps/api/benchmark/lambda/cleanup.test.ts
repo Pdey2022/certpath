@@ -1,6 +1,10 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   cleanupBenchmarkResources,
+  cleanupFromManifestPath,
   parseCleanupManifest,
   type AwsCommandExecutor,
   type CleanupManifest,
@@ -147,6 +151,65 @@ describe("Lambda benchmark cleanup", () => {
     expect(report.complete).toBe(true);
     expect(report.remaining).toEqual([]);
     expect(mock.resources.size).toBe(0);
+  });
+
+  it("runs cleanup after switching directories using the absolute manifest path", async () => {
+    const manifestDirectory = await mkdtemp(
+      join(tmpdir(), "certpath-cleanup-manifest-"),
+    );
+    const workingDirectory = await mkdtemp(
+      join(tmpdir(), "certpath-cleanup-work-"),
+    );
+    const manifestPath = resolve(manifestDirectory, "run-manifest.json");
+    const originalDirectory = process.cwd();
+
+    try {
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+      const mock = createMockAws(allResources);
+      process.chdir(workingDirectory);
+
+      const report = await cleanupFromManifestPath(
+        manifestPath,
+        mock.executor,
+      );
+
+      expect(isAbsolute(manifestPath)).toBe(true);
+      expect(process.cwd()).toBe(workingDirectory);
+      expect(report.complete).toBe(true);
+      expect(mock.resources.size).toBe(0);
+    } finally {
+      process.chdir(originalDirectory);
+      await rm(manifestDirectory, { force: true, recursive: true });
+      await rm(workingDirectory, { force: true, recursive: true });
+    }
+  });
+
+  it("recovers from the saved full manifest path without prior shell variables", async () => {
+    const harnessDirectory = await mkdtemp(
+      join(tmpdir(), "certpath-cleanup-recovery-"),
+    );
+    const manifestPath = resolve(harnessDirectory, "run-manifest.json");
+    const pointerPath = resolve(harnessDirectory, "active-run-manifest");
+
+    try {
+      await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+      await writeFile(pointerPath, `${manifestPath}\n`, "utf8");
+
+      const freshSessionManifestPath = (await readFile(pointerPath, "utf8"))
+        .trim();
+      const mock = createMockAws(allResources);
+      const report = await cleanupFromManifestPath(
+        freshSessionManifestPath,
+        mock.executor,
+      );
+
+      expect(freshSessionManifestPath).toBe(manifestPath);
+      expect(isAbsolute(freshSessionManifestPath)).toBe(true);
+      expect(report.complete).toBe(true);
+      expect(mock.resources.size).toBe(0);
+    } finally {
+      await rm(harnessDirectory, { force: true, recursive: true });
+    }
   });
 
   it("attempts independent deletions and reports exact leftovers for retry", async () => {

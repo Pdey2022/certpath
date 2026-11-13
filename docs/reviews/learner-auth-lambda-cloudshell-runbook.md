@@ -112,9 +112,30 @@ npm run benchmark:lambda:package
 
 This creates `apps/api/dist/lambda-scrypt-benchmark/handler.mjs` and
 `runner.mjs` plus `cleanup.mjs`; the directory is ignored by Git. In AWS
-CloudShell, use **Actions → Upload file** to upload all three files to the
-same working directory. The runner bundle contains its SigV4 dependencies; no
-AWS credentials are embedded in any bundle.
+CloudShell, create a stable harness directory and upload all three files to
+CloudShell's home directory:
+
+```bash
+HARNESS_DIR="$HOME/certpath-lambda-scrypt-benchmark"
+mkdir -p "$HARNESS_DIR"
+cd "$HOME"
+```
+
+Use **Actions → Upload file** for `handler.mjs`, `runner.mjs`, and
+`cleanup.mjs`, then copy them into the stable location:
+
+```bash
+cp "$HOME/handler.mjs" "$HOME/runner.mjs" "$HOME/cleanup.mjs" "$HARNESS_DIR/"
+CLEANUP_SCRIPT="$HARNESS_DIR/cleanup.mjs"
+printf 'Cleanup script: %s\n' "$CLEANUP_SCRIPT"
+```
+
+`CLEANUP_SCRIPT` is an absolute path under the persistent CloudShell home
+directory, so invoke it by that path regardless of the current working
+directory. The runner bundle contains its SigV4 dependencies; no AWS
+credentials are embedded in any bundle. If resuming in a fresh CloudShell
+session, use the same CloudShell console Region so the home directory remains
+available.
 
 ### 2. Confirm account, region, and quota
 
@@ -167,12 +188,18 @@ FUNCTION_NAME="certpath-scrypt-lambda-proof-$SUFFIX"
 ROLE_NAME="${FUNCTION_NAME}-exec"
 LOG_GROUP="/aws/lambda/$FUNCTION_NAME"
 ROLE_POLICY_NAME="CertPathScryptBenchmarkLogs"
-RUN_MANIFEST="$HOME/${FUNCTION_NAME}-resources.json"
+RUN_MANIFEST="$HARNESS_DIR/${FUNCTION_NAME}-resources.json"
+RUN_MANIFEST_POINTER="$HARNESS_DIR/active-run-manifest"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 FUNCTION_ARN="arn:aws:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${FUNCTION_NAME}"
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
 LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${LOG_GROUP}"
 
+if [[ -e "$RUN_MANIFEST_POINTER" ]]; then
+  printf 'STOP: a prior run still needs cleanup; recovery pointer: %s\n' \
+    "$RUN_MANIFEST_POINTER" >&2
+  exit 1
+fi
 if [[ -e "$RUN_MANIFEST" ]]; then
   printf 'STOP: manifest already exists: %s\n' "$RUN_MANIFEST" >&2
   exit 1
@@ -185,13 +212,17 @@ jq -n \
   --arg rolePolicyName "$ROLE_POLICY_NAME" \
   '{region:$region,functionName:$functionName,logGroup:$logGroup,roleName:$roleName,rolePolicyName:$rolePolicyName}' \
   > "$RUN_MANIFEST"
+printf '%s\n' "$RUN_MANIFEST" > "$RUN_MANIFEST_POINTER"
 chmod 600 "$RUN_MANIFEST"
+chmod 600 "$RUN_MANIFEST_POINTER"
 printf 'Run resource manifest: %s\n' "$RUN_MANIFEST"
+printf 'Recovery pointer: %s\n' "$RUN_MANIFEST_POINTER"
 ```
 
 The manifest is written before any resource-creation command. It contains only
-the exact names for this run, not credentials. Keep this CloudShell session and
-manifest; use the manifest for cleanup even if setup or the benchmark stops
+the exact names for this run, not credentials. The pointer stores the manifest's
+full path for recovery and prevents a new run from replacing an unresolved
+manifest. Keep the manifest for cleanup even if setup or the benchmark stops
 partway through.
 
 Use the IAM Policy Simulator for the current CloudShell user or role. For a
@@ -274,12 +305,10 @@ denied, record the exact action and stop; do not attach a wider policy.
 
 ### 4. Create the isolated function
 
-In the directory containing the uploaded bundles:
-
 ```bash
 WORK_DIR="$(mktemp -d)"
-cp handler.mjs "$WORK_DIR/handler.mjs"
-cp runner.mjs "$WORK_DIR/runner.mjs"
+cp "$HARNESS_DIR/handler.mjs" "$WORK_DIR/handler.mjs"
+cp "$HARNESS_DIR/runner.mjs" "$WORK_DIR/runner.mjs"
 cd "$WORK_DIR"
 zip -q function.zip handler.mjs
 
@@ -397,15 +426,41 @@ each deletion independently, including resources whose creation may have
 failed or returned ambiguously:
 
 ```bash
-node cleanup.mjs "$RUN_MANIFEST"
+cd /tmp
+if node "$CLEANUP_SCRIPT" "$RUN_MANIFEST"; then
+  rm -- "$RUN_MANIFEST_POINTER"
+else
+  printf 'Cleanup incomplete; keep the manifest and recovery pointer.\n' >&2
+  exit 1
+fi
+```
+
+The command intentionally runs after changing directories: both the script and
+manifest paths are absolute. If the CloudShell session closes before cleanup
+finishes, start a fresh terminal in the same CloudShell console Region and run
+this recovery command. It reads the saved full manifest path; no prior shell
+variables are required:
+
+```bash
+HARNESS_DIR="$HOME/certpath-lambda-scrypt-benchmark"
+CLEANUP_SCRIPT="$HARNESS_DIR/cleanup.mjs"
+RUN_MANIFEST="$(cat "$HARNESS_DIR/active-run-manifest")"
+if node "$CLEANUP_SCRIPT" "$RUN_MANIFEST"; then
+  rm -- "$HARNESS_DIR/active-run-manifest"
+else
+  printf 'Cleanup incomplete; keep the manifest and recovery pointer.\n' >&2
+  exit 1
+fi
 ```
 
 The cleanup output lists any delete errors and every resource still present
 or whose absence could not be verified. It verifies the Function URL config,
 function, log group, role, and inline policy using the exact names saved before
 setup. If cleanup exits nonzero, keep the manifest, resolve the reported
-permission or service issue, and rerun the same cleanup command. Do not report
-teardown complete until the script confirms no resources remain.
+permission or service issue, leave the recovery pointer intact, and rerun the
+same cleanup command. The pointer is removed only after cleanup confirms no
+resources remain; retain the manifest as a record. Do not report teardown
+complete until the script confirms no resources remain.
 
 Finally recheck the account plan/credit balance and Billing/Cost Explorer.
 Record (a) recurring Free Tier coverage as **unknown** unless the account

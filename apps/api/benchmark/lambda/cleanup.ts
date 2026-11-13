@@ -314,14 +314,21 @@ export async function cleanupBenchmarkResources(
   };
 }
 
+export async function cleanupFromManifestPath(
+  manifestPath: string,
+  executor: AwsCommandExecutor,
+): Promise<CleanupReport> {
+  const manifestContents = await readFile(manifestPath, "utf8");
+  const manifest = parseCleanupManifest(JSON.parse(manifestContents));
+  return cleanupBenchmarkResources(manifest, executor);
+}
+
 async function main(): Promise<void> {
   const manifestPath = process.argv[2];
   if (!manifestPath) {
     throw new Error("Usage: node cleanup.mjs <run-manifest.json>");
   }
-  const manifestContents = await readFile(manifestPath, "utf8");
-  const manifest = parseCleanupManifest(JSON.parse(manifestContents));
-  const report = await cleanupBenchmarkResources(manifest, awsCli);
+  const report = await cleanupFromManifestPath(manifestPath, awsCli);
 
   for (const issue of report.deleteErrors) {
     console.error(
