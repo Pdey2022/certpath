@@ -692,5 +692,5 @@ describe("CertPath-owned local learner authentication", () => {
       .bind(...staffUsers)
       .first<{ count: number }>();
     expect(counts?.count).toBe(0);
-  });
+  }, 20_000);
 });

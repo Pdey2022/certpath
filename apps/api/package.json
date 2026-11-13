@@ -10,7 +10,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
-    "test": "tsx --test src/index.test.ts && vitest run --config vitest.config.ts"
+    "test": "tsx --test src/index.test.ts && vitest run --config vitest.config.ts",
+    "benchmark:local-auth": "vitest run --config vitest.benchmark.config.ts --disableConsoleIntercept benchmark/local-auth-runtime-benchmark.test.ts"
   },
   "dependencies": {
     "@certpath/contracts": "0.0.0",
