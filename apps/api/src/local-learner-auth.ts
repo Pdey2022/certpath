@@ -319,10 +319,20 @@ function actionLink(origin: string, path: string, token: string): string {
   return `${origin}/${path}#token=${encodeURIComponent(token)}`;
 }
 
-export function createLocalLearnerAuthApi(now: () => number = Date.now) {
+export interface LearnerPasswordHooks {
+  // Defaults to the in-Worker scrypt verifier; the isolated Lambda benchmark overrides it.
+  verifyPassword?: (password: string, encodedHash: string) => Promise<boolean>;
+  dummyHash?: Promise<string>;
+}
+
+export function createLocalLearnerAuthApi(
+  now: () => number = Date.now,
+  hooks: LearnerPasswordHooks = {},
+) {
+  const verifyPassword = hooks.verifyPassword ?? verifyLearnerPassword;
   const router = new Hono<{ Bindings: LocalAuthBindings }>();
   const mail = new LocalTestMailAdapter();
-  let dummyHash: Promise<string> | null = null;
+  let dummyHash: Promise<string> | null = hooks.dummyHash ?? null;
 
   router.use("*", async (context, next) => {
     context.header("Cache-Control", "no-store");
@@ -844,13 +854,13 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     let passwordMatches = false;
     try {
       if (row?.password_hash) {
-        passwordMatches = await verifyLearnerPassword(
+        passwordMatches = await verifyPassword(
           input.password,
           row.password_hash,
         );
       } else {
         dummyHash ??= hashLearnerPassword(crypto.randomUUID());
-        passwordMatches = await verifyLearnerPassword(
+        passwordMatches = await verifyPassword(
           input.password,
           await dummyHash,
         );

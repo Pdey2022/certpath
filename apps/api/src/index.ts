@@ -6,6 +6,7 @@ import { createCognitoLearnerSandboxApi } from "./cognito-learner-sandbox.ts";
 import {
   createApplicationSessionApi,
   createLocalLearnerAuthApi,
+  type LearnerPasswordHooks,
 } from "./local-learner-auth.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 
@@ -30,6 +31,7 @@ type ApiBindings = {
 export function createApi(
   fetcher: typeof fetch = fetch,
   now: () => number = Date.now,
+  learnerPasswordHooks?: LearnerPasswordHooks,
 ) {
   const application = new Hono<{ Bindings: ApiBindings }>().basePath("/api");
 
@@ -43,7 +45,7 @@ export function createApi(
     "/auth/cognito",
     createCognitoLearnerSandboxApi(fetcher),
   );
-  application.route("/auth/local", createLocalLearnerAuthApi(now));
+  application.route("/auth/local", createLocalLearnerAuthApi(now, learnerPasswordHooks));
   application.route("/auth/session", createApplicationSessionApi(now));
   application.route("/admin/content", protectedContentApi);
   application.route("/practice", learnerPracticeApi);

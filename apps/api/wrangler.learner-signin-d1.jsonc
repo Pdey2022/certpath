@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "certpath-signin-d1-proof",
+  "account_id": "ef67137c4d1556f7f51f1cb3f1f420f3",
+  "main": "./benchmark/learner-signin-d1/worker.ts",
+  "compatibility_date": "2026-11-13",
+  "workers_dev": true,
+  "upload_source_maps": false,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "certpath-signin-d1-proof",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../db/migrations"
+    }
+  ]
+}
