@@ -131,10 +131,10 @@ test("signs out through the CSRF-protected session revocation endpoint", async (
     if (path === "/api/practice/dashboard") {
       return jsonResponse({ groups: [] });
     }
-    if (path === "/api/auth/cognito/csrf") {
+    if (path === "/api/auth/session/csrf") {
       return jsonResponse({ csrfToken: `v1.${"a".repeat(43)}` });
     }
-    if (path === "/api/auth/cognito/logout") {
+    if (path === "/api/auth/session/logout") {
       return new Response(null, { status: 204 });
     }
     throw new Error(`Unexpected request: ${path}`);
@@ -156,13 +156,13 @@ test("signs out through the CSRF-protected session revocation endpoint", async (
     calls.map((call) => call.path),
     [
       "/api/practice/dashboard",
-      "/api/auth/cognito/csrf",
-      "/api/auth/cognito/logout",
+      "/api/auth/session/csrf",
+      "/api/auth/session/logout",
     ],
   );
   assert.equal(router.state.location.pathname, "/sign-in");
   const logoutCall = calls.find(
-    (call) => call.path === "/api/auth/cognito/logout",
+    (call) => call.path === "/api/auth/session/logout",
   );
   assert.equal(logoutCall?.init?.method, "POST");
   assert.equal(

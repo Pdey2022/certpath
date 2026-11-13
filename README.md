@@ -4,8 +4,8 @@ This repository contains the CertPath prototype and the first protected
 untimed learner-practice slice. The public site is server-rendered with React
 Router on Cloudflare Workers. A Hono API is mounted at the same-origin `/api`
 path in that Worker; D1 holds server-side attempt snapshots and answers.
-Provider-backed sign-in, live session issuance, access-grant issuance,
-payments, and production provisioning are not implemented.
+Provider-backed sign-in, production access-grant issuance, payments, and
+production provisioning are not implemented.
 
 ## Requirements
 
@@ -27,10 +27,27 @@ The local Worker is available at the URL printed by Wrangler (normally
 requiring browser JavaScript. The `/app` workspace and `/app/practice` remain
 synthetic, browser-only previews and do not authorize any action.
 `/app/practice/live` is a separate protected route; it requires an opaque
-application-session cookie and a current D1 Standard grant. This repository
-does not provide an endpoint to issue sessions or grants. API/D1 tests use
+application-session cookie and a current D1 Standard grant. The CertPath-owned
+authentication proof below can issue sessions only for synthetic local
+learners; it does not issue grants and is disabled by default. API/D1 tests use
 isolated synthetic fixtures only. Protected practice content is never written
 to browser storage.
+
+### Local learner-auth proof
+
+The CertPath-owned email/password flow is a local-only proof, not a production
+sign-in option. Registration starts with an email address only. The learner
+chooses a password when completing email verification; token consumption and
+password activation happen in one atomic D1 batch. To try it, copy
+`apps/web/.dev.vars.example` to
+`apps/web/.dev.vars`, replace both placeholder values with different random
+local-only secrets, confirm `PUBLIC_SITE_ORIGIN` matches the local URL Wrangler
+prints, then set `LOCAL_LEARNER_AUTH_ENABLED` and `LOCAL_TEST_MAIL_ENABLED` to
+`true`. Apply local migrations and start the Worker as above. Use only
+synthetic email addresses ending in `@example.test`; verification and reset
+links appear in `/local-inbox` and are held in Worker memory. No real email is
+sent, and no credentials, cloud resources, or deployment settings are used.
+Keep these flags disabled in any deployment configuration.
 
 ## Verification
 
