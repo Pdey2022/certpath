@@ -43,15 +43,15 @@ route is not linked and its API does not exist in this Worker.
 | Area | Routes |
 | --- | --- |
 | Landing and catalogue | `/`, `/exams` |
-| Learner (synthetic) | `/app`, `/app/exams/cissp`, `/app/exams/cissp/practice`, `/app/practice`, `/app/exams/cissp/mock`, `/app/exams/cissp/mock/active`, `/app/progress`, `/app/account` |
+| Learner (synthetic) | `/app`, `/app/exams/cissp`, `/app/exams/cissp/practice`, `/app/practice`, `/app/exams/cissp/mock`, `/app/exams/cissp/mock/active`, `/app/exams/cism/mock/active`, `/app/progress`, `/app/account` |
 | Global Admin | `/admin` and its sections |
 | Manager (CISSP) | `/admin?demoRole=manager` and its sections |
 
 Illustrative only: every learner and admin screen. Practice answers and the
-CISSP timed mock use browser storage only (the mock is a 3-question, 3-minute
-synthetic attempt with a wall-clock countdown, auto-submit on expiry, a results
-screen, and same-browser resume; it is not an official exam or a server-enforced
-timer, and clearing site data discards it); progress, access, customers,
+timed mocks use separate browser-storage keys for CISSP and CISM (each mock is
+a 3-question, 3-minute synthetic attempt with a wall-clock countdown, auto-submit
+on expiry, a results screen, and same-browser resume; they are not official exams
+or server-enforced timers, and clearing site data discards them); progress, access, customers,
 payments, and audit data are fixed
 fixtures. The live-API pages (`/app/home`, `/app/practice/live`,
 `/app/mock/live`, `/sign-in`, and related) are not linked and do not work here.

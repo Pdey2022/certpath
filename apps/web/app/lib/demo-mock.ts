@@ -1,6 +1,11 @@
 import { demoQuestions } from "./prototype-data";
 
-export const demoMockStorageKey = "certpath-demo-mock-v1";
+export type DemoMockExam = "cissp" | "cism";
+
+export function demoMockStorageKey(exam: DemoMockExam) {
+  return `certpath-demo-mock-${exam}-v1`;
+}
+
 export const demoMockDurationMs = 3 * 60 * 1000;
 
 export interface DemoMockAttempt {

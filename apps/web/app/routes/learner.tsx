@@ -385,11 +385,14 @@ function MockSetup({
   certification,
   active,
 }: {
-  certification: string;
+  certification: "CISSP" | "CISM";
   active: boolean;
 }) {
   return active ? (
-    <DemoTimedMock leaveTo={`/app/exams/${certification.toLowerCase()}/mock`} />
+    <DemoTimedMock
+      exam={certification === "CISM" ? "cism" : "cissp"}
+      leaveTo={`/app/exams/${certification.toLowerCase()}/mock`}
+    />
   ) : (
     <section className="card setup-card">
       <p className="eyebrow">Mock instructions · {certification}</p>

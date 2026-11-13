@@ -12,31 +12,43 @@ import {
   settleDemoMock,
   startDemoMock,
   submitDemoMock,
+  type DemoMockExam,
   type DemoMockAttempt,
 } from "../lib/demo-mock";
 import { demoQuestions } from "../lib/prototype-data";
 
 const letters = ["A", "B", "C", "D", "E", "F"];
 
-function load(): DemoMockAttempt | null {
+function load(storageKey: string): DemoMockAttempt | null {
   try {
-    const attempt = parseDemoMock(window.localStorage.getItem(demoMockStorageKey));
+    const attempt = parseDemoMock(window.localStorage.getItem(storageKey));
     return attempt ? settleDemoMock(attempt, Date.now()) : null;
   } catch {
     return null;
   }
 }
 
-export function DemoTimedMock({ leaveTo }: { leaveTo: string }) {
-  const [attempt, setAttempt] = useState<DemoMockAttempt | null | undefined>(undefined);
+export function DemoTimedMock({
+  exam,
+  leaveTo,
+}: {
+  exam: DemoMockExam;
+  leaveTo: string;
+}) {
+  const storageKey = demoMockStorageKey(exam);
+  const [mockState, setMockState] = useState<{
+    storageKey: string;
+    attempt: DemoMockAttempt | null | undefined;
+  }>({ storageKey: "", attempt: undefined });
+  const attempt = mockState.storageKey === storageKey ? mockState.attempt : undefined;
   const [now, setNow] = useState(() => Date.now());
   const [storageError, setStorageError] = useState(false);
 
   function update(next: DemoMockAttempt | null) {
-    setAttempt(next);
+    setMockState({ storageKey, attempt: next });
     try {
-      if (next) window.localStorage.setItem(demoMockStorageKey, JSON.stringify(next));
-      else window.localStorage.removeItem(demoMockStorageKey);
+      if (next) window.localStorage.setItem(storageKey, JSON.stringify(next));
+      else window.localStorage.removeItem(storageKey);
       setStorageError(false);
     } catch {
       setStorageError(true);
@@ -44,16 +56,18 @@ export function DemoTimedMock({ leaveTo }: { leaveTo: string }) {
   }
 
   useEffect(() => {
-    const loaded = load();
-    setAttempt(loaded);
+    const loaded = load(storageKey);
+    setMockState({ storageKey, attempt: loaded });
+    setNow(Date.now());
+    setStorageError(false);
     if (loaded) {
       try {
-        window.localStorage.setItem(demoMockStorageKey, JSON.stringify(loaded));
+        window.localStorage.setItem(storageKey, JSON.stringify(loaded));
       } catch {
         setStorageError(true);
       }
     }
-  }, []);
+  }, [storageKey]);
 
   const inProgress = attempt?.status === "in-progress";
   useEffect(() => {
@@ -61,17 +75,17 @@ export function DemoTimedMock({ leaveTo }: { leaveTo: string }) {
     const tick = () => {
       const time = Date.now();
       setNow(time);
-      setAttempt((current) => {
-        if (!current) return current;
-        const settled = settleDemoMock(current, time);
-        if (settled !== current) {
+      setMockState((current) => {
+        if (current.storageKey !== storageKey || !current.attempt) return current;
+        const settled = settleDemoMock(current.attempt, time);
+        if (settled !== current.attempt) {
           try {
-            window.localStorage.setItem(demoMockStorageKey, JSON.stringify(settled));
+            window.localStorage.setItem(storageKey, JSON.stringify(settled));
           } catch {
             setStorageError(true);
           }
         }
-        return settled;
+        return { storageKey, attempt: settled };
       });
     };
     tick();
@@ -81,7 +95,7 @@ export function DemoTimedMock({ leaveTo }: { leaveTo: string }) {
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", tick);
     };
-  }, [inProgress]);
+  }, [inProgress, storageKey]);
 
   if (attempt === undefined) {
     return (
