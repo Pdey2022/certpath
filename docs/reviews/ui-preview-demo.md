@@ -43,7 +43,7 @@ route is not linked and its API does not exist in this Worker.
 | Area | Routes |
 | --- | --- |
 | Landing and catalogue | `/`, `/exams` |
-| Learner (synthetic) | `/app`, `/app/exams/cissp`, `/app/exams/cissp/practice`, `/app/practice`, `/app/exams/cissp/mock`, `/app/exams/cissp/mock/active`, `/app/exams/cism/mock/active`, `/app/exams/cissp/pro/preview/session`, `/app/exams/cism/pro/preview/session`, `/app/progress`, `/app/account` |
+| Learner (synthetic) | `/app`, `/app/exams/cissp`, `/app/exams/cissp/practice`, `/app/practice`, `/app/exams/cissp/mock`, `/app/exams/cissp/mock/active`, `/app/exams/cism/mock/active`, `/app/exams/cissp/pro/preview`, `/app/exams/cissp/pro/preview/session`, `/app/exams/cism/pro/preview`, `/app/exams/cism/pro/preview/session`, `/app/progress`, `/app/account` |
 | Global Admin | `/admin` and its sections |
 | Manager (CISSP) | `/admin?demoRole=manager` and its sections |
 
@@ -53,7 +53,10 @@ a 3-question, 3-minute synthetic attempt with a wall-clock countdown, auto-submi
 on expiry, a results screen, and same-browser resume; they are not official exams
 or server-enforced timers, and clearing site data discards them). The learner
 dashboard shows separate CISSP and CISM mock links that resume, show results, or
-start each exam according to its browser-saved attempt. The CertPath demo Pro
+start each exam according to its browser-saved attempt. It also shows separate
+CISSP and CISM Pro mock links that resume an in-progress attempt, show a
+completed result, or start the matching exam according to its browser-saved
+attempt. The CertPath demo Pro
 mock adapts among the same three synthetic questions: correct answers target
 Intermediate difficulty and incorrect answers target Foundational when available.
 Answers lock on submission; the final score and explanations are saved separately

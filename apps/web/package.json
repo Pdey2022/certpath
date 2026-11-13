@@ -8,7 +8,7 @@
     "deploy:preview": "node scripts/preview-command.mjs deploy",
     "dev": "react-router dev",
     "typecheck": "wrangler types && react-router typegen && tsc -b",
-    "test": "tsx --test app/lib/seo.test.ts app/lib/prototype-data.test.ts app/lib/demo-mock.test.ts app/lib/demo-adaptive-mock.test.ts app/lib/practice-flow.test.ts app/components/practice-demo.test.tsx app/components/demo-timed-mock.test.tsx app/components/demo-adaptive-mock.test.tsx app/components/demo-mock-dashboard-links.test.tsx app/components/protected-csv-tools.test.tsx app/routes/admin-question-editor.test.tsx app/components/learner-practice.test.tsx app/components/learner-timed-mock.test.tsx app/components/learner-dashboard.test.tsx app/components/learner-attempt-links.test.tsx app/components/learner-sign-in.test.tsx",
+    "test": "tsx --test app/lib/seo.test.ts app/lib/prototype-data.test.ts app/lib/demo-mock.test.ts app/lib/demo-adaptive-mock.test.ts app/lib/practice-flow.test.ts app/components/practice-demo.test.tsx app/components/demo-timed-mock.test.tsx app/components/demo-adaptive-mock.test.tsx app/components/demo-mock-dashboard-links.test.tsx app/components/demo-pro-mock-dashboard-links.test.tsx app/components/protected-csv-tools.test.tsx app/routes/admin-question-editor.test.tsx app/components/learner-practice.test.tsx app/components/learner-timed-mock.test.tsx app/components/learner-dashboard.test.tsx app/components/learner-attempt-links.test.tsx app/components/learner-sign-in.test.tsx",
     "preview": "npm run build && vite preview",
     "db:migrate:local": "wrangler d1 migrations apply certpath-local --local",
     "cf-typegen": "wrangler types",

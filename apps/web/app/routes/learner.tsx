@@ -5,6 +5,7 @@ import type { Route } from "./+types/learner";
 import { PracticeDemo } from "../components/practice-demo";
 import { DemoTimedMock } from "../components/demo-timed-mock";
 import { DemoMockDashboardLinks } from "../components/demo-mock-dashboard-links";
+import { DemoProMockDashboardLinks } from "../components/demo-pro-mock-dashboard-links";
 import { DemoAdaptiveMock } from "../components/demo-adaptive-mock";
 import { WorkspaceShell } from "../components/workspace-shell";
 import {
@@ -206,6 +207,10 @@ function LearnerHome() {
           <p>See first-seen and repeated-question sample statistics separately.</p>
           <Link to="/app/progress">View progress</Link>
         </article>
+      </section>
+
+      <section className="card-grid section-block" aria-label="Pro adaptive mock attempts">
+        <DemoProMockDashboardLinks />
       </section>
     </>
   );
