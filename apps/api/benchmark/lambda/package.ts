@@ -8,6 +8,11 @@ const outputDirectory = resolve(directory, "../../dist/lambda-scrypt-benchmark")
 
 await mkdir(outputDirectory, { recursive: true });
 await build({
+  banner: {
+    // Bundled CommonJS AWS SDK dependencies call require() for Node built-ins,
+    // which an ESM bundle does not define.
+    js: 'import { createRequire as __certpathCreateRequire } from "node:module"; const require = __certpathCreateRequire(import.meta.url);',
+  },
   bundle: true,
   entryPoints: [
     { in: resolve(directory, "handler.ts"), out: "handler" },

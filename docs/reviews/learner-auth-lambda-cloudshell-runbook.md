@@ -110,6 +110,9 @@ npm run verify
 npm run benchmark:lambda:package
 ```
 
+If your local Node.js is not 22, set `CERTPATH_NODE22_PATH` to a Node.js 22
+executable before `npm run verify`; the packaged-runner test requires it.
+
 This creates `apps/api/dist/lambda-scrypt-benchmark/handler.mjs` and
 `runner.mjs` plus `cleanup.mjs`; the directory is ignored by Git. In AWS
 CloudShell, create a stable harness directory and upload all three files to
@@ -481,7 +484,27 @@ Local checks completed:
   failed deletion with exact leftovers, and retry after the failure clears.
 - Bundle smoke test with `LAMBDA_FUNCTION_URL` and `AWS_REGION` unset — passed:
   the runner emitted its expected missing-configuration error, with no module
-  resolution or bundling error. No AWS request was sent.
+  resolution or bundling error. No AWS request was sent. This smoke test did
+  not reach credential resolution, so it missed the failure below.
+- Live-setup finding: the first packaged `runner.mjs` failed locally with
+  `Dynamic require of "node:crypto" is not supported` before sending a signed
+  request. The ESM bundle inlined CommonJS code from the AWS credential
+  provider and SigV4 dependencies that calls `require()` on Node built-ins
+  (`node:crypto`, `node:child_process`, and others). The package script now
+  injects a `createRequire` banner into each bundle. The Function URL still
+  returned 403 to an unsigned request, and cleanup verified all five temporary
+  resources were gone; no benchmark measurements were taken.
+- `apps/api/benchmark/lambda/packaged-runner.test.ts` rebuilds the bundles and
+  runs the built `runner.mjs` under Node.js 22 with the real credential-provider
+  chain: once through a temporary named profile using a fake
+  `credential_process`, and once through a local CloudShell-style
+  `AWS_CONTAINER_CREDENTIALS_FULL_URI` endpoint. A local `fetch` stub captures
+  the request and the test verifies SigV4 for `lambda` in `eu-north-1` with the
+  temporary session token, without printing fixture credentials or
+  authorization headers. The test needs a Node.js 22 executable: it uses the
+  current one when running on Node 22, otherwise the path in
+  `CERTPATH_NODE22_PATH` (CI sets this). The live benchmark must be rerun
+  separately after review.
 
 The CloudShell permission simulation, Function URL regional feature check,
 deployment, Lambda measurements, billing delta, and teardown have not been
