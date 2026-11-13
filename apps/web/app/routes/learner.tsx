@@ -7,6 +7,7 @@ import { DemoTimedMock } from "../components/demo-timed-mock";
 import { DemoMockDashboardLinks } from "../components/demo-mock-dashboard-links";
 import { DemoProMockDashboardLinks } from "../components/demo-pro-mock-dashboard-links";
 import { DemoAdaptiveMock } from "../components/demo-adaptive-mock";
+import { DemoSavedProgress } from "../components/demo-saved-progress";
 import { WorkspaceShell } from "../components/workspace-shell";
 import {
   demoToday,
@@ -640,42 +641,13 @@ function ProgressPage() {
   return (
     <>
       <DemoNotice />
-      <p className="eyebrow">Synthetic statistics only</p>
+      <p className="eyebrow">Browser-saved demo progress</p>
       <h1>Progress</h1>
       <div className="notice" role="note">
-        This prototype contains no actual learner performance and makes no readiness prediction.
+        These illustrative results are saved in this browser only. They are not actual learner
+        performance, synchronized across devices, or a readiness prediction.
       </div>
-      <section className="progress-grid section-block">
-        <article className="card">
-          <h2>First-seen performance</h2>
-          <p className="metric">72% <span>· 25 sample answers</span></p>
-          <p>Each question counted once, at its first submitted response.</p>
-          <div className="progress-track" role="img" aria-label="Synthetic first-seen performance: 72 percent">
-            <span style={{ width: "72%" }} />
-          </div>
-        </article>
-        <article className="card">
-          <h2>Repeated-question performance</h2>
-          <p className="metric">86% <span>· 14 repeat answers</span></p>
-          <p>Repeat responses are separate from first-seen accuracy.</p>
-          <div className="progress-track" role="img" aria-label="Synthetic repeat performance: 86 percent">
-            <span style={{ width: "86%" }} />
-          </div>
-        </article>
-      </section>
-      <section className="card section-block">
-        <h2>Domain sample coverage</h2>
-        <ul className="domain-bars">
-          <li><span>Security and Risk Management · 8 / 12</span><span className="progress-track"><span style={{ width: "67%" }} /></span></li>
-          <li><span>Asset Security · 5 / 10</span><span className="progress-track"><span style={{ width: "50%" }} /></span></li>
-          <li><span>Security Architecture · 2 / 10</span><span className="progress-track"><span style={{ width: "20%" }} /></span></li>
-        </ul>
-      </section>
-      <section className="empty-state section-block" aria-labelledby="empty-progress-title">
-        <h2 id="empty-progress-title">No data for this date range</h2>
-        <p>Example empty state. A real report would need sufficient submitted answers.</p>
-        <Link to="/app/practice/setup">Try illustrative practice</Link>
-      </section>
+      <DemoSavedProgress />
     </>
   );
 }
