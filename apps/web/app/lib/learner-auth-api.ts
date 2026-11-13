@@ -21,6 +21,12 @@ export function isStagingLearnerAuth(): boolean {
   );
 }
 
+export function startGoogleSignIn(): void {
+  if (typeof window !== "undefined") {
+    window.location.assign("/api/auth/google/start");
+  }
+}
+
 function authRoot(): string {
   return isStagingLearnerAuth() ? stagingAuthRoot : localAuthRoot;
 }

@@ -10,6 +10,7 @@ import {
   stagingLearnerAuthOrigin,
   type StagingPasswordVerifier,
 } from "./local-learner-auth.ts";
+import { createGoogleLearnerAuthApi } from "./learner-google-oidc.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
 import {
@@ -30,6 +31,11 @@ type ApiBindings = {
   STAGING_TESTER_IPS?: string;
   STAGING_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
   STAGING_LEARNER_EMAIL?: string;
+  LEARNER_GOOGLE_OIDC_ENABLED?: string;
+  GOOGLE_OIDC_CLIENT_ID?: string;
+  GOOGLE_OIDC_CLIENT_SECRET?: string;
+  GOOGLE_OIDC_REDIRECT_URI?: string;
+  GOOGLE_OIDC_TRANSACTION_KEY?: string;
   STAGING_LOCAL_TEST?: string;
   STAGING_LAMBDA_TEST_STUB?: {
     fetch(input: URL | RequestInfo, init?: RequestInit): Promise<Response>;
@@ -91,6 +97,7 @@ export function createApi(
     "/auth/staging",
     createStagingLearnerAuthApi(now, verifyStagingPassword),
   );
+  application.route("/auth/google", createGoogleLearnerAuthApi(fetcher));
   application.route("/auth/session", createApplicationSessionApi(now));
   application.route("/admin/content", protectedContentApi);
   application.route("/practice", learnerPracticeApi);

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { Route } from "./+types/learner-sign-in";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import {
   isStagingLearnerAuth,
   LearnerAuthApiError,
@@ -47,9 +47,24 @@ function messageForError(error: unknown): string {
   return "Sign-in could not be completed. Please try again.";
 }
 
+function googleErrorMessage(code: string): string {
+  if (code === "not_invited") {
+    return "This Google account is not invited to the CertPath pilot.";
+  }
+  if (code === "invalid_identity_token") {
+    return "Google sign-in could not be verified. Please try again.";
+  }
+  if (code === "provider_error") {
+    return "Google sign-in did not complete. Please try again.";
+  }
+  return "Google sign-in could not be completed. Please try again.";
+}
+
 function LearnerSignInContent() {
   const availability = useLearnerSignInAvailability();
   const isStaging = isStagingLearnerAuth();
+  const [searchParams] = useSearchParams();
+  const googleError = searchParams.get("error");
   const navigate = useNavigate();
   const [mode, setMode] = useState<AuthMode>("sign_in");
   const [email, setEmail] = useState("");
@@ -119,6 +134,22 @@ function LearnerSignInContent() {
                 >
                   Create account
                 </button>
+              </div>
+            )}
+            {googleError && (
+              <p className="form-errors" role="alert">
+                {googleErrorMessage(googleError)}
+              </p>
+            )}
+            {isStaging && (
+              <div
+                className="button-row"
+                role="group"
+                aria-label="Google sign-in"
+              >
+                <a className="button-primary" href="/api/auth/google/start">
+                  Continue with Google
+                </a>
               </div>
             )}
             {error && <p className="form-errors" role="alert">{error}</p>}
