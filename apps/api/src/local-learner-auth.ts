@@ -36,6 +36,7 @@ import {
   LambdaPasswordVerificationError,
   type LambdaPasswordVerifierBindings,
 } from "./security/lambda-password-verifier.ts";
+import { isStagingLocalTestOrigin } from "./security/staging-gate.ts";
 
 type LocalAuthBindings = {
   DB: SecurityDatabase;
@@ -48,6 +49,8 @@ type LocalAuthBindings = {
   STAGING_TESTER_IPS?: string;
   STAGING_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
   STAGING_LEARNER_EMAIL?: string;
+  STAGING_LOCAL_TEST?: string;
+  STAGING_LAMBDA_TEST_STUB?: LambdaPasswordVerifierBindings["STAGING_LAMBDA_TEST_STUB"];
   AWS_ACCESS_KEY_ID?: string;
   AWS_REGION?: string;
   AWS_SECRET_ACCESS_KEY?: string;
@@ -237,13 +240,21 @@ function stagingAuthIsConfigured(bindings: LocalAuthBindings): boolean {
     ?.split(",")
     .map((ip) => ip.trim())
     .filter(Boolean);
+  const allowedOrigin =
+    bindings.PUBLIC_SITE_ORIGIN === stagingLearnerAuthOrigin ||
+    (bindings.STAGING_LOCAL_TEST === "true" &&
+      isStagingLocalTestOrigin(bindings.PUBLIC_SITE_ORIGIN));
+  const localStubConfigured =
+    bindings.STAGING_LOCAL_TEST !== "true" ||
+    Boolean(bindings.STAGING_LAMBDA_TEST_STUB);
   return (
     bindings.STAGING_LEARNER_AUTH_ENABLED === "true" &&
-    bindings.PUBLIC_SITE_ORIGIN === stagingLearnerAuthOrigin &&
+    allowedOrigin &&
     learnerEmail.endsWith("@example.test") &&
     Boolean(testerIps?.length) &&
     Boolean(rateSecret && new TextEncoder().encode(rateSecret).byteLength >= 32) &&
     Boolean(csrfSecret && new TextEncoder().encode(csrfSecret).byteLength >= 32) &&
+    localStubConfigured &&
     Boolean(
       bindings.AWS_ACCESS_KEY_ID &&
         bindings.AWS_SECRET_ACCESS_KEY &&

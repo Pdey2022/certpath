@@ -6,9 +6,11 @@ export default defineConfig({
   plugins: [
     cloudflare({
       viteEnvironment: { name: "ssr" },
-      ...(process.env.VITE_CERTPATH_UI_PREVIEW === "true"
-        ? { configPath: "./wrangler.preview.jsonc" }
-        : {}),
+      ...(process.env.VITE_CERTPATH_STAGING === "true"
+        ? { configPath: "./wrangler.staging.jsonc" }
+        : process.env.VITE_CERTPATH_UI_PREVIEW === "true"
+          ? { configPath: "./wrangler.preview.jsonc" }
+          : {}),
     }),
     reactRouter(),
   ],

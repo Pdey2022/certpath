@@ -12,7 +12,10 @@ import {
 } from "./local-learner-auth.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
-import { stagingTesterGate } from "./security/staging-gate.ts";
+import {
+  isStagingLocalTestOrigin,
+  stagingTesterGate,
+} from "./security/staging-gate.ts";
 
 type ApiBindings = {
   DB: SecurityDatabase;
@@ -27,6 +30,10 @@ type ApiBindings = {
   STAGING_TESTER_IPS?: string;
   STAGING_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
   STAGING_LEARNER_EMAIL?: string;
+  STAGING_LOCAL_TEST?: string;
+  STAGING_LAMBDA_TEST_STUB?: {
+    fetch(input: URL | RequestInfo, init?: RequestInit): Promise<Response>;
+  };
   AWS_ACCESS_KEY_ID?: string;
   AWS_REGION?: string;
   AWS_SECRET_ACCESS_KEY?: string;
@@ -53,7 +60,11 @@ export function createApi(
 
   application.use("*", async (context, next) => {
     if (context.env?.STAGING_LEARNER_AUTH_ENABLED === "true") {
-      if (context.env.PUBLIC_SITE_ORIGIN !== stagingLearnerAuthOrigin) {
+      const allowedOrigin =
+        context.env.PUBLIC_SITE_ORIGIN === stagingLearnerAuthOrigin ||
+        (context.env.STAGING_LOCAL_TEST === "true" &&
+          isStagingLocalTestOrigin(context.env.PUBLIC_SITE_ORIGIN));
+      if (!allowedOrigin) {
         return context.json(
           { error: { code: "service_unavailable" } },
           503,

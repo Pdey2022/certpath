@@ -218,6 +218,46 @@ describe("staging learner authentication", () => {
 });
 
 describe("staging Lambda password verifier", () => {
+  it("uses only the explicitly supplied local Worker stub in local-test mode", async () => {
+    let capturedHeaders: Headers | undefined;
+    const stub = vi.fn<typeof fetch>(async (_input, init) => {
+      capturedHeaders = new Headers(init?.headers);
+      return Response.json({ operation: "verify", verified: true });
+    });
+    const outboundFetch = vi.fn<typeof fetch>(async () => {
+      throw new Error("Local test must not make an outbound request");
+    });
+    const verifier = createLambdaPasswordVerifier(outboundFetch);
+    const result = await verifier(
+      "synthetic-only-password",
+      "$scrypt$synthetic-encoded-hash",
+      {
+        AWS_ACCESS_KEY_ID: "AKIAFIXTUREACCESS00",
+        AWS_REGION: "eu-north-1",
+        AWS_SECRET_ACCESS_KEY: "fixture-secret-access-key-not-real",
+        AWS_SESSION_TOKEN: "fixture-session-token-not-real",
+        LAMBDA_FUNCTION_URL: functionUrl,
+        STAGING_LOCAL_TEST: "true",
+        STAGING_LAMBDA_TEST_STUB: {
+          fetch: stub,
+        },
+      },
+    );
+
+    expect(result).toBe(true);
+    expect(stub.mock.calls.length).toBe(1);
+    expect(outboundFetch.mock.calls.length).toBe(0);
+    expect(
+      /^AWS4-HMAC-SHA256 Credential=AKIAFIXTUREACCESS00\/\d{8}\/eu-north-1\/lambda\/aws4_request,/.test(
+        capturedHeaders?.get("authorization") ?? "",
+      ),
+    ).toBe(true);
+    expect(
+      capturedHeaders?.get("x-amz-security-token") ===
+        "fixture-session-token-not-real",
+    ).toBe(true);
+  });
+
   it("sends one SigV4-signed Lambda request with temporary session credentials", async () => {
     const credentials = {
       AWS_ACCESS_KEY_ID: "AKIAFIXTUREACCESS00",

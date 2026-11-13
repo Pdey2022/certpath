@@ -30,6 +30,19 @@ deploy it. Local regression tests use the Cloudflare Vitest D1 fixture and a
 stubbed verifier; a separate test captures a locally signed request using
 synthetic credentials.
 
+Build the local-review bundle from the repository root with:
+
+```powershell
+npm run build:staging
+```
+
+This selects `apps/web/wrangler.staging.jsonc`, writes the Worker bundle under
+`apps/web/build/server`, and verifies both the generated Wrangler config and
+source map identify `workers/staging-app.ts`. It only builds; it does not
+provision or deploy resources. The local-only HTTPS integration harness may
+use a self-bound verifier stub and an isolated D1 persistence directory; those
+test bindings are not part of the staging Wrangler config.
+
 Deployed validation remains blocked. The unchanged scrypt profile has prior
 19–20 ms Worker CPU observations against the Workers Free 10 ms per-request
 limit. No hashing parameters were changed. Obtain reviewed, deployed CPU and

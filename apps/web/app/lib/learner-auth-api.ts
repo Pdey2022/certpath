@@ -10,11 +10,14 @@ const localAuthRoot = "/api/auth/local";
 const stagingAuthRoot = "/api/auth/staging";
 const stagingAuthOrigin =
   "https://learner-auth-staging.certpath.workers.dev";
+const localStagingAuthOrigin =
+  import.meta.env?.VITE_CERTPATH_STAGING_LOCAL_ORIGIN;
 
 export function isStagingLearnerAuth(): boolean {
   return (
     typeof window !== "undefined" &&
-    window.location.origin === stagingAuthOrigin
+    (window.location.origin === stagingAuthOrigin ||
+      window.location.origin === localStagingAuthOrigin)
   );
 }
 

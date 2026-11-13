@@ -7,6 +7,10 @@ export interface LambdaPasswordVerifierBindings {
   AWS_SECRET_ACCESS_KEY?: string;
   AWS_SESSION_TOKEN?: string;
   LAMBDA_FUNCTION_URL?: string;
+  STAGING_LOCAL_TEST?: string;
+  STAGING_LAMBDA_TEST_STUB?: {
+    fetch(input: URL | RequestInfo, init?: RequestInit): Promise<Response>;
+  };
 }
 
 export class LambdaPasswordVerificationError extends Error {
@@ -78,6 +82,14 @@ export function createLambdaPasswordVerifier(
         "Staging Lambda verification is not configured",
       );
     }
+    if (
+      bindings.STAGING_LOCAL_TEST === "true" &&
+      !bindings.STAGING_LAMBDA_TEST_STUB
+    ) {
+      throw new LambdaPasswordVerificationError(
+        "Local staging Lambda verifier stub is not configured",
+      );
+    }
 
     const credentials: TemporaryCredentials = {
       accessKeyId,
@@ -100,7 +112,13 @@ export function createLambdaPasswordVerifier(
 
     let response: Response;
     try {
-      response = await fetcher(url, {
+      const requestFetch =
+        bindings.STAGING_LOCAL_TEST === "true"
+          ? bindings.STAGING_LAMBDA_TEST_STUB!.fetch.bind(
+              bindings.STAGING_LAMBDA_TEST_STUB,
+            )
+          : fetcher;
+      response = await requestFetch(url, {
         body,
         headers,
         method: "POST",

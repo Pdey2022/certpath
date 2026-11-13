@@ -2,6 +2,22 @@ export interface StagingGateBindings {
   STAGING_TESTER_IPS?: string;
 }
 
+export function isStagingLocalTestOrigin(
+  value: string | undefined,
+): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return (
+      url.origin === value &&
+      url.protocol === "https:" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function stagingTesterGate(
   request: { headers: Headers },
   bindings: StagingGateBindings,
