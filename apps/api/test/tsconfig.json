@@ -9,6 +9,8 @@
     "./**/*.ts",
     "./worker-env.d.ts",
     "../benchmark/lambda/**/*.ts",
-    "../benchmark/worker-lambda/**/*.ts"
+    "../benchmark/worker-lambda/**/*.ts",
+    "../benchmark/learner-signin-d1/**/*.ts"
   ]
 }
+
