@@ -122,6 +122,25 @@ describe("Worker-to-Lambda scrypt benchmark", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("signs the CPU probe locally without any network call and only for the tester", async () => {
+    const { fetcher } = fakeLambda();
+    const worker = createWorkerLambdaBenchmark(fetcher);
+    const probe = (headers: Record<string, string>) =>
+      worker.fetch(
+        new Request("https://benchmark.test/signing-probe", {
+          headers,
+          method: "POST",
+        }),
+        environment,
+      );
+
+    expect((await probe({ "CF-Connecting-IP": "198.51.100.2" })).status).toBe(403);
+    const response = await probe(testerHeaders);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ signed: 10 });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("rejects malformed run requests before invoking Lambda", async () => {
     const { fetcher } = fakeLambda();
     const response = await createWorkerLambdaBenchmark(fetcher).fetch(

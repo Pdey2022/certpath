@@ -366,6 +366,23 @@ export function createWorkerLambdaBenchmark(
       if (request.method === "GET" && url.pathname === "/") {
         return jsonResponse({ ready: true });
       }
+      if (request.method === "POST" && url.pathname === "/signing-probe") {
+        // Local-only CPU telemetry check: signs without any network call.
+        const probeUrl = new URL("https://probe.lambda-url.eu-north-1.on.aws/hash");
+        for (let index = 0; index < 10; index += 1) {
+          await signLambdaRequest({
+            body: "{}",
+            credentials: {
+              accessKeyId: "AKIAPROBE000000000",
+              secretAccessKey: "probe-secret-not-real",
+              sessionToken: "probe-token-not-real",
+            },
+            region: "eu-north-1",
+            url: probeUrl,
+          });
+        }
+        return jsonResponse({ signed: 10 });
+      }
       if (request.method !== "POST" || url.pathname !== "/run") {
         return new Response("Not found", { status: 404 });
       }
