@@ -140,7 +140,8 @@ export function createLambdaInvoker(
       body,
       headers,
       method: "POST",
-      redirect: "error",
+      // Workers does not implement redirect: "error"; any 3xx is treated as a failure below.
+      redirect: "manual",
       signal: AbortSignal.timeout(callTimeoutMs),
     });
     const roundTripMs = performance.now() - startedAt;

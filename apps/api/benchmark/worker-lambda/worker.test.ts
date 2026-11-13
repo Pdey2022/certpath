@@ -157,7 +157,7 @@ describe("Worker-to-Lambda scrypt benchmark", () => {
     ).toBe(true);
     for (const call of mock.mock.calls) {
       const headers = call[1]?.headers as Headers;
-      expect(call[1]?.redirect).toBe("error");
+      expect(call[1]?.redirect).toBe("manual");
       expect(
         /^AWS4-HMAC-SHA256 Credential=[^/]+\/\d{8}\/eu-north-1\/lambda\/aws4_request, /.test(
           headers.get("authorization") ?? "",
