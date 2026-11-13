@@ -12,6 +12,7 @@ import {
   practiceDemoStorageKey,
   proDurationMonths,
   type DemoEntitlement,
+  type PracticeDemoState,
   type ProAccessState,
 } from "../lib/prototype-data";
 
@@ -111,6 +112,47 @@ function DemoNotice() {
   );
 }
 
+function ContinuePracticeCard() {
+  const [saved, setSaved] = useState<PracticeDemoState | null | undefined>(undefined);
+
+  useEffect(() => {
+    try {
+      setSaved(parsePracticeDemoState(window.localStorage.getItem(practiceDemoStorageKey)));
+    } catch {
+      setSaved(null);
+    }
+  }, []);
+
+  const answered = saved ? saved.answers.filter((answer) => answer !== null).length : 0;
+
+  return (
+    <article className="feature-card">
+      <p className="eyebrow">Continue studying · CISSP</p>
+      <h2>{saved ? "Pick up your practice" : "Start your practice"}</h2>
+      {saved === undefined ? (
+        <p role="status">Checking this browser for a saved session…</p>
+      ) : saved ? (
+        <>
+          <p>
+            Question {saved.questionIndex + 1} of {demoQuestions.length} · {answered} answered ·
+            saved in this browser
+          </p>
+          <Link className="button-primary" to="/app/practice/session">
+            Continue practice
+          </Link>
+        </>
+      ) : (
+        <>
+          <p>No saved practice session in this browser yet.</p>
+          <Link className="button-primary" to="/app/practice/setup">
+            Start practice
+          </Link>
+        </>
+      )}
+    </article>
+  );
+}
+
 function LearnerHome() {
   return (
     <>
@@ -118,14 +160,7 @@ function LearnerHome() {
       <p className="eyebrow">Tuesday, 10 November 2026 · synthetic demo</p>
       <h1>Welcome back, learner</h1>
       <section className="dashboard-grid">
-        <article className="feature-card">
-          <p className="eyebrow">Continue studying · CISSP</p>
-          <h2>Pick up your practice</h2>
-          <p>Question 7 of 15 · sample session · saved 2 minutes ago in this browser</p>
-          <Link className="button-primary" to="/app/practice/session">
-            Continue practice
-          </Link>
-        </article>
+        <ContinuePracticeCard />
         <article className="card recommendation-card">
           <p className="eyebrow">Recommended next</p>
           <h2>Review Security and Risk Management</h2>
