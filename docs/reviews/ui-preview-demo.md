@@ -61,9 +61,12 @@ mock adapts among the same three synthetic questions: correct answers target
 Intermediate difficulty and incorrect answers target Foundational when available.
 Answers lock on submission; the final score and explanations are saved separately
 for CISSP and CISM in browser storage. This small heuristic is not a validated
-adaptive exam or official result. Progress, access, customers,
-payments, and audit data are fixed
-fixtures. The live-API pages (`/app/home`, `/app/practice/live`,
+adaptive exam or official result. Access, customers, payments, and audit data
+remain fixed fixtures. The Progress page reads the shared browser-saved
+practice session and exam-specific timed and Pro mock attempts. Because
+practice has no exam label, it is shown separately rather than attributed to
+CISSP or CISM. The
+live-API pages (`/app/home`, `/app/practice/live`,
 `/app/mock/live`, `/sign-in`, and related) are not linked and do not work here.
 
 ## Workers Free check (before deploy)
