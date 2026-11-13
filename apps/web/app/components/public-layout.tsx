@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { Link } from "react-router";
+import { isUiPreview } from "../lib/preview-mode";
 
 type LearnerSignInAvailability =
   | "checking"
@@ -48,10 +49,12 @@ export function useLearnerSignInAvailability() {
 }
 
 export function PublicLayout({ children }: { children: React.ReactNode }) {
-  const [availability, setAvailability] =
-    useState<LearnerSignInAvailability>("checking");
+  const [availability, setAvailability] = useState<LearnerSignInAvailability>(
+    isUiPreview ? "unavailable" : "checking",
+  );
 
   useEffect(() => {
+    if (isUiPreview) return;
     let active = true;
     void checkLearnerSignInAvailability().then((result) => {
       if (active) setAvailability(result);
@@ -74,7 +77,13 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
             </Link>
             <nav className="public-nav" aria-label="Public navigation">
               <Link to="/exams">Exams</Link>
-              {availability === "enabled" ? (
+              {isUiPreview ? (
+                <>
+                  <Link to="/app">Learner demo</Link>
+                  <Link to="/admin?demoRole=manager">Manager demo</Link>
+                  <Link to="/admin">Global Admin demo</Link>
+                </>
+              ) : availability === "enabled" ? (
                 <Link to="/sign-in">Learner sign in</Link>
               ) : (
                 <span className="public-nav-status" role="status">
@@ -85,7 +94,7 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
                       : "Learner sign-in unavailable"}
                 </span>
               )}
-              <Link to="/app">Learner preview</Link>
+              {!isUiPreview && <Link to="/app">Learner preview</Link>}
             </nav>
           </div>
         </header>

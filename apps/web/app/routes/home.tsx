@@ -1,4 +1,5 @@
 import { Link } from "react-router";
+import { isUiPreview } from "../lib/preview-mode";
 import type { Route } from "./+types/home";
 import { PublicLayout } from "../components/public-layout";
 import { cloudflareContext } from "../lib/cloudflare-context";
@@ -43,6 +44,25 @@ export default function Home() {
           </Link>
         </section>
 
+        {isUiPreview && (
+          <section aria-labelledby="walkthrough-title">
+            <h2 id="walkthrough-title">Demo walkthrough</h2>
+            <p className="prototype-notice" role="note">
+              Preview only: synthetic data, no sign-in, no saved progress, no
+              payments. Role switching is a client-side demo control.
+            </p>
+            <ul>
+              <li><Link to="/exams">Exam catalogue</Link></li>
+              <li><Link to="/app">Learner dashboard</Link></li>
+              <li><Link to="/app/exams/cissp">CISSP workspace</Link></li>
+              <li><Link to="/app/practice">Practice</Link></li>
+              <li><Link to="/app/exams/cissp/mock">Timed mock preview</Link></li>
+              <li><Link to="/app/progress">Progress</Link></li>
+              <li><Link to="/admin">Global Admin preview</Link></li>
+              <li><Link to="/admin?demoRole=manager">Manager preview</Link></li>
+            </ul>
+          </section>
+        )}
         <section aria-labelledby="approach-title">
           <h2 id="approach-title">A focused study experience</h2>
           <div className="card-grid">

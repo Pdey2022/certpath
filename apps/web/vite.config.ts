@@ -4,7 +4,12 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [
-    cloudflare({ viteEnvironment: { name: "ssr" } }),
+    cloudflare({
+      viteEnvironment: { name: "ssr" },
+      ...(process.env.VITE_CERTPATH_UI_PREVIEW === "true"
+        ? { configPath: "./wrangler.preview.jsonc" }
+        : {}),
+    }),
     reactRouter(),
   ],
   resolve: {
