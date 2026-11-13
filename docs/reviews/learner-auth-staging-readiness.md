@@ -9,18 +9,32 @@ was upgraded. PR #15 and the staff MFA/Cognito sandboxes remain untouched.
 
 ## Readiness summary
 
-Two unresolved gates prevent a staging test:
+The HTTPS sign-in path is implemented for local review only. No Cloudflare or
+AWS resources were created or changed, no email was sent, and no credentials
+were provisioned.
 
-1. The current learner-auth implementation is intentionally restricted to
-   loopback origins. Its local-only configuration also enables the synthetic
-   in-memory inbox. It cannot safely be enabled on a staging Worker by setting
-   the existing `LOCAL_*` flags. A separate staging gate and real email
-   adapter require architect review.
-2. The current scrypt measurements indicate a likely Workers Free CPU-limit
-   mismatch and a potential per-isolate memory risk under concurrent
-   sign-ins. No hashing parameters were changed. Get deployed Worker CPU and
-   memory evidence before deciding whether the profile or hosting plan is
-   acceptable.
+The existing local learner-auth path remains loopback-only and retains its
+local test inbox. Staging uses a separate router and Worker entry; it does not
+enable `LOCAL_*`, registration, recovery, email, scheduled work, or the
+synthetic inbox. The staging Worker is gated by a tester IP allowlist before
+dispatching any request. Sign-in requires the exact staging HTTPS origin and a
+pre-auth CSRF cookie/token pair. It uses a Secure `__Host-` session cookie,
+existing D1 learner/exam authorization and rate limits, and one SigV4-signed
+verification request to a fixed `eu-north-1` Lambda Function URL per eligible
+attempt. The signer requires a temporary session token; staging configuration
+and credentials are not included in the repository.
+
+The staging Wrangler configuration intentionally contains a placeholder D1
+identifier and no secrets, tester allowlist, Lambda URL, or credentials. Do not
+deploy it. Local regression tests use the Cloudflare Vitest D1 fixture and a
+stubbed verifier; a separate test captures a locally signed request using
+synthetic credentials.
+
+Deployed validation remains blocked. The unchanged scrypt profile has prior
+19–20 ms Worker CPU observations against the Workers Free 10 ms per-request
+limit. No hashing parameters were changed. Obtain reviewed, deployed CPU and
+memory evidence before considering any pilot; do not upgrade an account or
+exceed the $0 out-of-pocket cap.
 
 ## Local Worker scrypt measurements
 
@@ -75,12 +89,12 @@ exceeded, stop and obtain architect/owner approval for an alternative
 implementation or hosting decision; do not silently weaken the password
 hashing profile or upgrade an account.
 
-## Email delivery recommendation: Amazon SES
+## Prior email research (not in scope)
 
-Recommend evaluating **Amazon SES** as an outbound delivery transport only.
-CertPath would continue to own password hashes, verification/reset policy,
-application sessions, identities, roles, and exam grants. SES would not become
-an authentication or authorization provider.
+The staging-only implementation uses a pre-provisioned synthetic learner and
+does not send email or expose registration, verification, or password-recovery
+routes. The following earlier SES research is retained for context only; it is
+not authorization to provision SES or send messages.
 
 Official SES documentation reviewed on 13 November 2026 says:
 
@@ -111,79 +125,51 @@ identity state. The Worker-to-SES authentication mechanism and least-privilege
 permissions also need review; no long-lived credential approach is approved
 here.
 
-## Future isolated staging runbook
+## Future isolated staging CPU validation
 
-This is a checklist for a later, approved staging slice; none of these steps
-were performed here.
+This is a checklist for a later, separately approved validation; none of these
+steps were performed here.
 
 ### Preconditions and isolation
 
-1. Obtain owner/architect approval for the deployed scrypt CPU/memory results,
-   the email cost gate, staging origin, test address, and staging-only enable
-   controls.
-2. Verify current AWS plan/credits and SES account state in the selected
-   region. Confirm the sender identity and the one controlled recipient are
-   verified in that region, and that the expected sends remain within the
-   approved $0 out-of-pocket cap.
-3. Use a separate staging Worker and D1 database. Do not reuse the staff
-   Cognito sandbox, learner Cognito sandbox, production resources, or local
-   D1. Keep test data synthetic apart from the one real inbox address needed
-   for delivery.
-4. Add and validate a backend allowlist for exactly one test learner and a
-   tester-network restriction before enabling sign-in. Do not rely on a
-   client-side-only restriction.
-5. The current local-only code refuses non-loopback origins. Build and review
-   a distinct staging configuration and production-mail adapter before this
-   test. Keep `LOCAL_LEARNER_AUTH_ENABLED` and
-   `LOCAL_TEST_MAIL_ENABLED` disabled; do not bypass the loopback guard.
-   Ensure the synthetic inbox UI/API is unavailable in staging and verify the
-   API does not expose verification or reset links.
-6. Keep sign-in disabled while validating the staging origin, network
-   restriction, one-address allowlist, SES sender/recipient identities,
-   secret bindings, and logging redaction. Enable the test only after these
-   checks pass.
-
-### One-learner test
-
-1. Register the single allowlisted learner by email only. Confirm that no
-   session or exam grant exists before mailbox verification.
-2. Deliver a verification message through SES to the verified, owner-controlled
-   test inbox. Complete verification and choose the password on the
-   verification page. Confirm the token is single-use, only a salted hash is
-   stored, and the learner receives no staff role.
-3. Sign in and confirm `/app/home` shows no exam access before a grant exists.
-   Use an explicitly reviewed, staging-only and audited operation to grant
-   `Standard` access to exactly one exam. Confirm that exam is visible and a
-   second exam remains inaccessible.
-4. Request password reset, complete it from the test inbox, and confirm the
-   reset revokes the existing CertPath D1 session. Sign in with the new
-   password and verify the one-exam boundary again.
-5. Sign out through the CSRF-protected session endpoint. Confirm the D1
-   session is revoked and the old session cannot access `/app/home`.
-6. Confirm application logs contain no passwords, raw verification/reset
-   links, cookies, or raw session tokens. Record SES delivery/usage and
-   account billing evidence separately.
-
-Public registration must remain closed except for the exact allowlisted test
-address. No public or learner session may assign a staff role. Any staff/admin
-route continues to require the existing Global Admin or exam-scoped Manager
-authorization and fresh, signed authenticator-app MFA evidence. Since the
-staff MFA sandbox remains parked, do not use an admin UI or add a staging
-admin bypass; use only the separately approved, audited staging grant setup.
+1. Before provisioning, verify current Cloudflare Workers Free capacity and
+   AWS Free plan/eligible credits, regional capacity, invocation permissions,
+   and expected usage. Proceed only if the bounded work remains within the $0
+   out-of-pocket cap without payment or upgrade.
+2. Obtain owner/architect review of the unchanged scrypt profile and prior
+   19–20 ms CPU observations. Use a separate staging Worker and D1 database;
+   never reuse production, local D1, or either Cognito sandbox.
+3. Keep the staging Worker disabled until the exact origin,
+   `STAGING_TESTER_IPS`, one pre-provisioned `@example.test` learner, isolated
+   D1, and fixed `eu-north-1` `AWS_IAM` Function URL are verified. Store only
+   short-lived, invoke-only AWS credentials as Worker secrets. Keep all
+   `LOCAL_*` flags, email, cron jobs, registration, recovery, payments, and
+   production integrations off.
+4. Verify unauthorized requests are rejected before D1 or Lambda work, and
+   unsigned Function URL requests are rejected. Confirm the function
+   permission is scoped only to invoking that test function through its URL.
+5. After review, run 50 sequential sign-in attempts across the configured
+   rate-limit windows, with idle gaps and rate limits enabled. Report attempts
+   reaching Lambda separately from early rejections. Do not retry Lambda
+   requests. Capture full Worker CPU including middleware and D1, plus
+   end-to-end latency; report maximum CPU and counts above 5 ms and at or above
+   10 ms. Hold for review above 5 ms and stop at 10 ms or on any CPU-limit
+   error. Never report wall time as Worker CPU.
+6. Confirm successful sign-in/dashboard access, wrong-password rejection,
+   single-exam server-side authorization, and logout revocation. Keep
+   passwords, hashes, credentials, cookies, signed headers, and request bodies
+   out of logs and evidence. Record unavailable metrics as unmeasured.
 
 ### Teardown
 
-1. Disable staging learner sign-in and remove the test-network and learner
-   allowlists.
-2. Revoke active CertPath sessions and remove the synthetic learner,
-   password credential, verification/reset tokens, audit fixtures, and
-   one-exam grant from staging D1.
-3. Remove staging-only Worker secrets and the email adapter configuration.
-   Revoke any staging-only SES credentials. Remove only SES identities and DNS
-   records created specifically for this test; preserve shared identities.
-4. Delete the isolated staging Worker and D1 database when no longer needed.
-   Review account usage/billing for delayed SES charges against the approved
-   cap.
+1. Disable staging sign-in and remove the tester allowlist.
+2. Revoke sessions and remove the synthetic learner, password credential,
+   audit fixtures, and one-exam grant from staging D1.
+3. Remove staging Worker secrets and revoke the short-lived AWS credentials
+   and function-URL permission created for the run.
+4. Delete only the isolated staging Worker and D1 resources created for the
+   run. Confirm cleanup and review pre/post usage, credits, and any pending
+   billing.
 
 ## Local validation
 

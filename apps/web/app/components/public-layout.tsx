@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { Link } from "react-router";
 import { isUiPreview } from "../lib/preview-mode";
+import { getLearnerAuthPreflight } from "../lib/learner-auth-api";
 
 type LearnerSignInAvailability =
   | "checking"
@@ -11,37 +12,13 @@ type LearnerSignInAvailability =
 const LearnerSignInAvailabilityContext =
   createContext<LearnerSignInAvailability>("unavailable");
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 async function checkLearnerSignInAvailability(): Promise<LearnerSignInAvailability> {
-  let response: Response;
   try {
-    response = await fetch("/api/auth/local/preflight", {
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
+    const body = await getLearnerAuthPreflight();
+    return body.signInEnabled ? "enabled" : "disabled";
   } catch {
     return "unavailable";
   }
-  if (!response.ok) return "unavailable";
-
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return "unavailable";
-  }
-  if (
-    !isRecord(body) ||
-    typeof body.signInEnabled !== "boolean" ||
-    typeof body.localMailboxEnabled !== "boolean"
-  ) {
-    return "unavailable";
-  }
-  return body.signInEnabled ? "enabled" : "disabled";
 }
 
 export function useLearnerSignInAvailability() {
