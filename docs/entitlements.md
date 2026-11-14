@@ -21,6 +21,7 @@ One row per purchased or granted window:
 | `operation_id`, `created_by_user_id` | audit identity; inserts with an operation are audited automatically |
 
 Grants are never deleted and never edited in place: revoke, then grant again.
+Both are enforced by triggers, not by convention.
 
 ## States
 
@@ -47,6 +48,13 @@ Grace is read-only on purpose. Capabilities:
 - A `pro` grant is rejected unless a non-revoked `standard` grant for the same
   learner and certification covers its whole window. Pro can never outlive
   Standard, even if application code is wrong.
+- A grant is immutable after insert. Any `UPDATE` that touches a column other
+  than the revocation trio, or that touches an already-revoked row, is rejected
+  — refunds and corrections are a revocation plus a new grant, never an edit.
+  This is what stops a window being shortened out from under a Pro grant.
+- Revoking a `standard` grant is rejected when it would leave a live `pro`
+  grant with no covering `standard` grant. Revoke the Pro grant first.
+- Grants cannot be deleted.
 - Grants carrying an `operation_id` write an `access_granted` audit event; a
   revocation writes `access_revoked`. The event names the staff member who acted
   as `actor_user_id`, and falls back to the `access-grant` service ref only when

@@ -17,6 +17,7 @@ import {
   createTestIdentity,
   createTestSessionCredentials,
   grantTestLearnerAccess,
+  replaceGrantExpiry,
 } from "./factories.ts";
 import {
   contentMfaPolicy,
@@ -395,10 +396,12 @@ describe("protected learner practice Worker/D1 boundary", () => {
       ),
     ).toMatchObject({ resumable: [], completed: [] });
 
-    await database
-      .prepare("UPDATE learner_access_grants SET expires_at = ? WHERE user_id = ? AND certification_id = ?")
-      .bind(Date.now() - 1, learner.userId, scope.certificationId)
-      .run();
+    await replaceGrantExpiry(
+      database,
+      learner.userId,
+      Date.now() - 1,
+      scope.certificationId,
+    );
     const expiredDashboard = await request(learner, "/dashboard");
     assertPrivate(expiredDashboard);
     expect(await expiredDashboard.json()).toMatchObject({
@@ -604,10 +607,7 @@ describe("protected learner practice Worker/D1 boundary", () => {
     });
     expect(crossVersionDomain.status).toBe(404);
 
-    await database
-      .prepare("UPDATE learner_access_grants SET expires_at = ? WHERE user_id = ?")
-      .bind(Date.now() - 1, learner.userId)
-      .run();
+    await replaceGrantExpiry(database, learner.userId, Date.now() - 1);
     const expiredScopes = await (await request(learner, "/scopes")).json();
     expect(expiredScopes).toMatchObject({ items: [] });
     const expiredAttempt = await request(learner, `/attempts/${body.attempt.id}`);
@@ -1251,12 +1251,12 @@ describe("protected learner practice Worker/D1 boundary", () => {
     const started = await createTimedMock(learner, scope);
     expect(started.response.status).toBe(201);
     const attemptId = started.body.attempt.id;
-    await database
-    .prepare(
-      "UPDATE learner_access_grants SET expires_at = ? WHERE user_id = ? AND certification_id = ?",
-    )
-    .bind(started.body.attempt.deadlineAt - 1000, learner.userId, scope.certificationId)
-    .run();
+    await replaceGrantExpiry(
+      database,
+      learner.userId,
+      started.body.attempt.deadlineAt - 1000,
+      scope.certificationId,
+    );
 
     vi.useFakeTimers();
     try {
@@ -1265,12 +1265,12 @@ describe("protected learner practice Worker/D1 boundary", () => {
     assertPrivate(expiredAccess);
     expect(expiredAccess.status).toBe(403);
 
-    await database
-      .prepare(
-        "UPDATE learner_access_grants SET expires_at = ? WHERE user_id = ? AND certification_id = ?",
-      )
-      .bind(started.body.attempt.deadlineAt + 60_000, learner.userId, scope.certificationId)
-      .run();
+    await replaceGrantExpiry(
+      database,
+      learner.userId,
+      started.body.attempt.deadlineAt + 60_000,
+      scope.certificationId,
+    );
     const stillRunning = await request(learner, `/mocks/${attemptId}`);
     expect(stillRunning.status).toBe(200);
     expect((await stillRunning.json()).attempt).toMatchObject({
