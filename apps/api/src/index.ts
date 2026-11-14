@@ -19,6 +19,7 @@ import {
 } from "./staff-auth.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
+import { adminLearnersApi } from "./admin-learners.ts";
 import {
   isStagingLocalTestOrigin,
   stagingTesterGate,
@@ -117,6 +118,7 @@ export function createApi(
   application.route("/auth/google", createGoogleLearnerAuthApi(fetcher));
   application.route("/auth/session", createApplicationSessionApi(now));
   application.route("/admin/auth", createStaffAuthApi(now, staffVerifier));
+  application.route("/admin", adminLearnersApi);
   application.route("/admin/content", protectedContentApi);
   application.route("/practice", learnerPracticeApi);
   return application;

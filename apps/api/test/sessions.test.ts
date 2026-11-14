@@ -68,9 +68,16 @@ describe("local application sessions and identities", () => {
     const identity = await createTestIdentity(database);
     const digest = await createTestSession(database, identity.userId);
 
+    // 0016 requires a witness for every disable, so this fixture names one.
     await database
-      .prepare("UPDATE users SET status = 'disabled', updated_at = ? WHERE id = ?")
-      .bind(testNow + 1, identity.userId)
+      .prepare(
+        `UPDATE users
+         SET status = 'disabled',
+             deactivation_operation_id = ?,
+             updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(`fixture-disable:${crypto.randomUUID()}`, testNow + 1, identity.userId)
       .run();
 
     expect(

@@ -41,6 +41,7 @@ import {
 import {
   findActiveApplicationSession,
 } from "./security/repository.ts";
+import { isContactIdentityAbort } from "./security/learner-access.ts";
 import { revokeOwnApplicationSession } from "./security/mutations.ts";
 import {
   createLambdaPasswordVerifier,
@@ -491,60 +492,80 @@ export function createLocalLearnerAuthApi(
     const tokenDigest = await sessionDigest(token);
     const operationId = `register:${crypto.randomUUID()}`;
     const expiry = timestamp + verificationLifetimeMs;
-    const results = await context.env.DB.batch([
-      context.env.DB.prepare(
-        `INSERT INTO users (id, status, created_at, updated_at)
-         SELECT ?, 'active', ?, ?
-         WHERE NOT EXISTS (
-           SELECT 1 FROM learner_password_credentials
-           WHERE email_normalized = ?
-         )
-         RETURNING id`,
-      ).bind(userId, timestamp, timestamp, email),
-      context.env.DB.prepare(
-        `INSERT INTO learner_password_credentials (
-           user_id, email, email_normalized, subject, password_hash,
-           email_verified_at, created_at, updated_at
-         )
-        SELECT ?, ?, ?, ?, NULL, NULL, ?, ?
-         WHERE EXISTS (SELECT 1 FROM users WHERE id = ?)
-           AND NOT EXISTS (
+    let results: Array<{ meta: { changes: number } }>;
+    try {
+      results = await context.env.DB.batch([
+        context.env.DB.prepare(
+          `INSERT INTO users (id, status, created_at, updated_at)
+           SELECT ?, 'active', ?, ?
+           WHERE NOT EXISTS (
              SELECT 1 FROM learner_password_credentials
              WHERE email_normalized = ?
            )
-         ON CONFLICT(email_normalized) DO NOTHING
-         RETURNING user_id`,
-      ).bind(
-        userId,
-        input.email.trim(),
-        email,
-        subject,
-        timestamp,
-        timestamp,
-        userId,
-        email,
-      ),
-      context.env.DB.prepare(
-        `INSERT INTO learner_auth_tokens (
-           token_digest, user_id, purpose, created_at, expires_at
-         )
-         SELECT ?, user_id, 'verify_email', ?, ?
-         FROM learner_password_credentials
-         WHERE user_id = ? AND email_verified_at IS NULL
-         RETURNING user_id`,
-      ).bind(tokenDigest, timestamp, expiry, userId),
-      context.env.DB.prepare(
-        `INSERT INTO audit_events (
-           operation_id, actor_user_id, actor_ref, action, subject_type,
-           subject_id, certification_id, reason, occurred_at
-         )
-         SELECT ?, NULL, 'learner-self-registration', 'learner_registered',
-                'user', user_id, NULL, 'Learner self-registration', ?
-         FROM learner_password_credentials
-         WHERE user_id = ?
-         RETURNING operation_id`,
-      ).bind(operationId, timestamp, userId),
-    ]);
+             AND NOT EXISTS (
+               SELECT 1 FROM learner_email_sign_in_invites
+               WHERE email_normalized = ?
+             )
+           RETURNING id`,
+        ).bind(userId, timestamp, timestamp, email, email),
+        context.env.DB.prepare(
+          `INSERT INTO learner_password_credentials (
+             user_id, email, email_normalized, subject, password_hash,
+             email_verified_at, created_at, updated_at
+           )
+          SELECT ?, ?, ?, ?, NULL, NULL, ?, ?
+           WHERE EXISTS (SELECT 1 FROM users WHERE id = ?)
+             AND NOT EXISTS (
+               SELECT 1 FROM learner_password_credentials
+               WHERE email_normalized = ?
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM learner_email_sign_in_invites
+               WHERE email_normalized = ?
+             )
+           ON CONFLICT(email_normalized) DO NOTHING
+           RETURNING user_id`,
+        ).bind(
+          userId,
+          input.email.trim(),
+          email,
+          subject,
+          timestamp,
+          timestamp,
+          userId,
+          email,
+          email,
+        ),
+        context.env.DB.prepare(
+          `INSERT INTO learner_auth_tokens (
+             token_digest, user_id, purpose, created_at, expires_at
+           )
+           SELECT ?, user_id, 'verify_email', ?, ?
+           FROM learner_password_credentials
+           WHERE user_id = ? AND email_verified_at IS NULL
+           RETURNING user_id`,
+        ).bind(tokenDigest, timestamp, expiry, userId),
+        context.env.DB.prepare(
+          `INSERT INTO audit_events (
+             operation_id, actor_user_id, actor_ref, action, subject_type,
+             subject_id, certification_id, reason, occurred_at
+           )
+           SELECT ?, NULL, 'learner-self-registration', 'learner_registered',
+                  'user', user_id, NULL, 'Learner self-registration', ?
+           FROM learner_password_credentials
+           WHERE user_id = ?
+           RETURNING operation_id`,
+        ).bind(operationId, timestamp, userId),
+      ]);
+    } catch (error) {
+      // An address that is already provisioned as a sign-in invite must be
+      // indistinguishable from a fresh one: the storage trigger's residual abort
+      // answers with the same accepted body, and writes nothing.
+      if (isContactIdentityAbort(error)) {
+        return context.json(responseMessage(responseMessages.accepted), 202);
+      }
+      throw error;
+    }
     if (!results.every((result) => result.meta.changes === 1)) {
       if (results.every((result) => result.meta.changes === 0)) {
         return context.json(responseMessage(responseMessages.accepted), 202);

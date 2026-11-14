@@ -6,6 +6,7 @@ import {
   readStaffPageSession,
 } from "@certpath/api";
 import { cleanupExpiredQuestionImports } from "@certpath/api/security/question-import-cleanup";
+import { cleanupExpiredAuditEvents } from "@certpath/api/security/audit-retention";
 import { cloudflareContext } from "../app/lib/cloudflare-context";
 
 const requestHandler = createRequestHandler(
@@ -16,6 +17,7 @@ const requestHandler = createRequestHandler(
 type AdminAppEnv = Env & {
   ADMIN_TESTER_IPS?: string;
   ADMIN_TESTER_LOCAL?: string;
+  AUDIT_RETENTION_ENABLED?: string;
 };
 
 function staffSignInRedirect(request: Request): Response {
@@ -67,5 +69,18 @@ export default {
         }
       })(),
     );
+    // Audit retention runs in its own waitUntil so a failure in one job cannot
+    // stop the other. It is off unless the owner turns it on explicitly, and the
+    // storage trigger - not this job - enforces the twelve-month floor.
+    if (String(env.AUDIT_RETENTION_ENABLED ?? "false") === "true") {
+      ctx.waitUntil(
+        (async () => {
+          const result = await cleanupExpiredAuditEvents(env.DB, Date.now());
+          if (!result.ok) {
+            throw new Error(`Audit retention cleanup failed: ${result.reason}`);
+          }
+        })(),
+      );
+    }
   },
 } satisfies ExportedHandler<AdminAppEnv>;
