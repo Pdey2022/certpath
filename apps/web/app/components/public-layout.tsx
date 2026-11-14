@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { Link } from "react-router";
 import { isUiPreview } from "../lib/preview-mode";
+import { isPublicReleaseSite } from "../lib/release-mode";
+import { demoLink, independenceNotice } from "../lib/site-content";
 import { getLearnerAuthPreflight } from "../lib/learner-auth-api";
 
 type LearnerSignInAvailability =
@@ -27,11 +29,11 @@ export function useLearnerSignInAvailability() {
 
 export function PublicLayout({ children }: { children: React.ReactNode }) {
   const [availability, setAvailability] = useState<LearnerSignInAvailability>(
-    isUiPreview ? "unavailable" : "checking",
+    isUiPreview || isPublicReleaseSite ? "unavailable" : "checking",
   );
 
   useEffect(() => {
-    if (isUiPreview) return;
+    if (isUiPreview || isPublicReleaseSite) return;
     let active = true;
     void checkLearnerSignInAvailability().then((result) => {
       if (active) setAvailability(result);
@@ -50,11 +52,13 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
         <header className="public-header">
           <div className="public-header-inner">
             <Link className="brand" to="/">
-              Exam Prep
+              {isPublicReleaseSite ? "CertPath" : "Exam Prep"}
             </Link>
             <nav className="public-nav" aria-label="Public navigation">
               <Link to="/exams">Exams</Link>
-              {isUiPreview ? (
+              {isPublicReleaseSite ? (
+                <a href={demoLink.href}>{demoLink.label}</a>
+              ) : isUiPreview ? (
                 <>
                   <Link to="/app">Learner demo</Link>
                   <Link to="/admin?demoRole=manager">Manager demo</Link>
@@ -71,17 +75,23 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
                       : "Learner sign-in unavailable"}
                 </span>
               )}
-              {!isUiPreview && <Link to="/app">Learner preview</Link>}
+              {!isUiPreview && !isPublicReleaseSite && (
+                <Link to="/app">Learner preview</Link>
+              )}
             </nav>
           </div>
         </header>
         {children}
         <footer className="public-footer">
           <div className="public-footer-inner">
-            <p>
-              Exam Prep is a working label. Certification listings and content
-              require review before publication.
-            </p>
+            {isPublicReleaseSite ? (
+              <p>{independenceNotice}</p>
+            ) : (
+              <p>
+                Exam Prep is a working label. Certification listings and content
+                require review before publication.
+              </p>
+            )}
           </div>
         </footer>
       </>

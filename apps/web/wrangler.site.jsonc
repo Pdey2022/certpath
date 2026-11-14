@@ -1,0 +1,16 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "certpath-site",
+	"compatibility_date": "2026-11-10",
+	"main": "./workers/public-site.ts",
+	"workers_dev": true,
+	"preview_urls": false,
+	"vars": {
+		"INDEXING_ENABLED": "true",
+		"PUBLIC_SITE_ORIGIN": "https://certpath-site.certpath.workers.dev"
+	},
+	"observability": {
+		"enabled": false
+	},
+	"upload_source_maps": true
+}

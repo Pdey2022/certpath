@@ -1,5 +1,13 @@
 import { Link } from "react-router";
 import { isUiPreview } from "../lib/preview-mode";
+import { isPublicReleaseSite } from "../lib/release-mode";
+import {
+  accessPlans,
+  availabilityNotice,
+  catalogueFootnote,
+  demoLink,
+  independenceNotice,
+} from "../lib/site-content";
 import type { Route } from "./+types/home";
 import { PublicLayout } from "../components/public-layout";
 import { cloudflareContext } from "../lib/cloudflare-context";
@@ -15,9 +23,9 @@ export function loader({ request, context }: Route.LoaderArgs) {
     requestUrl: request.url,
     canonicalOrigin: env.PUBLIC_SITE_ORIGIN,
     path: "/",
-    title: "Exam preparation built around your certification",
+    title: "CertPath | CISSP and CISM exam preparation",
     description:
-      "Explore a focused certification preparation experience, with exam-specific learning and clear access information.",
+      "Exam-specific preparation for CISSP and CISM. Compare Standard practice access with optional Pro adaptive preparation, then try the demo.",
     indexingEnabled: isIndexingEnabled(env.INDEXING_ENABLED),
   });
 
@@ -34,14 +42,26 @@ export default function Home() {
       <main id="main-content" className="public-main">
         <section className="hero" aria-labelledby="home-title">
           <p className="eyebrow">Certification preparation</p>
-          <h1 id="home-title">Prepare for your next certification with focus.</h1>
+          <h1 id="home-title">Prepare for one certification at a time.</h1>
           <p className="intro">
-            A clear place to practise for one exam at a time, review explanations,
-            and understand the learning options available for that certification.
+            CertPath focuses on the exam in front of you. Study CISSP or CISM
+            with exam-specific practice, read the explanation for every answer,
+            and see your progress before you sit the real exam.
           </p>
-          <Link className="primary-link" to="/exams">
-            Explore the exam catalogue
-          </Link>
+          {isPublicReleaseSite ? (
+            <div className="button-row" role="group" aria-label="Get started">
+              <a className="primary-link" href={demoLink.href}>
+                {demoLink.label}
+              </a>
+              <Link className="secondary-link" to="/exams">
+                Compare Standard and Pro
+              </Link>
+            </div>
+          ) : (
+            <Link className="primary-link" to="/exams">
+              Explore the exam catalogue
+            </Link>
+          )}
         </section>
 
         {isUiPreview && (
@@ -63,8 +83,25 @@ export default function Home() {
             </ul>
           </section>
         )}
+        <section aria-labelledby="access-title">
+          <h2 id="access-title">Standard and Pro access</h2>
+          <p className="intro">{catalogueFootnote}</p>
+          <div className="card-grid">
+            {accessPlans.map((plan) => (
+              <article className="card" key={plan.name}>
+                <h3>{plan.name}</h3>
+                <p>{plan.summary}</p>
+                <ul>
+                  {plan.points.map((point) => (
+                    <li key={point}>{point}</li>
+                  ))}
+                </ul>
+              </article>
+            ))}
+          </div>
+        </section>
         <section aria-labelledby="approach-title">
-          <h2 id="approach-title">A focused study experience</h2>
+          <h2 id="approach-title">How study works here</h2>
           <div className="card-grid">
             <article className="card">
               <h3>Exam-specific learning</h3>
@@ -74,22 +111,28 @@ export default function Home() {
               </p>
             </article>
             <article className="card">
-              <h3>Clear learning options</h3>
+              <h3>Explanations with every question</h3>
               <p>
-                Standard practice and optional Pro preparation are distinct
-                choices with their own access conditions.
+                Each answer comes with reasoning you can review, so a mistake
+                becomes a study note rather than a dead end.
               </p>
             </article>
             <article className="card">
-              <h3>Review what you learn</h3>
+              <h3>Progress you can trust</h3>
               <p>
-                Explanations and progress are part of the planned learning
-                experience. No question bank is published on this foundation
-                page.
+                Attempts are saved, so you can resume practice and see how a mock
+                exam went, including where your weaker areas are.
               </p>
             </article>
           </div>
         </section>
+        {isPublicReleaseSite && (
+          <section aria-labelledby="availability-title">
+            <h2 id="availability-title">Availability</h2>
+            <p>{availabilityNotice}</p>
+            <p className="small-print">{independenceNotice}</p>
+          </section>
+        )}
       </main>
     </PublicLayout>
   );
