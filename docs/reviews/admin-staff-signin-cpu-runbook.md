@@ -69,6 +69,10 @@ matched by `Cf-Ray` and carry a `cloudflare.cpu_time_ms` value (see below) befor
 any password is submitted. Any other body, a missing or ambiguous trace, or an
 absent CPU value ends the run.
 
+The probe step is prepared for separate review, with its exact commands, match
+requirements, and evidence bundle, in the [Workers Traces
+probe](admin-staff-signin-trace-probe.md).
+
 Rate limiting: two valid plus two invalid attempts from one address and one IP
 stay inside the gate's 5/address and 10/IP per 15-minute window. Do not re-run
 inside a window that has already been used.
@@ -210,12 +214,15 @@ Request header values are not captured in spans, so the `X-CPU-Run-Id` header do
 not appear in a trace and cannot be the join key. The response's Ray ID is the key,
 corroborated by three fields on the same root span.
 
-1. Issue one request carrying a unique `X-CPU-Run-Id`, and capture the response's
-   **`Cf-Ray` header verbatim** as it arrives.
-2. Open **Traces** for `certpath-staff-cpu` in Workers Observability and filter
-   `cloudflare.ray_id = "<that ray id>"`.
-3. Accept the match only when all three corroborating fields agree with the request
-   just issued:
+1. Issue one request carrying a unique `X-CPU-Run-Id`, and keep the response's
+   **full `Cf-Ray` header value exactly as received** as evidence, including its
+   trailing data-centre segment (for example `8f2c1a3b4d5e6f70-SJC`).
+2. Open **Traces** for `certpath-staff-cpu` in Workers Observability and filter with
+   the Ray ID **without that colo segment**, so the example above is looked up as
+   `cloudflare.ray_id = "8f2c1a3b4d5e6f70"`. The colo segment is dropped only in the
+   filter, never from the recorded header.
+3. Accept the match only when exactly one root span agrees on all three
+   corroborating fields with the request just issued:
    - **Worker name** - `cloudflare.script_name` and `faas.name` equal
      `certpath-staff-cpu`
    - **Path** - `url.path` and `http.request.method` equal the request issued
@@ -227,9 +234,10 @@ corroborated by three fields on the same root span.
 5. Record `faas.invocation_id` with the sample, then issue the next request.
 
 Any of these is a **missing or ambiguous trace** and stops the run before the next
-request: no `Cf-Ray` header on the response, no span for that Ray ID within 30
+request: no `Cf-Ray` header on the response, no span for the bare Ray ID within 30
 seconds, more than one candidate root span, disagreement on Worker name, path, or
-timestamp, or an absent `cloudflare.cpu_time_ms` value.
+timestamp, or an absent `cloudflare.cpu_time_ms` value. A stop is final: there is no
+retry and no password is submitted afterwards.
 
 ## Decision rules, applied from the first request
 

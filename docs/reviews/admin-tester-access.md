@@ -149,7 +149,9 @@ factory takes the verifier as an argument precisely so that decision does not
 require rewiring the route. The measurement that would confirm this on the full
 HTTPS request path is specified in the [staff sign-in CPU
 runbook](admin-staff-signin-cpu-runbook.md); it is a plan only and has not been
-executed.
+executed. Its first step, the Workers Traces probe that must pass before any
+password is submitted, is prepared for review in the [Workers Traces
+probe](admin-staff-signin-trace-probe.md).
 
 ## Rollback steps
 
