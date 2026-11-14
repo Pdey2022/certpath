@@ -9,3 +9,4 @@ export type HealthResponse = z.infer<typeof healthResponseSchema>;
 export * from "./protected-content";
 export * from "./practice";
 export * from "./learner-auth";
+export * from "./staff-admin";

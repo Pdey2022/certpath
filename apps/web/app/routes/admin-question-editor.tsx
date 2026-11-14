@@ -81,7 +81,7 @@ function errorMessage(error: unknown): string {
     return "The protected editor could not reach the service. Your current edits are preserved.";
   }
   if (error.status === 401) {
-    return "Your staff session is missing, expired, or revoked. Sign in through the approved staff identity flow, then return here.";
+    return "Your staff session is missing, expired, or revoked. Sign in again, then return here.";
   }
   if (error.status === 403) {
     return "Your account does not have the required staff role or current MFA assurance.";
@@ -1262,7 +1262,7 @@ export default function AdminQuestionEditor() {
         <h1>Question editor</h1>
         <p className="protected-editor-intro">
           This editor reads and saves drafts and manages review and publication through the protected service.
-          It does not provide sign-in.
+          Sign in with an approved tester staff account; provisioning is an owner-approved, off-panel step.
         </p>
         <p className="protected-demo-separation">
           Separate from the synthetic admin preview. Preview role selectors and demo data do not grant access here.

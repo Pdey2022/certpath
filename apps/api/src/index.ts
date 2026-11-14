@@ -13,6 +13,10 @@ import {
   type StagingPasswordVerifier,
 } from "./local-learner-auth.ts";
 import { createGoogleLearnerAuthApi } from "./learner-google-oidc.ts";
+import {
+  createStaffAuthApi,
+  type StaffPasswordVerifier,
+} from "./staff-auth.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
 import {
@@ -30,6 +34,10 @@ type ApiBindings = {
   LOCAL_LEARNER_EMAIL_LINK_ENABLED?: string;
   LOCAL_TEST_MAIL_ENABLED?: string;
   LOCAL_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
+  STAFF_RATE_LIMIT_HMAC_SECRET?: string;
+  ADMIN_TESTER_IPS?: string;
+  ADMIN_TESTER_ASSURANCE?: string;
+  ADMIN_TESTER_LOCAL?: string;
   STAGING_LEARNER_AUTH_ENABLED?: string;
   STAGING_TESTER_IPS?: string;
   STAGING_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
@@ -61,6 +69,7 @@ export function createApi(
   fetcher: typeof fetch = fetch,
   now: () => number = Date.now,
   stagingVerifier?: StagingPasswordVerifier,
+  staffVerifier?: StaffPasswordVerifier,
 ) {
   const application = new Hono<{ Bindings: ApiBindings }>().basePath("/api");
   const localTestMail = new LocalTestMailAdapter();
@@ -107,6 +116,7 @@ export function createApi(
   );
   application.route("/auth/google", createGoogleLearnerAuthApi(fetcher));
   application.route("/auth/session", createApplicationSessionApi(now));
+  application.route("/admin/auth", createStaffAuthApi(now, staffVerifier));
   application.route("/admin/content", protectedContentApi);
   application.route("/practice", learnerPracticeApi);
   return application;
@@ -114,3 +124,11 @@ export function createApi(
 
 export const api = createApi();
 export { stagingTesterGate } from "./security/staging-gate.ts";
+export {
+  adminTesterGate,
+  isAdminSurfacePath,
+} from "./security/admin-gate.ts";
+export {
+  readStaffPageSession,
+  type StaffPageSession,
+} from "./security/admin-access.ts";

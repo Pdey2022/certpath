@@ -8,7 +8,8 @@ export type LocalRateLimitAction =
   | "password_reset"
   | "sign_in_link_request"
   | "sign_in_link_inspect"
-  | "sign_in_link_redeem";
+  | "sign_in_link_redeem"
+  | "staff_sign_in";
 
 export type JsonBody =
   | { ok: true; value: unknown }
@@ -29,6 +30,7 @@ const ratePolicies: Record<
   sign_in_link_request: { windowMs: 15 * 60 * 1000, maxIp: 10, maxEmail: 3 },
   sign_in_link_inspect: { windowMs: 15 * 60 * 1000, maxIp: 60 },
   sign_in_link_redeem: { windowMs: 15 * 60 * 1000, maxIp: 20 },
+  staff_sign_in: { windowMs: 15 * 60 * 1000, maxIp: 10, maxEmail: 5 },
 };
 
 export function isLocalOrigin(origin: string): boolean {

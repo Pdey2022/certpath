@@ -64,6 +64,15 @@ invitations of its own, sends no email, and changes no product rule; Google
 OAuth setup is paused and no provider is selected. See the [email sign-in link
 review](reviews/learner-email-sign-in-links.md).
 
+Implementation status: the real admin panel now sits behind a fail-closed tester
+allowlist and individual staff sign-in, with an offline provisioning script for
+two Global Admins and one exam-scoped Manager. Staff MFA remains parked; a
+labelled tester assurance substitutes for it and is accepted only while the
+allowlist and an explicit owner flag are configured. Nothing is deployed and no
+production account exists. Deployment is blocked on the Workers Free CPU
+capacity finding and on review of the assurance. See the [tester access
+review](reviews/admin-tester-access.md).
+
 Acceptance for the remaining identity and admin workflows: cross-user and unauthorised admin requests fail; unsafe account linking fails; import validation prevents accidental publication. Manager cannot access unassigned certifications through direct IDs, list queries, reassignment, imports or exports; cannot change finance/access/security/staff settings. Assignment revocation is effective on subsequent requests. Both staff roles require MFA. Content and role changes are audited.
 
 ## Milestone 3 — Standard learning engine

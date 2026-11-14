@@ -82,6 +82,41 @@ Standard grant. The protected practice API requires an `https:` origin, so the
 full dashboard journey is covered by the Worker/D1 tests rather than the
 plain-`http` dev server. Google OAuth setup is paused.
 
+## Tester-only admin panel (local)
+
+The real admin pages (`/admin/question-editor` and the protected content API)
+sit behind a client-IP tester allowlist and individual staff sign-in. Nothing is
+deployed and no production account exists.
+
+Provision the two test Global Admins and the exam-scoped Manager locally. All
+three accounts are created together with one synthetic certification and its
+exam version, and passwords are typed at a hidden prompt:
+
+```powershell
+npm run db:migrate:local
+npm run staff:provision -- --admins "owner@example.test,deputy@example.test" --manager editor@example.test --certification-slug synthetic-pilot
+```
+
+Then add these values to `apps/web/.dev.vars` and restart `npm run dev`:
+
+```
+STAFF_MFA_MAX_AGE_MS=900000
+STAFF_MFA_ALLOWED_METHODS=tester-gate
+STAFF_RATE_LIMIT_HMAC_SECRET=REPLACE_WITH_A_DIFFERENT_RANDOM_LOCAL_VALUE
+ADMIN_TESTER_IPS=127.0.0.1,::1,localhost
+ADMIN_TESTER_ASSURANCE=true
+ADMIN_TESTER_LOCAL=true
+```
+
+Open `/admin/sign-in`, sign in with one of the provisioned accounts, and the
+panel opens at `/admin/question-editor`. An empty `ADMIN_TESTER_IPS` closes every
+admin page and API with `503`; that is the rollback switch. Staff MFA is parked,
+so the `tester-gate` assurance is accepted only while the allowlist and
+`ADMIN_TESTER_ASSURANCE` are both set, and every session it mints records that
+method. Passwords are never printed, logged, or stored outside the local
+database. See [the tester access review](docs/reviews/admin-tester-access.md) for
+the Workers Free capacity finding and rollback steps.
+
 ## Verification
 
 ```powershell
