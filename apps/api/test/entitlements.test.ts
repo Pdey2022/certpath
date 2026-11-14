@@ -401,3 +401,185 @@ describe("storage layer guarantees", () => {
       .run();
   });
 });
+
+async function revokeGrant(
+  grantId: string,
+  userId: string,
+  operationId: string,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE learner_access_grants
+     SET revoked_at = ?, revocation_operation_id = ?, revoked_by_user_id = ?
+     WHERE id = ?`,
+  )
+    .bind(start + day, operationId, userId, grantId)
+    .run();
+}
+
+describe("grant update guards", () => {
+  it("rejects editing a window in place", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const grantId = crypto.randomUUID();
+    await insertGrant({
+      id: grantId,
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 90 * day,
+    });
+
+    await expect(
+      env.DB.prepare(
+        "UPDATE learner_access_grants SET expires_at = ? WHERE id = ?",
+      )
+        .bind(start + 365 * day, grantId)
+        .run(),
+    ).rejects.toThrow(/access grants are immutable/);
+  });
+
+  it("rejects un-revoking a refunded grant", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const grantId = crypto.randomUUID();
+    await insertGrant({
+      id: grantId,
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 90 * day,
+    });
+    await revokeGrant(grantId, userId, `test-revoke:${crypto.randomUUID()}`);
+
+    await expect(
+      env.DB.prepare(
+        `UPDATE learner_access_grants
+         SET revoked_at = NULL, revocation_operation_id = NULL,
+             revoked_by_user_id = NULL
+         WHERE id = ?`,
+      )
+        .bind(grantId)
+        .run(),
+    ).rejects.toThrow(/access grants are immutable/);
+  });
+
+  it("rejects deleting a grant", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const grantId = crypto.randomUUID();
+    await insertGrant({
+      id: grantId,
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 90 * day,
+    });
+
+    await expect(
+      env.DB.prepare("DELETE FROM learner_access_grants WHERE id = ?")
+        .bind(grantId)
+        .run(),
+    ).rejects.toThrow(/cannot be deleted/);
+  });
+
+  it("rejects revoking the only standard grant that covers a pro grant", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const standardId = crypto.randomUUID();
+    await insertGrant({
+      id: standardId,
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 180 * day,
+    });
+    await insertGrant({
+      id: crypto.randomUUID(),
+      userId,
+      certificationId,
+      feature: "pro",
+      startsAt: start + 30 * day,
+      expiresAt: start + 120 * day,
+    });
+
+    await expect(
+      revokeGrant(standardId, userId, `test-revoke:${crypto.randomUUID()}`),
+    ).rejects.toThrow(/would leave a pro grant uncovered/);
+  });
+
+  it("allows revoking standard when a second grant still covers pro", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const firstStandardId = crypto.randomUUID();
+    await insertGrant({
+      id: firstStandardId,
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 180 * day,
+    });
+    await insertGrant({
+      id: crypto.randomUUID(),
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 365 * day,
+    });
+    await insertGrant({
+      id: crypto.randomUUID(),
+      userId,
+      certificationId,
+      feature: "pro",
+      startsAt: start + 30 * day,
+      expiresAt: start + 120 * day,
+    });
+
+    await revokeGrant(
+      firstStandardId,
+      userId,
+      `test-revoke:${crypto.randomUUID()}`,
+    );
+
+    const surviving = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM learner_access_grants
+       WHERE user_id = ? AND revoked_at IS NULL`,
+    )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(surviving?.count).toBe(2);
+  });
+
+  it("allows revoking standard after the pro grant is revoked first", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const standardId = crypto.randomUUID();
+    const proId = crypto.randomUUID();
+    await insertGrant({
+      id: standardId,
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 180 * day,
+    });
+    await insertGrant({
+      id: proId,
+      userId,
+      certificationId,
+      feature: "pro",
+      startsAt: start + 30 * day,
+      expiresAt: start + 120 * day,
+    });
+
+    await revokeGrant(proId, userId, `test-revoke:${crypto.randomUUID()}`);
+    await revokeGrant(standardId, userId, `test-revoke:${crypto.randomUUID()}`);
+
+    const revoked = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM learner_access_grants
+       WHERE user_id = ? AND revoked_at IS NOT NULL`,
+    )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(revoked?.count).toBe(2);
+  });
+});

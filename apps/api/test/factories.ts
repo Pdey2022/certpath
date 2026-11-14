@@ -180,6 +180,44 @@ export async function grantTestLearnerAccess(
   return id;
 }
 
+/**
+ * Moves a learner's live Standard access to a new expiry.
+ *
+ * Grants are immutable (ADR 0003), so a test that needs to change a window has
+ * to do what the platform does: revoke the current grant, then issue the
+ * replacement.
+ */
+export async function replaceGrantExpiry(
+  database: SecurityDatabase,
+  userId: string,
+  expiresAt: number,
+  certificationId?: string,
+): Promise<void> {
+  const live = await database
+    .prepare(
+      `SELECT id, certification_id FROM learner_access_grants
+       WHERE user_id = ? AND revoked_at IS NULL${
+         certificationId ? " AND certification_id = ?" : ""
+       }`,
+    )
+    .bind(...(certificationId ? [userId, certificationId] : [userId]))
+    .all<{ id: string; certification_id: string }>();
+
+  for (const grant of live.results) {
+    await database
+      .prepare(
+        `UPDATE learner_access_grants
+         SET revoked_at = ?, revocation_operation_id = ?, revoked_by_user_id = ?
+         WHERE id = ?`,
+      )
+      .bind(Date.now(), `fixture-expiry:${grant.id}`, userId, grant.id)
+      .run();
+    await grantTestLearnerAccess(database, userId, grant.certification_id, {
+      expiresAt,
+    });
+  }
+}
+
 export async function createTestLearnerUser(
   database: SecurityDatabase,
   options: { status?: "active" | "disabled" } = {},
