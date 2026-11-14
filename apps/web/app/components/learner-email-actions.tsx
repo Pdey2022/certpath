@@ -22,7 +22,7 @@ function errorText(error: unknown): string {
   return "The request could not be completed. Please try again.";
 }
 
-function takeFragmentToken(): string | null {
+export function takeFragmentToken(): string | null {
   const token = new URLSearchParams(window.location.hash.slice(1)).get("token");
   window.history.replaceState(
     null,
@@ -278,7 +278,11 @@ export function LearnerLocalInboxRoute() {
           <ul aria-label="Local inbox messages">
             {messages.map((message) => (
               <li key={message.id}>
-                {message.kind === "verify_email" ? "Verify email" : "Reset password"}{" "}
+                {message.kind === "verify_email"
+                  ? "Verify email"
+                  : message.kind === "sign_in_link"
+                    ? "Sign in link"
+                    : "Reset password"}{" "}
                 <a href={message.link}>Open single-use link</a>
               </li>
             ))}

@@ -7,6 +7,7 @@ import {
   isStagingLearnerAuth,
   LearnerAuthApiError,
   registerLearner,
+  requestLearnerSignInLink,
   signInLearner,
 } from "../lib/learner-auth-api";
 import {
@@ -29,7 +30,7 @@ export function meta(_: Route.MetaArgs) {
   ];
 }
 
-type AuthMode = "sign_in" | "register";
+type AuthMode = "email_link" | "sign_in" | "register";
 
 function messageForError(error: unknown): string {
   if (!(error instanceof LearnerAuthApiError)) {
@@ -89,18 +90,42 @@ function useGoogleSignInAvailability(enabled: boolean): GoogleAvailability {
 
 function LearnerSignInContent() {
   const availability = useLearnerSignInAvailability();
+  const passwordAvailability = availability.password;
+  const emailLinkAvailability = availability.emailLink;
   const isStaging = isStagingLearnerAuth();
   const googleEnabled = isGoogleSignInOrigin();
   const googleAvailability = useGoogleSignInAvailability(googleEnabled);
   const [searchParams] = useSearchParams();
   const googleError = searchParams.get("error");
   const navigate = useNavigate();
-  const [mode, setMode] = useState<AuthMode>("sign_in");
+  const [selectedMode, setSelectedMode] = useState<AuthMode | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+
+  const passwordEnabled = passwordAvailability === "enabled";
+  const emailLinkEnabled = emailLinkAvailability === "enabled";
+  const closedState: "checking" | "unconfirmed" | "disabled" =
+    passwordAvailability === "checking" ||
+    emailLinkAvailability === "checking" ||
+    googleAvailability === "checking"
+      ? "checking"
+      : !googleEnabled &&
+          (passwordAvailability === "unavailable" ||
+            emailLinkAvailability === "unavailable")
+        ? "unconfirmed"
+        : "disabled";
+  const mode: AuthMode =
+    selectedMode ?? (emailLinkEnabled ? "email_link" : "sign_in");
+
+  function chooseMode(next: AuthMode) {
+    setSelectedMode(next);
+    setPassword("");
+    setError("");
+    setMessage("");
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -108,7 +133,10 @@ function LearnerSignInContent() {
     setError("");
     setMessage("");
     try {
-      if (mode === "register") {
+      if (mode === "email_link") {
+        const result = await requestLearnerSignInLink(email);
+        setMessage(result.message);
+      } else if (mode === "register") {
         const result = await registerLearner(email);
         setMessage(result.message);
       } else {
@@ -150,44 +178,50 @@ function LearnerSignInContent() {
             </div>
           </section>
         )}
-        {availability === "enabled" && (
-          <section className="card setup-card" aria-label="Email and password sign-in">
+        {(passwordEnabled || emailLinkEnabled) && (
+          <section className="card setup-card" aria-label="Learner sign-in options">
             <p className="intro">
-              {isStaging
-                ? "Sign in with the pre-provisioned synthetic staging learner. Passwords are verified by the isolated staging service."
-                : "This local proof accepts synthetic addresses ending in @example.test. Passwords are verified by CertPath in the local Worker; email is delivered only to the local test inbox. Choose a password when you verify your email."}
+              {mode === "email_link"
+                ? "This pilot is invite-only. Enter the address provisioned for your account and we will send a short-lived, single-use sign-in link. Only synthetic addresses ending in @example.test are accepted locally, and email is delivered only to the local test inbox."
+                : isStaging
+                  ? "Sign in with the pre-provisioned synthetic staging learner. Passwords are verified by the isolated staging service."
+                  : "This local proof accepts synthetic addresses ending in @example.test. Passwords are verified by CertPath in the local Worker; email is delivered only to the local test inbox. Choose a password when you verify your email."}
             </p>
             {!isStaging && (
               <div className="button-row" role="group" aria-label="Account action">
-                <button
-                  type="button"
-                  className={mode === "sign_in" ? "button-primary" : "button-secondary"}
-                  aria-pressed={mode === "sign_in"}
-                  onClick={() => {
-                    setMode("sign_in");
-                    setPassword("");
-                    setError("");
-                    setMessage("");
-                  }}
-                >
-                  Sign in
-                </button>
-                <button
-                  type="button"
-                  className={mode === "register" ? "button-primary" : "button-secondary"}
-                  aria-pressed={mode === "register"}
-                  onClick={() => {
-                    setMode("register");
-                    setPassword("");
-                    setError("");
-                    setMessage("");
-                  }}
-                >
-                  Create account
-                </button>
+                {emailLinkEnabled && (
+                  <button
+                    type="button"
+                    className={mode === "email_link" ? "button-primary" : "button-secondary"}
+                    aria-pressed={mode === "email_link"}
+                    onClick={() => chooseMode("email_link")}
+                  >
+                    Email link
+                  </button>
+                )}
+                {passwordEnabled && (
+                  <>
+                    <button
+                      type="button"
+                      className={mode === "sign_in" ? "button-primary" : "button-secondary"}
+                      aria-pressed={mode === "sign_in"}
+                      onClick={() => chooseMode("sign_in")}
+                    >
+                      Password
+                    </button>
+                    <button
+                      type="button"
+                      className={mode === "register" ? "button-primary" : "button-secondary"}
+                      aria-pressed={mode === "register"}
+                      onClick={() => chooseMode("register")}
+                    >
+                      Create account
+                    </button>
+                  </>
+                )}
               </div>
             )}
-            {googleError && availability !== "enabled" && (
+            {googleError && !passwordEnabled && (
               <p className="form-errors" role="alert">
                 {googleErrorMessage(googleError)}
               </p>
@@ -232,9 +266,11 @@ function LearnerSignInContent() {
                 <button className="button-primary" type="submit" disabled={busy}>
                   {busy
                     ? "Please wait…"
-                    : mode === "register" && !isStaging
-                      ? "Send verification email"
-                      : "Sign in"}
+                    : mode === "email_link"
+                      ? "Send sign-in link"
+                      : mode === "register" && !isStaging
+                        ? "Send verification email"
+                        : "Sign in"}
                 </button>
                 {!isStaging && mode === "sign_in" && (
                   <Link className="button-link" to="/recover-password">
@@ -250,27 +286,31 @@ function LearnerSignInContent() {
             )}
           </section>
         )}
-        {(availability === "checking" || googleAvailability === "checking") &&
-          availability !== "enabled" &&
-          googleAvailability !== "enabled" && (
+        {!passwordEnabled &&
+          !emailLinkEnabled &&
+          googleAvailability !== "enabled" &&
+          closedState === "checking" && (
             <p className="card" role="status">
               Checking whether learner sign-in is enabled…
             </p>
           )}
-        {availability !== "checking" &&
-          googleAvailability !== "checking" &&
-          availability !== "enabled" &&
+        {!passwordEnabled &&
+          !emailLinkEnabled &&
           googleAvailability !== "enabled" &&
-          (availability === "unavailable" && !googleEnabled ? (
+          closedState === "unconfirmed" && (
             <p className="form-errors" role="alert">
               Sign-in availability could not be confirmed. No sign-in option is
               available right now.
             </p>
-          ) : (
+          )}
+        {!passwordEnabled &&
+          !emailLinkEnabled &&
+          googleAvailability !== "enabled" &&
+          closedState === "disabled" && (
             <p className="card" role="status">
               Learner sign-in is currently disabled.
             </p>
-          ))}
+          )}
       </section>
     </main>
   );

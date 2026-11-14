@@ -1,5 +1,7 @@
 import {
   csrfResponseSchema,
+  learnerEmailSignInInspectResponseSchema,
+  learnerEmailSignInRedeemResponseSchema,
   localLearnerAuthMessageResponseSchema,
   localLearnerAuthPreflightResponseSchema,
   localLearnerSignInResponseSchema,
@@ -9,6 +11,7 @@ import {
 const localAuthRoot = "/api/auth/local";
 const stagingAuthRoot = "/api/auth/staging";
 const googleAuthRoot = "/api/auth/google";
+const emailLinkRoot = "/api/auth/email-link";
 const stagingAuthOrigin =
   "https://learner-auth-staging.certpath.workers.dev";
 const localStagingAuthOrigin =
@@ -118,6 +121,15 @@ export function getGoogleSignInPreflight() {
   );
 }
 
+export function getLearnerEmailLinkPreflight() {
+  return requestJson(
+    "/preflight",
+    localLearnerAuthPreflightResponseSchema,
+    {},
+    emailLinkRoot,
+  );
+}
+
 export function registerLearner(email: string) {
   return requestJson(
     "/register",
@@ -168,9 +180,41 @@ export function resetLearnerPassword(token: string, password: string) {
   );
 }
 
-export function readLocalTestInbox(email: string) {
+export function requestLearnerSignInLink(email: string) {
   return requestJson(
-    `/test-inbox?${new URLSearchParams({ email })}`,
-    localTestInboxResponseSchema,
+    "/request",
+    localLearnerAuthMessageResponseSchema,
+    { method: "POST", body: JSON.stringify({ email }) },
+    emailLinkRoot,
   );
+}
+
+export function inspectLearnerSignInLink(token: string) {
+  return requestJson(
+    "/inspect",
+    learnerEmailSignInInspectResponseSchema,
+    { method: "POST", body: JSON.stringify({ token }) },
+    emailLinkRoot,
+  );
+}
+
+export function redeemLearnerSignInLink(token: string) {
+  return requestJson(
+    "/redeem",
+    learnerEmailSignInRedeemResponseSchema,
+    { method: "POST", body: JSON.stringify({ token }) },
+    emailLinkRoot,
+  );
+}
+
+export async function readLocalTestInbox(email: string) {
+  const path = `/test-inbox?${new URLSearchParams({ email })}`;
+  try {
+    return await requestJson(path, localTestInboxResponseSchema);
+  } catch (error) {
+    if (error instanceof LearnerAuthApiError && error.status === 503) {
+      return requestJson(path, localTestInboxResponseSchema, {}, emailLinkRoot);
+    }
+    throw error;
+  }
 }
