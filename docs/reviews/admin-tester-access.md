@@ -151,7 +151,10 @@ HTTPS request path is specified in the [staff sign-in CPU
 runbook](admin-staff-signin-cpu-runbook.md); it is a plan only and has not been
 executed. Its first step, the Workers Traces probe that must pass before any
 password is submitted, is prepared for review in the [Workers Traces
-probe](admin-staff-signin-trace-probe.md).
+probe](admin-staff-signin-trace-probe.md). The tester-only production rollout that
+turns this design into named targets, an approved assurance policy, three accounts,
+a post-deploy checklist, and rollback steps is prepared for review in the
+[production admin rollout](admin-production-rollout.md).
 
 ## Rollback steps
 

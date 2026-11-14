@@ -1,7 +1,13 @@
 # Staff sign-in Workers Traces probe: review package
 
-**Status:** Plan only. Nothing has been provisioned, deployed, measured, or changed
-in the Cloudflare account.
+**Status:** Closed. Readiness passed. **Worker CPU unmeasured.**
+
+The single password-free probe on 14 November 2026 at 20:01:18 UTC returned
+HTTP 200 with both readiness flags true. Full `Cf-Ray`: `a5a89b7acbdd1b54-LHR`.
+Workers Observability returned HTTP 403, so no CPU value was verified. The
+operator reported no retry or staff sign-in. Cloudflare inventory confirmed
+the temporary Worker and D1 database were gone. The production admin panel
+was not deployed.
 **Scope:** request 1 of the six-request cap in the [staff sign-in CPU
 runbook](admin-staff-signin-cpu-runbook.md). The probe submits **no password** and
 makes exactly **one** request.
@@ -11,6 +17,22 @@ separate, approved step.
 **Cost boundary:** the public site and the demo stay on **Workers Free at $0** and
 are not redeployed, retraced, or otherwise touched. No paid plan, Logpush, or
 OpenTelemetry export.
+
+## Follow-up staff workflow result
+
+On 14 November 2026, the isolated `certpath-staff-workflow` Worker used its
+own D1 database on Workers Free. One synthetic Global Admin signed in over
+HTTPS with unchanged scrypt. The sign-in returned HTTP 200 and issued a
+session. No CPU-limit error was observed. **Worker CPU remains unmeasured.**
+
+The signed-in workflow created a synthetic question, saved an edit as
+revision 2, and retrieved the edited text on reload. A separate revision
+detail request returned the same edit. The run recorded two question
+revisions in D1.
+
+Cloudflare inventory independently confirmed that both the temporary Worker
+and its D1 database were removed. The public site and demo returned HTTP
+200. The production admin panel remained undeployed.
 
 ## What this probe decides
 
