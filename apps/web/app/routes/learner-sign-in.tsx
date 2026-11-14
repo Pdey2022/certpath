@@ -3,6 +3,7 @@ import type { Route } from "./+types/learner-sign-in";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import {
   getGoogleSignInPreflight,
+  isGoogleSignInOrigin,
   isStagingLearnerAuth,
   LearnerAuthApiError,
   registerLearner,
@@ -63,12 +64,12 @@ function googleErrorMessage(code: string): string {
 
 type GoogleAvailability = "checking" | "enabled" | "disabled";
 
-function useGoogleSignInAvailability(isStaging: boolean): GoogleAvailability {
+function useGoogleSignInAvailability(enabled: boolean): GoogleAvailability {
   const [availability, setAvailability] = useState<GoogleAvailability>(
-    isStaging ? "checking" : "disabled",
+    enabled ? "checking" : "disabled",
   );
   useEffect(() => {
-    if (!isStaging) return;
+    if (!enabled) return;
     let active = true;
     void getGoogleSignInPreflight()
       .then((result) => {
@@ -82,14 +83,15 @@ function useGoogleSignInAvailability(isStaging: boolean): GoogleAvailability {
     return () => {
       active = false;
     };
-  }, [isStaging]);
+  }, [enabled]);
   return availability;
 }
 
 function LearnerSignInContent() {
   const availability = useLearnerSignInAvailability();
   const isStaging = isStagingLearnerAuth();
-  const googleAvailability = useGoogleSignInAvailability(isStaging);
+  const googleEnabled = isGoogleSignInOrigin();
+  const googleAvailability = useGoogleSignInAvailability(googleEnabled);
   const [searchParams] = useSearchParams();
   const googleError = searchParams.get("error");
   const navigate = useNavigate();
@@ -126,7 +128,7 @@ function LearnerSignInContent() {
       <section className="hero" aria-labelledby="learner-sign-in-title">
         <p className="eyebrow">Learner access</p>
         <h1 id="learner-sign-in-title">Learner sign in</h1>
-        {isStaging && googleAvailability === "enabled" && (
+        {googleEnabled && googleAvailability === "enabled" && (
           <section className="card setup-card" aria-label="Google sign-in">
             <p className="intro">
               Sign in with the invited Google account for this pilot. CertPath
@@ -248,22 +250,27 @@ function LearnerSignInContent() {
             )}
           </section>
         )}
-        {availability === "checking" && (
-          <p className="card" role="status">
-            Checking whether learner sign-in is enabled…
-          </p>
-        )}
-        {availability === "disabled" && googleAvailability !== "enabled" && (
-          <p className="card" role="status">
-            Learner sign-in is currently disabled.
-          </p>
-        )}
-        {availability === "unavailable" && (
-          <p className="form-errors" role="alert">
-            Sign-in availability could not be confirmed. No sign-in option is
-            available right now.
-          </p>
-        )}
+        {(availability === "checking" || googleAvailability === "checking") &&
+          availability !== "enabled" &&
+          googleAvailability !== "enabled" && (
+            <p className="card" role="status">
+              Checking whether learner sign-in is enabled…
+            </p>
+          )}
+        {availability !== "checking" &&
+          googleAvailability !== "checking" &&
+          availability !== "enabled" &&
+          googleAvailability !== "enabled" &&
+          (availability === "unavailable" && !googleEnabled ? (
+            <p className="form-errors" role="alert">
+              Sign-in availability could not be confirmed. No sign-in option is
+              available right now.
+            </p>
+          ) : (
+            <p className="card" role="status">
+              Learner sign-in is currently disabled.
+            </p>
+          ))}
       </section>
     </main>
   );

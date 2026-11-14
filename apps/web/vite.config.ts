@@ -8,11 +8,13 @@ export default defineConfig({
       viteEnvironment: { name: "ssr" },
       ...(process.env.VITE_CERTPATH_STAGING === "true"
         ? { configPath: "./wrangler.staging.jsonc" }
-        : process.env.VITE_CERTPATH_PUBLIC_RELEASE === "true"
-          ? { configPath: "./wrangler.site.jsonc" }
-          : process.env.VITE_CERTPATH_UI_PREVIEW === "true"
-            ? { configPath: "./wrangler.preview.jsonc" }
-            : {}),
+        : process.env.VITE_CERTPATH_PILOT === "true"
+          ? { configPath: "./wrangler.pilot.jsonc" }
+          : process.env.VITE_CERTPATH_PUBLIC_RELEASE === "true"
+            ? { configPath: "./wrangler.site.jsonc" }
+            : process.env.VITE_CERTPATH_UI_PREVIEW === "true"
+              ? { configPath: "./wrangler.preview.jsonc" }
+              : {}),
     }),
     reactRouter(),
   ],
