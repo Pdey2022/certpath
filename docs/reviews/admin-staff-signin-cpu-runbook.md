@@ -1,11 +1,13 @@
 # Staff sign-in CPU runbook: Workers Free
 
 **Status:** Plan only. Nothing has been provisioned, deployed, or measured.
+**Telemetry source:** the Workers Traces root-span attribute
+`cloudflare.cpu_time_ms`, in milliseconds.
 **Execution gate:** owner approval of this runbook, of the six-request cap, and of
 the temporary Worker and database names. Creating either resource is a separate,
 approved step.
 **Cost boundary:** Cloudflare stays on **Workers Free at $0**. No paid plan, no
-paid analytics or Logpush, no KV, R2, or Queues.
+paid analytics, Logpush, or OpenTelemetry trace export, no KV, R2, or Queues.
 
 ## Question
 
@@ -43,12 +45,13 @@ other.
 
 **Every HTTPS request that reaches the test Worker counts** against the cap: the
 correlation probe, each sign-in, any access check, an accidental retry, and any
-asset fetch from a browser tab. Keep browsers and the dashboard closed and issue
-requests only from the CLI.
+asset fetch from a browser tab. Issue this run's requests only from the CLI and
+never open the test Worker's own pages in a browser. Reading traces in the
+Cloudflare dashboard does not send requests to the test Worker and is expected.
 
 | # | Run id | Request | Counts |
 |---|---|---|---|
-| 1 | `staff-cpu-01` | `GET /api/admin/auth/preflight` - read-only correlation probe; the response must be `{"signInEnabled":true,"testerAssuranceEnabled":true}` | yes |
+| 1 | `staff-cpu-01` | `GET /api/admin/auth/preflight` - read-only correlation probe; the response must be `{"signInEnabled":true,"testerAssuranceEnabled":true}`, and its trace must be matched with a CPU value before any password is submitted | yes |
 | 2 | `staff-cpu-02` | First valid-password sign-in | yes |
 | 3 | `staff-cpu-03` | Second valid-password sign-in | yes |
 | 4 | `staff-cpu-04` | Invalid password, known address | yes |
@@ -61,10 +64,10 @@ two flags. The probe is therefore `GET`, which still exercises the tester gate a
 the whole admin API surface.
 
 The probe doubles as an eligibility gate: it must return **both**
-`signInEnabled: true` and `testerAssuranceEnabled: true` **and** its tail event
-must carry a CPU-time field whose unit is documented (see below) before any
-password is submitted. Any other body, a missing CPU field, or an unclear unit
-ends the run.
+`signInEnabled: true` and `testerAssuranceEnabled: true`, **and** its trace must be
+matched by `Cf-Ray` and carry a `cloudflare.cpu_time_ms` value (see below) before
+any password is submitted. Any other body, a missing or ambiguous trace, or an
+absent CPU value ends the run.
 
 Rate limiting: two valid plus two invalid attempts from one address and one IP
 stay inside the gate's 5/address and 10/IP per 15-minute window. Do not re-run
@@ -83,9 +86,9 @@ still be cleaned up and every later command can be pinned:
 | Planned hostname | `certpath-staff-cpu.<workers.dev subdomain>.workers.dev` |
 | Operator egress IP for the allowlist | the address that will appear as `cf-connecting-ip` |
 
-Record after creation: Worker script tag/version id, deployment id, D1 database
-UUID, and the tail session start time. The D1 UUID - not just its name - is what
-teardown verifies against.
+Record after creation: Worker script tag/version id and deployment id, the D1
+database UUID, and the start time of the measurement window used for the trace
+filter. The D1 UUID - not just its name - is what teardown verifies against.
 
 ## Read-only preflight
 
@@ -99,7 +102,7 @@ Every command here is a read. If a read is refused, stop and ask the owner.
 | Request quota | GraphQL `workersInvocationsAdaptive`, previous 24 h, all scripts | Less than 500 requests of headroom |
 | D1 quota | previous 24 h rows read/written across all databases | Less headroom than the D1 budget below |
 | Leftover run resources | script and database inventories for `certpath-staff-cpu` | Either exists; resolve before starting |
-| Telemetry path | `wrangler tail` attaches to an existing script, free, no Logpush | Tail cannot attach |
+| Telemetry path | the temporary Worker deploys with `observability.traces.enabled`, and Workers Observability shows **Traces** for the account | Traces cannot be enabled, or the Traces view is unavailable on the account's plan |
 
 The dashboard plan check is mandatory for any future preflight: the CLI alone is
 not accepted as proof of Workers Free.
@@ -134,6 +137,11 @@ must confirm at least this much headroom before starting.
      random value of at least 32 characters, generated for this run only and
      stored as Worker secrets rather than plain vars
    - no mail, learner, or Google bindings
+   - `observability.traces.enabled` set to `true` with the default sample rate of
+     `1`, and the `triggers.crons` entry removed, in a temporary Wrangler config
+     used for this deployment only. The committed `apps/web/wrangler.jsonc` enables
+     logs only; `observability.enabled` on its own does **not** enable traces, so
+     the traces block must be added explicitly and must not be committed
 4. Confirm the operator address is the allowlisted one, so the sample measures the
    sign-in path rather than the gate's `403`.
 
@@ -141,23 +149,43 @@ Both secrets are destroyed with the temporary Worker and are never written to th
 repository, a shell history, or a log. If either is reused from another
 environment, stop: they must be fresh for this run.
 
-## Telemetry capture
+## Telemetry capture: Workers Traces
 
-```powershell
-wrangler tail certpath-staff-cpu --format json
-```
+The measured value is the **root-span attribute `cloudflare.cpu_time_ms`**, read
+per request in Workers Observability under **Traces** for the temporary Worker. A
+root span belongs to one invocation, which is exactly the per-request quantity the
+question asks about.
 
-No status filter is used, so failed and CPU-killed invocations are captured too.
-For every request record: the complete event object, whatever CPU-time field it
-carries (name and raw value unmodified), `wallTime`, `outcome`, `exceptions`,
-`event.request.url` and method, the `X-CPU-Run-Id` header, and
-`event.response.status`.
+### Evidence for the field, its unit, the Free plan, and the match
 
-### The CPU field and its unit: verified evidence
+| Requirement | Source | Evidence |
+|---|---|---|
+| Exact field | [Spans and attributes](https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/) (updated 2026-10-16) | `cloudflare.cpu_time_ms` is listed under **Attributes available on all root spans** |
+| Unit | same page | "The CPU time used by the Worker invocation, **in milliseconds**" |
+| Free-plan availability | [Observability pricing](https://developers.cloudflare.com/observability/pricing/) (updated 2026-11-11), [Workers tracing announcement](https://blog.cloudflare.com/workers-tracing-now-in-open-beta/), [Traces configuration](https://developers.cloudflare.com/observability/traces/configuration/) | Workers Traces is an included Observability product; Free includes 0.5 GB per day of ingestion with seven-day retention, and "Cloudflare stops ingesting new data when you reach the daily limit"; the announcement states that dashboard viewing is available "on a Workers Free and Paid plan" |
+| Per-request match | [Traces FAQ](https://developers.cloudflare.com/observability/traces/), [Cloudflare Ray ID](https://developers.cloudflare.com/fundamentals/reference/cloudflare-ray-id/), [HTTP headers](https://developers.cloudflare.com/fundamentals/reference/http-headers/) | `cloudflare.ray_id` is "a unique identifier for every request that goes through Cloudflare"; the `Cf-Ray` header **is** that Ray ID and is returned on the response; the documented filter is `cloudflare.ray_id = "<ray>"` |
+| CPU-limit failure | [Spans and attributes](https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/), [Limits](https://developers.cloudflare.com/workers/platform/limits/) | root-span `cloudflare.outcome` values include `exceededCpu` and `exceededMemory`; a CPU-killed invocation answers error `1102`, `Worker exceeded resource limits` |
 
-This runbook does **not** assume that `wrangler tail --format json` emits a field
-named `cpuTime`, and it never infers a unit from the size of a value. Evidence
-gathered for this plan (checked 2026-11-14):
+Rules derived from that evidence:
+
+1. Record the raw `cloudflare.cpu_time_ms` integer unmodified. It is already in
+   milliseconds, so **no conversion is applied**, and no unit is ever inferred from
+   how large the number looks.
+2. `cloudflare.wall_time_ms` is recorded for context only and is never substituted
+   for CPU.
+3. OpenTelemetry export stays off: exporting traces needs a Workers Paid
+   subscription and would send telemetry to a third party. Dashboard viewing on
+   Free is the only telemetry path in this run.
+4. Traces are enabled explicitly for the temporary Worker at the default sample
+   rate of `1`, so the probe is traced as well as every sign-in. The feature is in
+   open beta, and `observability.enabled` on its own enables logs only, so the
+   traces block must be set (setup step 3).
+
+### Why `wrangler tail` is not the telemetry source
+
+`wrangler tail` was rejected because Cloudflare documents no CPU-time field in its
+JSON contract, and this runbook never infers a field or a unit from a value's size.
+Evidence gathered for this plan (checked 2026-11-14):
 
 | Source | Evidence |
 |---|---|
@@ -166,51 +194,52 @@ gathered for this plan (checked 2026-11-14):
 | `wrangler@4.160.0`, the version installed in this repository | `node_modules/wrangler/wrangler-dist/cli.js` contains **zero** occurrences of `cpuTime` (case-insensitive); wrangler forwards the tail event payload rather than naming its fields. |
 | `cloudflare/workers-sdk` code search for `cpuTime` / `wallTime` | One file only: `packages/miniflare/src/workers/observability/tail-to-store.ts`, which keeps the OpenTelemetry attribute name **`cpu_time_ms`** for the local trace store. That is Miniflare's local store, not the `wrangler tail` JSON contract. |
 
-Consequences, applied to the probe before any password is submitted:
+The probe's tail event is therefore never used as a CPU measurement. A tail session
+may optionally be left running only as a convenience for spotting a `1102`
+response as it happens; it supplies no sample, and losing the tail stream is not a
+blocking condition now that traces carry the value.
 
-1. Capture the probe's **complete raw JSON** exactly as printed, preserving every
-   field name and value unmodified.
-2. If the event carries no CPU-time field, telemetry is missing: **stop**. Do not
-   substitute wall time, and do not proceed on the dashboard's separate logs
-   pipeline.
-3. If the event does carry a CPU-time field, identify its **exact name** as
-   emitted. The unit must then be established from provider documentation for
-   that exact field. The only unit evidence found so far (`cpu_time_ms`,
-   milliseconds) belongs to Miniflare's local store and does not transfer to the
-   tail JSON, so it cannot be used as proof.
-4. If the field's unit is not documented, or the documentation contradicts the
-   observed event, the unit is **unclear**: **stop** and bring the raw event for
-   review. Nothing may be inferred from magnitude, from wall time, or from a
-   comparison between requests.
-5. Record the raw value unchanged and convert to milliseconds **only** when the
-   verified unit requires it, labelling every converted sample `normalized` and
-   citing the source that established the unit.
+Any future replacement telemetry source must meet the same standard: exact field
+documented by Cloudflare, unit stated, and no inference from value size. Wall time
+is never a substitute, and aggregated percentiles cannot stand in for a
+per-request value.
 
-A future revision may name a different, documented CPU telemetry source (for
-example an aggregated percentile from the analytics API). Any replacement must
-meet the same standard: exact field documented by Cloudflare, unit stated, and no
-inference from value size. Wall time is never a substitute.
+### Correlation: `Cf-Ray` to `cloudflare.ray_id`
 
-### Correlation
+Request header values are not captured in spans, so the `X-CPU-Run-Id` header does
+not appear in a trace and cannot be the join key. The response's Ray ID is the key,
+corroborated by three fields on the same root span.
 
-1. Issue one request carrying a unique `X-CPU-Run-Id`.
-2. Wait **up to 30 seconds for that request's event**, matching strictly on the
-   `X-CPU-Run-Id` request header. Ignore events carrying any other id.
-3. Optionally cross-check the response's `X-Request-Id` against the event; a
-   mismatch or absence is noted but does not block, because the run id is the
-   authoritative key.
-4. Only after the match is confirmed, record the sample and issue the next
-   request.
+1. Issue one request carrying a unique `X-CPU-Run-Id`, and capture the response's
+   **`Cf-Ray` header verbatim** as it arrives.
+2. Open **Traces** for `certpath-staff-cpu` in Workers Observability and filter
+   `cloudflare.ray_id = "<that ray id>"`.
+3. Accept the match only when all three corroborating fields agree with the request
+   just issued:
+   - **Worker name** - `cloudflare.script_name` and `faas.name` equal
+     `certpath-staff-cpu`
+   - **Path** - `url.path` and `http.request.method` equal the request issued
+   - **Timestamp** - the span time agrees with the response time to the second
+
+   Ray IDs "are not guaranteed to be unique for every request", so a Ray ID alone
+   is not accepted as a match.
+4. Wait **up to 30 seconds** for the trace. Issue no further request while waiting.
+5. Record `faas.invocation_id` with the sample, then issue the next request.
+
+Any of these is a **missing or ambiguous trace** and stops the run before the next
+request: no `Cf-Ray` header on the response, no span for that Ray ID within 30
+seconds, more than one candidate root span, disagreement on Worker name, path, or
+timestamp, or an absent `cloudflare.cpu_time_ms` value.
 
 ## Decision rules, applied from the first request
 
-| Observed (converted to ms only if the verified unit requires it) | Action |
+| Observed | Action |
 |---|---|
-| Verified CPU value at or below 5 ms, event matched, field and unit documented | Continue to the next request |
-| Verified CPU value above 5 ms and below 10 ms | **Hold for review.** Publish the samples and stop measuring |
-| Verified CPU value at or above 10 ms | **Stop.** No further requests |
-| CPU-limit error: `exceededCpu` outcome, `1102`/`5xx`, or an exception indicating the CPU limit | **Stop immediately** |
-| No matching event within 30 s, no CPU-time field, undocumented unit, or a detached tail | **Stop immediately**: telemetry is missing or unclear |
+| `cloudflare.cpu_time_ms` at or below 5 ms, trace matched, value present | Continue to the next request |
+| `cloudflare.cpu_time_ms` above 5 ms and below 10 ms | **Hold for review.** Publish the samples and stop measuring |
+| `cloudflare.cpu_time_ms` at or above 10 ms | **Stop.** No further requests |
+| `cloudflare.outcome` is `exceededCpu`, or the response is error `1102` / `Worker exceeded resource limits` | **Stop immediately**, even when no `cloudflare.cpu_time_ms` value is available |
+| No matching trace within 30 s, an ambiguous trace, or an absent CPU value | **Stop immediately**: telemetry is missing or ambiguous |
 
 The rules start at the probe. A probe that is slow, CPU-killed, or unmatched ends
 the run before any password is submitted. There are no retries for a stopped
@@ -218,12 +247,13 @@ condition.
 
 ## Report format
 
-One row per counted request: id, URL/method, password class, HTTP status, the CPU
-field name as emitted (if any), the raw value unmodified, the cited source for its
-unit, the value in milliseconds only when the verified unit requires conversion,
-`wallTime` in ms, `outcome`, matched event (yes/no), verdict. Followed by: the
-verbatim probe event JSON, requests used out of six, which rule ended the run, and
-the D1 rows read/written and quota readings before and after.
+One row per counted request: id, URL/method, password class, HTTP status, the raw
+`Cf-Ray`, the matched `cloudflare.ray_id`, whether Worker name, path, and timestamp
+agreed (yes/no), `faas.invocation_id`, the raw `cloudflare.cpu_time_ms` value in
+milliseconds, `cloudflare.wall_time_ms`, `cloudflare.outcome`, and the verdict.
+Followed by: the probe's matched root-span attributes, requests used out of six,
+which rule ended the run, and the D1 rows read/written and quota readings before
+and after.
 
 ## Teardown
 
@@ -231,7 +261,8 @@ Both deletions are attempted even if the first fails, every command is pinned to
 the recorded account and resources, and the run is not closed until provider
 inventory shows both resources gone.
 
-1. Stop the `wrangler tail` session.
+1. Delete the uncommitted temporary Wrangler config used for this deployment, and
+   confirm `git status` shows `apps/web/wrangler.jsonc` unchanged.
 2. Pin the account for the rest of the session and confirm it matches the record:
    `$env:CLOUDFLARE_ACCOUNT_ID='<recorded account id>'`, then `wrangler whoami`.
 3. Capture inventory **before** deleting, to confirm the targets are the recorded
@@ -253,7 +284,9 @@ inventory shows both resources gone.
    analytics enabled.
 8. Confirm `certpath-site` and `certpath-ui-preview` still answer `200` and the
    learner paths of the main Worker are unchanged.
-9. Remove local curl outputs and tail logs.
+9. Remove local curl outputs and captured trace exports. Persisted traces expire on
+   their own under Free retention; there is no separate trace resource to delete,
+   and nothing is exported to a third party.
 
 Deleting the database also removes the synthetic accounts, credentials, sessions,
 rate-limit rows, and audit trail.
