@@ -36,6 +36,6 @@ export default {
 
     const loadContext = new RouterContextProvider();
     loadContext.set(cloudflareContext, { env, ctx });
-    return withPreviewHeaders(await requestHandler(request, loadContext));
+    return requestHandler(request, loadContext);
   },
 } satisfies ExportedHandler<Env>;
