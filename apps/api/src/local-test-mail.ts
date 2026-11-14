@@ -1,4 +1,7 @@
-export type LocalTestMailKind = "verify_email" | "password_reset";
+export type LocalTestMailKind =
+  | "verify_email"
+  | "password_reset"
+  | "sign_in_link";
 
 export interface LocalTestMailMessage {
   id: string;
@@ -12,9 +15,9 @@ const maxMessagesPerMailbox = 10;
 const maxStoredMessages = 500;
 
 function lifetimeFor(kind: LocalTestMailKind): number {
-  return kind === "verify_email"
-    ? 24 * 60 * 60 * 1000
-    : 30 * 60 * 1000;
+  if (kind === "verify_email") return 24 * 60 * 60 * 1000;
+  if (kind === "sign_in_link") return 15 * 60 * 1000;
+  return 30 * 60 * 1000;
 }
 
 export class LocalTestMailAdapter {

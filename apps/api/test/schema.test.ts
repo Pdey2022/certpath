@@ -21,6 +21,8 @@ describe("local security D1 schema", () => {
     expect(names).toContain("app_sessions");
     expect(names).toContain("learner_password_credentials");
     expect(names).toContain("learner_auth_tokens");
+    expect(names).toContain("learner_email_sign_in_invites");
+    expect(names).toContain("learner_email_sign_in_tokens");
     expect(names).toContain("local_auth_rate_limit_windows");
     expect(names).toContain("staff_roles");
     expect(names).toContain("certifications");

@@ -58,6 +58,12 @@ Connect the existing CSV preview, draft-only confirmation, and scoped published-
 
 Provider selection and its compatibility proof remain pending approval; do not weaken either staff role's MFA requirement to meet a cost target. Provider-backed registration, Google sign-in/account linking, recovery, session issuance/revocation, and lifecycle-event handling require a separately approved provider and assurance/outage policies. Remaining admin workflows stay separate UI slices. Carry attempt, bookmark, notes, learner-record ownership, and attempt-to-revision snapshot tests into the milestone that implements learner persistence; they are not prerequisites for this content-only slice. Preserve the existing same-exam Pro prerequisite, public SEO, and prototype isolation.
 
+Implementation status: an invite-only email sign-in link proof exists for
+pre-provisioned learners. It is local-only, disabled by default, issues no
+invitations of its own, sends no email, and changes no product rule; Google
+OAuth setup is paused and no provider is selected. See the [email sign-in link
+review](reviews/learner-email-sign-in-links.md).
+
 Acceptance for the remaining identity and admin workflows: cross-user and unauthorised admin requests fail; unsafe account linking fails; import validation prevents accidental publication. Manager cannot access unassigned certifications through direct IDs, list queries, reassignment, imports or exports; cannot change finance/access/security/staff settings. Assignment revocation is effective on subsequent requests. Both staff roles require MFA. Content and role changes are audited.
 
 ## Milestone 3 — Standard learning engine

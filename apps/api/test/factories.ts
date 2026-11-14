@@ -179,3 +179,36 @@ export async function grantTestLearnerAccess(
     .run();
   return id;
 }
+
+export async function createTestLearnerUser(
+  database: SecurityDatabase,
+  options: { status?: "active" | "disabled" } = {},
+): Promise<string> {
+  const userId = crypto.randomUUID();
+  await database
+    .prepare(
+      "INSERT INTO users (id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(userId, options.status ?? "active", testNow, testNow)
+    .run();
+  return userId;
+}
+
+export async function createTestEmailSignInInvite(
+  database: SecurityDatabase,
+  userId: string,
+  options: { email?: string; revokedAt?: number | null } = {},
+): Promise<string> {
+  const email = (
+    options.email ?? `learner-${crypto.randomUUID()}@example.test`
+  ).toLowerCase();
+  await database
+    .prepare(
+      `INSERT INTO learner_email_sign_in_invites (
+         email_normalized, user_id, created_at, revoked_at
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .bind(email, userId, testNow, options.revokedAt ?? null)
+    .run();
+  return email;
+}

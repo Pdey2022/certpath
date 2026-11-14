@@ -1,23 +1,82 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { Link } from "react-router";
 import { isUiPreview } from "../lib/preview-mode";
-import { isPilotSite } from "../lib/learner-auth-api";
+import {
+  getLearnerAuthPreflight,
+  getLearnerEmailLinkPreflight,
+  isPilotSite,
+  isStagingLearnerAuth,
+} from "../lib/learner-auth-api";
 import { isPublicReleaseSite } from "../lib/release-mode";
 import { demoLink, independenceNotice } from "../lib/site-content";
-import { getLearnerAuthPreflight } from "../lib/learner-auth-api";
 
-type LearnerSignInAvailability =
+type LearnerAuthAvailability =
   | "checking"
   | "enabled"
   | "disabled"
   | "unavailable";
 
-const LearnerSignInAvailabilityContext =
-  createContext<LearnerSignInAvailability>("unavailable");
+export type LearnerSignInAvailability = {
+  password: LearnerAuthAvailability;
+  emailLink: LearnerAuthAvailability;
+};
 
-async function checkLearnerSignInAvailability(): Promise<LearnerSignInAvailability> {
+const closedAvailability: LearnerSignInAvailability = {
+  password: "unavailable",
+  emailLink: "disabled",
+};
+
+const checkingAvailability: LearnerSignInAvailability = {
+  password: "checking",
+  emailLink: "checking",
+};
+
+const LearnerSignInAvailabilityContext =
+  createContext<LearnerSignInAvailability>(closedAvailability);
+
+/**
+ * The email-link proof is local-only, so its preflight is skipped on the
+ * release, pilot, preview, and staging origins where it cannot apply.
+ */
+function emailLinkApplies(): boolean {
+  return (
+    !isUiPreview &&
+    !isPublicReleaseSite &&
+    !isPilotSite() &&
+    !isStagingLearnerAuth()
+  );
+}
+
+function closedStatus(
+  availability: LearnerSignInAvailability,
+): "checking" | "disabled" | "unavailable" {
+  if (
+    availability.password === "checking" ||
+    availability.emailLink === "checking"
+  ) {
+    return "checking";
+  }
+  if (
+    availability.password === "unavailable" ||
+    availability.emailLink === "unavailable"
+  ) {
+    return "unavailable";
+  }
+  return "disabled";
+}
+
+async function checkPasswordAvailability(): Promise<LearnerAuthAvailability> {
   try {
     const body = await getLearnerAuthPreflight();
+    return body.signInEnabled ? "enabled" : "disabled";
+  } catch {
+    return "unavailable";
+  }
+}
+
+async function checkEmailLinkAvailability(): Promise<LearnerAuthAvailability> {
+  try {
+    const body = await getLearnerEmailLinkPreflight();
     return body.signInEnabled ? "enabled" : "disabled";
   } catch {
     return "unavailable";
@@ -29,22 +88,33 @@ export function useLearnerSignInAvailability() {
 }
 
 export function PublicLayout({ children }: { children: React.ReactNode }) {
+  const skippedSite = isUiPreview || isPublicReleaseSite || isPilotSite();
+  const withEmailLink = emailLinkApplies();
   const [availability, setAvailability] = useState<LearnerSignInAvailability>(
-    isUiPreview || isPublicReleaseSite || isPilotSite()
-      ? "unavailable"
-      : "checking",
+    skippedSite
+      ? closedAvailability
+      : withEmailLink
+        ? checkingAvailability
+        : { password: "checking", emailLink: "disabled" },
   );
 
   useEffect(() => {
-    if (isUiPreview || isPublicReleaseSite || isPilotSite()) return;
+    if (skippedSite) return;
     let active = true;
-    void checkLearnerSignInAvailability().then((result) => {
-      if (active) setAvailability(result);
-    });
+    void (async () => {
+      const password = await checkPasswordAvailability();
+      const emailLink = withEmailLink
+        ? await checkEmailLinkAvailability()
+        : "disabled";
+      if (active) setAvailability({ password, emailLink });
+    })();
     return () => {
       active = false;
     };
-  }, []);
+  }, [skippedSite, withEmailLink]);
+
+  const anyEnabled =
+    availability.password === "enabled" || availability.emailLink === "enabled";
 
   return (
     <LearnerSignInAvailabilityContext.Provider value={availability}>
@@ -69,13 +139,13 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
                 </>
               ) : isPilotSite() ? (
                 <Link to="/sign-in">Learner sign in</Link>
-              ) : availability === "enabled" ? (
+              ) : anyEnabled ? (
                 <Link to="/sign-in">Learner sign in</Link>
               ) : (
                 <span className="public-nav-status" role="status">
-                  {availability === "checking"
+                  {closedStatus(availability) === "checking"
                     ? "Checking learner sign-in…"
-                    : availability === "disabled"
+                    : closedStatus(availability) === "disabled"
                       ? "Learner sign-in disabled"
                       : "Learner sign-in unavailable"}
                 </span>

@@ -26,6 +26,11 @@ const { default: LearnerSignInRoute } = await import(
 const { LearnerVerifyEmailRoute } = await import("./learner-email-actions");
 const originalFetch = globalThis.fetch;
 
+const preflightPaths = [
+  "/api/auth/local/preflight",
+  "/api/auth/email-link/preflight",
+];
+
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
@@ -70,10 +75,10 @@ test("shows disabled sign-in state without offering the sign-in link or action",
     null,
   );
   assert.equal(screen.queryByRole("button", { name: "Sign in" }), null);
-  assert.deepEqual(paths, ["/api/auth/local/preflight"]);
+  assert.deepEqual(paths, preflightPaths);
 });
 
-test("offers the learner email and password entry when enabled", async () => {
+test("offers the email-link pilot first and keeps the local password proof", async () => {
   const paths: string[] = [];
   globalThis.fetch = async (input) => {
     paths.push(new URL(String(input), browser.location.href).pathname);
@@ -88,12 +93,49 @@ test("offers the learner email and password entry when enabled", async () => {
   const navigationLink = await screen.findByRole("link", {
     name: "Learner sign in",
   });
-  await screen.findByRole("button", { name: "Create account" });
   assert.equal(navigationLink.getAttribute("href"), "/sign-in");
+  assert.ok(await screen.findByRole("button", { name: "Send sign-in link" }));
+  assert.equal(screen.queryByLabelText("Password"), null);
+
+  fireEvent.click(screen.getByRole("button", { name: "Password" }));
+
   assert.ok(screen.getByLabelText("Email address"));
   assert.ok(screen.getByLabelText("Password"));
+  assert.ok(screen.getByRole("button", { name: "Create account" }));
   assert.ok(screen.getByRole("link", { name: "Open the synthetic local test inbox" }));
-  assert.deepEqual(paths, ["/api/auth/local/preflight"]);
+  assert.deepEqual(paths, preflightPaths);
+});
+
+test("requests a single-use sign-in link for the entered address", async () => {
+  const calls: Array<{ path: string; body: unknown }> = [];
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input), browser.location.href).pathname;
+    if (preflightPaths.includes(path)) {
+      return preflightResponse({
+        signInEnabled: true,
+        localMailboxEnabled: true,
+      });
+    }
+    calls.push({ path, body: JSON.parse(String(init?.body)) });
+    return preflightResponse({
+      message: "If the address is eligible, check the local test inbox.",
+    });
+  };
+
+  renderSignIn();
+  fireEvent.change(await screen.findByLabelText("Email address"), {
+    target: { value: "learner@example.test" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Send sign-in link" }));
+  await screen.findByText("If the address is eligible, check the local test inbox.");
+
+  assert.deepEqual(calls, [
+    {
+      path: "/api/auth/email-link/request",
+      body: { email: "learner@example.test" },
+    },
+  ]);
+  assert.equal(screen.queryByLabelText("Password"), null);
 });
 
 test("registration requests only an email and asks the learner to set a password after verification", async () => {
@@ -102,7 +144,7 @@ test("registration requests only an email and asks the learner to set a password
   globalThis.fetch = async (input, init) => {
     const path = new URL(String(input), browser.location.href).pathname;
     paths.push(path);
-    if (path === "/api/auth/local/preflight") {
+    if (preflightPaths.includes(path)) {
       return preflightResponse({
         signInEnabled: true,
         localMailboxEnabled: true,
@@ -124,10 +166,7 @@ test("registration requests only an email and asks the learner to set a password
   await screen.findByText("If the address is eligible, check the local test inbox.");
 
   assert.deepEqual(registrationBodies, [{ email: "learner@example.test" }]);
-  assert.deepEqual(paths, [
-    "/api/auth/local/preflight",
-    "/api/auth/local/register",
-  ]);
+  assert.deepEqual(paths, [...preflightPaths, "/api/auth/local/register"]);
 });
 
 test("verification waits for password selection and submits token and password together", async () => {

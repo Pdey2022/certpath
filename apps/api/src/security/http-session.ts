@@ -101,6 +101,22 @@ export async function createCsrfToken(
   return `v1.${base64Url(signature)}`;
 }
 
+export function sessionCookie(
+  value: string,
+  maxAgeSeconds: number,
+  secure: boolean,
+  name: SessionCookieName = LEGACY_SESSION_COOKIE,
+): string {
+  return `${name}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
+}
+
+export function clearSessionCookie(
+  secure: boolean,
+  name: SessionCookieName = LEGACY_SESSION_COOKIE,
+): string {
+  return `${name}=; Path=/; Max-Age=0; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
+}
+
 export function constantTimeEqual(left: string, right: string): boolean {
   let difference = left.length ^ right.length;
   const length = Math.max(left.length, right.length);

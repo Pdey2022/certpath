@@ -49,6 +49,39 @@ links appear in `/local-inbox` and are held in Worker memory. No real email is
 sent, and no credentials, cloud resources, or deployment settings are used.
 Keep these flags disabled in any deployment configuration.
 
+### Invite-only email sign-in links (local proof)
+
+Email-link sign-in is the second local-only proof. No account is created here:
+only an address that an operator has pre-provisioned for an existing learner
+account can receive a link. Links live for 15 minutes, are stored as SHA-256
+digests only, and are single use. Opening a link shows a confirmation page and
+does not spend it, so mail scanners cannot consume it; confirming redeems the
+link atomically and creates the normal opaque session cookie.
+
+Provision a synthetic learner (local D1 only; the helper cannot target a remote
+database):
+
+```powershell
+node apps/api/scripts/provision-learner-sign-in-invite.mjs --email learner@example.test
+```
+
+Then set the flags below in `apps/web/.dev.vars` and restart `npm run dev`:
+
+```
+LOCAL_LEARNER_EMAIL_LINK_ENABLED=true
+LOCAL_TEST_MAIL_ENABLED=true
+```
+
+Request a link at `/sign-in`, open `/local-inbox` with the same address, follow
+the link to `/sign-in/link`, and confirm. `--user-id <uuid>` attaches the invite
+to an existing account and re-provisions a revoked invite; `--revoke` retires
+one. Messages stay in Worker memory, so a restart clears the inbox. No email
+provider, DNS record, or outbound request is involved, and the pilot does not
+issue exam grants: `/app/home` only lists exams that already have an active
+Standard grant. The protected practice API requires an `https:` origin, so the
+full dashboard journey is covered by the Worker/D1 tests rather than the
+plain-`http` dev server. Google OAuth setup is paused.
+
 ## Verification
 
 ```powershell
