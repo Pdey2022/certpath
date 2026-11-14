@@ -255,7 +255,8 @@ BEGIN
     certification_id, reason, occurred_at
   )
   VALUES (
-    NEW.operation_id, NEW.created_by_user_id, 'access-grant',
+    NEW.operation_id, NEW.created_by_user_id,
+    CASE WHEN NEW.created_by_user_id IS NULL THEN 'access-grant' END,
     'access_granted', 'learner_access_grant', NEW.id, NEW.certification_id,
     NEW.sku, NEW.created_at
   );
@@ -270,7 +271,7 @@ BEGIN
     certification_id, reason, occurred_at
   )
   VALUES (
-    NEW.revocation_operation_id, NEW.revoked_by_user_id, 'access-grant',
+    NEW.revocation_operation_id, NEW.revoked_by_user_id, NULL,
     'access_revoked', 'learner_access_grant', NEW.id, NEW.certification_id,
     'Access revoked', NEW.revoked_at
   );

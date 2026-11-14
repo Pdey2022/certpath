@@ -48,8 +48,10 @@ Grace is read-only on purpose. Capabilities:
   learner and certification covers its whole window. Pro can never outlive
   Standard, even if application code is wrong.
 - Grants carrying an `operation_id` write an `access_granted` audit event; a
-  revocation writes `access_revoked`. Legacy rows without provenance are left
-  alone.
+  revocation writes `access_revoked`. The event names the staff member who acted
+  as `actor_user_id`, and falls back to the `access-grant` service ref only when
+  the grant has no named actor. `audit_events` allows one or the other, never
+  both. Legacy rows without provenance are left alone.
 
 ## Prices and purchase rules
 

@@ -260,12 +260,13 @@ async function insertGrant(options: {
   startsAt: number;
   expiresAt: number;
   operationId?: string | null;
+  createdByUserId?: string | null;
 }): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO learner_access_grants (
        id, user_id, certification_id, feature, starts_at, expires_at,
-       revoked_at, created_at, sku, source, operation_id
-     ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'purchase', ?)`,
+       revoked_at, created_at, sku, source, operation_id, created_by_user_id
+     ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'purchase', ?, ?)`,
   )
     .bind(
       options.id,
@@ -277,6 +278,7 @@ async function insertGrant(options: {
       options.startsAt,
       options.feature === "pro" ? "pro-3m" : "standard-3m",
       options.operationId ?? null,
+      options.createdByUserId ?? null,
     )
     .run();
 }
@@ -323,6 +325,67 @@ describe("storage layer guarantees", () => {
       .bind(operationId)
       .first<{ action: string }>();
     expect(audit?.action).toBe("access_granted");
+  });
+
+  it("audits a purchase made by a named actor", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const operationId = `test-access:${crypto.randomUUID()}`;
+    await insertGrant({
+      id: crypto.randomUUID(),
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 90 * day,
+      operationId,
+      createdByUserId: userId,
+    });
+
+    const audit = await env.DB.prepare(
+      `SELECT action, actor_user_id, actor_ref FROM audit_events
+       WHERE operation_id = ?`,
+    )
+      .bind(operationId)
+      .first<{ action: string; actor_user_id: string; actor_ref: string }>();
+    expect(audit).toMatchObject({
+      action: "access_granted",
+      actor_user_id: userId,
+      actor_ref: null,
+    });
+  });
+
+  it("audits a revocation made by a named actor", async () => {
+    const { userId, certificationId } = await seedUserAndCertification();
+    const grantId = crypto.randomUUID();
+    const operationId = `test-revoke:${crypto.randomUUID()}`;
+    await insertGrant({
+      id: grantId,
+      userId,
+      certificationId,
+      feature: "standard",
+      startsAt: start,
+      expiresAt: start + 90 * day,
+    });
+
+    await env.DB.prepare(
+      `UPDATE learner_access_grants
+       SET revoked_at = ?, revocation_operation_id = ?, revoked_by_user_id = ?
+       WHERE id = ?`,
+    )
+      .bind(start + day, operationId, userId, grantId)
+      .run();
+
+    const audit = await env.DB.prepare(
+      `SELECT action, actor_user_id, actor_ref FROM audit_events
+       WHERE operation_id = ?`,
+    )
+      .bind(operationId)
+      .first<{ action: string; actor_user_id: string; actor_ref: string }>();
+    expect(audit).toMatchObject({
+      action: "access_revoked",
+      actor_user_id: userId,
+      actor_ref: null,
+    });
   });
 
   it("still accepts legacy-shaped inserts without provenance", async () => {
