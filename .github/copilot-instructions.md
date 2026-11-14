@@ -10,3 +10,7 @@
 - Do not add real question banks, personal data, credentials, billing, or
   production integrations.
 - Run `npm run verify` and report actual results.
+- Work through the two-agent process in `docs/agent-workflow.md`: ARC designs
+  and reviews (`.github/agents/arc.agent.md`), DEV implements and tests
+  (`.github/agents/dev.agent.md`). Only DEV writes code; only the owner approves
+  a merge, a deployment or a provisioning step.
