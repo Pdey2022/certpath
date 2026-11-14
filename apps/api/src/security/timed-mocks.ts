@@ -1,6 +1,7 @@
 import type { TimedMockAttemptResponse } from "@certpath/contracts";
 import type { SecurityDatabase, D1PreparedStatement } from "./database.ts";
 import type { PracticeResult } from "./practice.ts";
+import { recordReadinessForAttempt } from "./readiness-snapshots.ts";
 
 type MockFailure =
   | "access-required"
@@ -320,7 +321,7 @@ async function finishExpired(
   attemptId: string,
   now: number,
 ): Promise<void> {
-  await database
+  const finished = await database
     .prepare(
       `UPDATE timed_mock_attempts AS attempt
        SET state = 'completed', completion_reason = 'timed_out',
@@ -336,6 +337,9 @@ async function finishExpired(
     )
     .bind(now, now, attemptId, userId, now, tokenDigest, now, now, now)
     .run();
+  if (finished.meta.changes > 0) {
+    await recordReadinessForAttempt(database, attemptId, now);
+  }
 }
 
 async function loadResponse(
@@ -839,7 +843,7 @@ export async function submitTimedMock(
   if (current.value.attempt.version !== input.expectedVersion) {
     return { ok: false, reason: "conflict" };
   }
-  await database
+  const completed = await database
     .prepare(
       `UPDATE timed_mock_attempts AS attempt
        SET state = 'completed', completion_reason = 'learner_submitted',
@@ -860,6 +864,9 @@ export async function submitTimedMock(
       now, tokenDigest, now, now, now,
     )
     .run();
+  if (completed.meta.changes > 0) {
+    await recordReadinessForAttempt(database, attemptId, now);
+  }
   const finalized = await getTimedMockAttempt(database, userId, tokenDigest, attemptId, now);
   if (!finalized.ok) return finalized;
   if (finalized.value.attempt.state === "completed") return finalized;

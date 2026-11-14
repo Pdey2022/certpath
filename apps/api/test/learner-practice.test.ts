@@ -1331,4 +1331,136 @@ describe("protected learner practice Worker/D1 boundary", () => {
     expect(crossExam.status).toBe(403);
     assertPrivate(crossExam);
   });
+
+  it("records one readiness snapshot when a mock completes", async () => {
+    const scope = await createContentScope(database);
+    await publishTimedMockQuestions(scope);
+    const learner = await createLearner(scope.certificationId);
+    const started = await createTimedMock(learner, scope);
+    expect(started.response.status).toBe(201);
+
+    const answered = await request(
+      learner,
+      `/mocks/${started.body.attempt.id}/answers`,
+      {
+        method: "POST",
+        body: {
+          expectedVersion: 1,
+          requestId: crypto.randomUUID(),
+          position: 0,
+          selectedOptionKey: "A",
+        },
+      },
+    );
+    expect(answered.status).toBe(200);
+
+    const submitted = await request(
+      learner,
+      `/mocks/${started.body.attempt.id}/submit`,
+      {
+        method: "POST",
+        body: {
+          expectedVersion: 2,
+          requestId: crypto.randomUUID(),
+        },
+      },
+    );
+    expect(submitted.status).toBe(200);
+
+    const snapshot = await database
+      .prepare(
+        `SELECT band, score, is_ready, mocks_count, questions_count,
+                basis_json, source_attempt_id, formula_version
+         FROM readiness_snapshots WHERE user_id = ?`,
+      )
+      .bind(learner.userId)
+      .all<{
+        band: string;
+        score: number;
+        is_ready: number;
+        mocks_count: number;
+        questions_count: number;
+        basis_json: string;
+        source_attempt_id: string;
+        formula_version: string;
+      }>();
+    expect(snapshot.results).toHaveLength(1);
+    expect(snapshot.results[0]).toMatchObject({
+      mocks_count: 1,
+      questions_count: 10,
+      source_attempt_id: started.body.attempt.id,
+      formula_version: "v1",
+    });
+    expect(JSON.parse(snapshot.results[0]!.basis_json)).toEqual({
+      mocks: 1,
+      questions: 10,
+      blueprintWeighted: true,
+    });
+  });
+
+  it("does not append a second snapshot for the same mock", async () => {
+    const scope = await createContentScope(database);
+    await publishTimedMockQuestions(scope);
+    const learner = await createLearner(scope.certificationId);
+    const started = await createTimedMock(learner, scope);
+    const attemptId = started.body.attempt.id;
+
+    await request(learner, `/mocks/${attemptId}/submit`, {
+      method: "POST",
+      body: { expectedVersion: 1, requestId: crypto.randomUUID() },
+    });
+    await request(learner, `/mocks/${attemptId}`);
+    await request(learner, `/mocks/${attemptId}`);
+
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM readiness_snapshots WHERE user_id = ?",
+        )
+        .bind(learner.userId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 1 });
+  });
+
+  it("keeps readiness snapshots append-only", async () => {
+    const scope = await createContentScope(database);
+    await publishTimedMockQuestions(scope);
+    const learner = await createLearner(scope.certificationId);
+    const started = await createTimedMock(learner, scope);
+    await request(learner, `/mocks/${started.body.attempt.id}/submit`, {
+      method: "POST",
+      body: { expectedVersion: 1, requestId: crypto.randomUUID() },
+    });
+
+    await expect(
+      database.prepare("UPDATE readiness_snapshots SET score = 100").run(),
+    ).rejects.toThrow(/append-only/);
+    await expect(
+      database.prepare("DELETE FROM readiness_snapshots").run(),
+    ).rejects.toThrow(/append-only/);
+  });
+
+  it("never records readiness from practice alone", async () => {    const scope = await createContentScope(database);
+    await publishQuestion(scope, `readiness-practice-${crypto.randomUUID()}`);
+    const learner = await createLearner(scope.certificationId);
+    const practice = await createPractice(learner, scope, 1);
+    expect(practice.response.status).toBe(201);
+    await request(learner, `/attempts/${practice.body.attempt.id}/answers`, {
+      method: "POST",
+      body: {
+        expectedVersion: 1,
+        requestId: crypto.randomUUID(),
+        selectedOptionKey: "A",
+      },
+    });
+
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM readiness_snapshots WHERE user_id = ?",
+        )
+        .bind(learner.userId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+  });
 });
