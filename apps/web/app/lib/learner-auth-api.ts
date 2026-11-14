@@ -8,6 +8,7 @@ import {
 
 const localAuthRoot = "/api/auth/local";
 const stagingAuthRoot = "/api/auth/staging";
+const googleAuthRoot = "/api/auth/google";
 const stagingAuthOrigin =
   "https://learner-auth-staging.certpath.workers.dev";
 const localStagingAuthOrigin =
@@ -19,6 +20,12 @@ export function isStagingLearnerAuth(): boolean {
     (window.location.origin === stagingAuthOrigin ||
       window.location.origin === localStagingAuthOrigin)
   );
+}
+
+export function startGoogleSignIn(): void {
+  if (typeof window !== "undefined") {
+    window.location.assign("/api/auth/google/start");
+  }
 }
 
 function authRoot(): string {
@@ -38,10 +45,11 @@ async function requestJson<T>(
   path: string,
   schema: { parse(value: unknown): T },
   init: RequestInit = {},
+  root: string = authRoot(),
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${authRoot()}${path}`, {
+    response = await fetch(`${root}${path}`, {
       ...init,
       credentials: "same-origin",
       cache: "no-store",
@@ -81,6 +89,15 @@ async function requestJson<T>(
 
 export function getLearnerAuthPreflight() {
   return requestJson("/preflight", localLearnerAuthPreflightResponseSchema);
+}
+
+export function getGoogleSignInPreflight() {
+  return requestJson(
+    "/preflight",
+    localLearnerAuthPreflightResponseSchema,
+    {},
+    googleAuthRoot,
+  );
 }
 
 export function registerLearner(email: string) {

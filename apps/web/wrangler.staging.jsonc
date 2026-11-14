@@ -10,7 +10,10 @@
 		"PUBLIC_SITE_ORIGIN": "https://learner-auth-staging.certpath.workers.dev",
 		"STAGING_LEARNER_AUTH_ENABLED": "true",
 		"STAGING_LEARNER_EMAIL": "learner@example.test",
-		"AWS_REGION": "eu-north-1"
+		"AWS_REGION": "eu-north-1",
+		"LEARNER_GOOGLE_OIDC_ENABLED": "false",
+		"GOOGLE_OIDC_CLIENT_ID": "",
+		"GOOGLE_OIDC_REDIRECT_URI": ""
 	},
 	"d1_databases": [
 		{
