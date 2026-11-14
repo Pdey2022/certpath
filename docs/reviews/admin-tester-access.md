@@ -146,7 +146,10 @@ scrypt profile. Deployment therefore requires one of: the existing SigV4 Lambda
 verifier path already built for the staging learner (not $0), an approved paid
 plan, or an approved KDF change. The `createStaffAuthApi(now, verifyPassword)`
 factory takes the verifier as an argument precisely so that decision does not
-require rewiring the route.
+require rewiring the route. The measurement that would confirm this on the full
+HTTPS request path is specified in the [staff sign-in CPU
+runbook](admin-staff-signin-cpu-runbook.md); it is a plan only and has not been
+executed.
 
 ## Rollback steps
 
