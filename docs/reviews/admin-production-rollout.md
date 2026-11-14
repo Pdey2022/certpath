@@ -130,14 +130,17 @@ containment of the email local part, and no reuse across the three accounts.
 
 **Provisioning path.** `npm run staff:provision`
 (`apps/api/scripts/provision-staff-accounts.ts`) supports an explicit remote mode:
-`--remote --expect-database-id <recorded certpath-admin UUID>`. Before its first
-write it checks `wrangler whoami --json` for the Certpath account and
-`wrangler d1 info certpath-admin --json` for the exact UUID, and it aborts with zero
-writes on a wrong account, a wrong database name, a wrong UUID, or an existing
-tester account or synthetic certification. Local mode stays the default. Running it
-against the production database is still an owner-approved step, and the remote path
-has so far been exercised only by tests that mock the Cloudflare CLI against an
-isolated D1 - never against the real database.
+`--remote --expect-database-id <recorded certpath-admin UUID>`. It resolves
+`certpath-admin` by name **once**, checks `wrangler whoami --json` for the Certpath
+account and `wrangler d1 info certpath-admin --json` for the exact UUID, then writes
+that UUID into a run-only Wrangler config and performs **every** later read and write
+through that binding - so a database swapped behind the name after the check
+receives nothing. It aborts with zero writes on a wrong account, a wrong database
+name, a wrong UUID, a missing UUID, or an existing tester account or synthetic
+certification. Local mode stays the default. Running it against the production
+database is still an owner-approved step, and the remote path has so far been
+exercised only by tests that mock the Cloudflare CLI against an isolated D1 - never
+against the real database.
 
 The script seeds exactly one synthetic certification and exam version
 (`--certification-slug`, `--certification-name`, `--exam-version-key`) and assigns

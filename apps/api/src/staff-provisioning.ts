@@ -3,10 +3,17 @@
 // Kept free of Node builtins so the operator script and the tests run the same
 // code: the tests execute it under workerd against an isolated D1 database with
 // a mocked Cloudflare CLI.
+//
+// Remote safety model:
+//   1. Preflight resolves `certpath-admin` by name once and records its UUID.
+//   2. That UUID is written into a run-only Wrangler config as a binding.
+//   3. Every later read and write addresses the binding, never the name, so a
+//      database swapped behind the name after preflight receives nothing.
 
 export const certpathAccountId = "ef67137c4d1556f7f51f1cb3f1f420f3";
 export const remoteStaffDatabaseName = "certpath-admin";
 export const localStaffDatabaseName = "certpath-local";
+export const pinnedDatabaseBinding = "STAFF_PROVISIONING_DB";
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -23,11 +30,21 @@ export class ProvisioningAbort extends Error {
 
 export type WranglerRunner = (args: string[]) => string | Promise<string>;
 
-export type ProvisioningTarget = {
-  databaseName: string;
-  remote: boolean;
-  expectedDatabaseId: string | null;
-};
+/** What the operator asked for, before the pinned config exists. */
+export type ProvisioningSelection =
+  | { kind: "local"; databaseName: string }
+  | { kind: "remote"; databaseName: string; expectedDatabaseId: string };
+
+/** Where reads and writes actually go. Remote targets are UUID-pinned. */
+export type ProvisioningTarget =
+  | { kind: "local"; databaseName: string }
+  | {
+      kind: "remote";
+      databaseName: string;
+      expectedDatabaseId: string;
+      bindingName: string;
+      configPath: string;
+    };
 
 export type ProvisioningIdentifiers = {
   emails: [string, string, string];
@@ -45,7 +62,9 @@ export type ProvisioningIdentifiers = {
  * Remote writes are opt-in: `--remote` must be paired with the exact database
  * UUID recorded before creation. The local database keeps its existing default.
  */
-export function selectProvisioningTarget(argv: string[]): ProvisioningTarget {
+export function selectProvisioningTarget(
+  argv: string[],
+): ProvisioningSelection {
   const remote = argv.includes("--remote");
   const idIndex = argv.indexOf("--expect-database-id");
   const expected = idIndex === -1 ? undefined : argv[idIndex + 1];
@@ -62,11 +81,7 @@ export function selectProvisioningTarget(argv: string[]): ProvisioningTarget {
         "--expect-database-id only applies to --remote provisioning",
       );
     }
-    return {
-      databaseName: localStaffDatabaseName,
-      remote: false,
-      expectedDatabaseId: null,
-    };
+    return { kind: "local", databaseName: localStaffDatabaseName };
   }
   if (!expected) {
     throw new ProvisioningAbort(
@@ -81,9 +96,39 @@ export function selectProvisioningTarget(argv: string[]): ProvisioningTarget {
     );
   }
   return {
+    kind: "remote",
     databaseName: remoteStaffDatabaseName,
-    remote: true,
     expectedDatabaseId: expected.toLowerCase(),
+  };
+}
+
+/**
+ * Builds the pinned execution target. The verified UUID is the only address
+ * used from here on; the database name is never resolved again.
+ */
+export function pinRemoteTarget(
+  selection: ProvisioningSelection,
+  configPath: string,
+): ProvisioningTarget {
+  if (selection.kind === "local") return selection;
+  if (!selection.expectedDatabaseId) {
+    throw new ProvisioningAbort(
+      "missing-database-id",
+      "the verified certpath-admin UUID is unavailable; refusing to write",
+    );
+  }
+  if (!configPath) {
+    throw new ProvisioningAbort(
+      "missing-pinned-config",
+      "the pinned Wrangler config for the verified database is unavailable",
+    );
+  }
+  return {
+    kind: "remote",
+    databaseName: selection.databaseName,
+    expectedDatabaseId: selection.expectedDatabaseId,
+    bindingName: pinnedDatabaseBinding,
+    configPath,
   };
 }
 
@@ -93,10 +138,7 @@ function parseJson(stdout: string, label: string): unknown {
   const candidates = [objectStart, arrayStart].filter((value) => value !== -1);
   const start = candidates.length === 0 ? -1 : Math.min(...candidates);
   if (start === -1) {
-    throw new ProvisioningAbort(
-      "invalid-output",
-      `${label} did not return JSON`,
-    );
+    throw new ProvisioningAbort("invalid-output", `${label} did not return JSON`);
   }
   try {
     return JSON.parse(stdout.slice(start));
@@ -106,11 +148,30 @@ function parseJson(stdout: string, label: string): unknown {
 }
 
 function executeArguments(target: ProvisioningTarget, sql: string): string[] {
+  if (target.kind === "local") {
+    return [
+      "d1",
+      "execute",
+      target.databaseName,
+      "--local",
+      "--json",
+      "--command",
+      sql,
+    ];
+  }
+  if (!target.expectedDatabaseId || !target.bindingName || !target.configPath) {
+    throw new ProvisioningAbort(
+      "missing-database-id",
+      "the verified database target is incomplete; refusing to run",
+    );
+  }
   return [
     "d1",
     "execute",
-    target.databaseName,
-    target.remote ? "--remote" : "--local",
+    target.bindingName,
+    "--remote",
+    "--config",
+    target.configPath,
     "--json",
     "--command",
     sql,
@@ -142,8 +203,9 @@ async function runCounts(
 }
 
 /**
- * Fail closed unless the CLI is authenticated to the Certpath account and the
- * named database resolves to the exact recorded UUID.
+ * Fail closed unless the CLI is authenticated to the Certpath account and
+ * `certpath-admin` currently resolves to the exact recorded UUID. This is the
+ * only name-based lookup in the whole run.
  */
 export async function assertRemoteTarget(
   run: WranglerRunner,

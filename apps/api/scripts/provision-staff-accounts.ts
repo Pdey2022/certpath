@@ -16,12 +16,17 @@
 //     --manager editor@example.test \
 //     --remote --expect-database-id <recorded certpath-admin UUID>
 //
-// `--remote` refuses to continue unless the CLI is authenticated to the
-// Certpath account and certpath-admin resolves to that exact UUID, and it
-// refuses if any tester account or the synthetic certification already exists.
+// Remote mode resolves `certpath-admin` by name exactly once. The verified UUID
+// is written into a run-only Wrangler config as a binding, and every later read
+// and write addresses that binding - so a database swapped behind the name after
+// preflight receives nothing. The script refuses to continue unless the CLI is
+// authenticated to the Certpath account and the name resolves to that exact UUID,
+// and it refuses if any tester account or the synthetic certification exists.
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashLearnerPassword } from "../src/security/password-hashing.ts";
 import {
@@ -31,6 +36,9 @@ import {
   assertRemoteTarget,
   certpathAccountId,
   confirmProvisioning,
+  pinRemoteTarget,
+  pinnedDatabaseBinding,
+  remoteStaffDatabaseName,
   selectProvisioningTarget,
   type ProvisioningIdentifiers,
   type ProvisioningTarget,
@@ -137,6 +145,55 @@ function createRunner(): WranglerRunner {
   };
 }
 
+/**
+ * Writes the verified UUID into a run-only Wrangler config and reads it back.
+ * Remote reads and writes address this binding, never the database name.
+ */
+function createPinnedConfig(databaseId: string): string {
+  const configPath = join(
+    tmpdir(),
+    `certpath-staff-provisioning-${process.pid}-${Date.now()}.jsonc`,
+  );
+  const config = {
+    name: "certpath-staff-provisioning",
+    compatibility_date: "2026-11-10",
+    d1_databases: [
+      {
+        binding: pinnedDatabaseBinding,
+        database_name: remoteStaffDatabaseName,
+        database_id: databaseId,
+      },
+    ],
+  };
+  try {
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    const written = JSON.parse(readFileSync(configPath, "utf8")) as {
+      d1_databases?: { database_id?: unknown }[];
+    };
+    const pinned = written.d1_databases?.[0]?.database_id;
+    if (typeof pinned !== "string" || pinned.toLowerCase() !== databaseId) {
+      throw new ProvisioningAbort(
+        "missing-database-id",
+        "the pinned config does not carry the verified database UUID; nothing was written",
+      );
+    }
+  } catch (error) {
+    rmSync(configPath, { force: true });
+    throw error instanceof ProvisioningAbort
+      ? error
+      : new ProvisioningAbort(
+          "missing-pinned-config",
+          `could not write the pinned database config: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+  }
+  return configPath;
+}
+
 function validatePassword(
   password: string,
   label: string,
@@ -162,12 +219,13 @@ function validatePassword(
 }
 
 const argv = process.argv.slice(2);
-let target: ProvisioningTarget;
-try {
-  target = selectProvisioningTarget(argv);
-} catch (error) {
-  fail(error instanceof ProvisioningAbort ? error.message : String(error));
-}
+const selection = (() => {
+  try {
+    return selectProvisioningTarget(argv);
+  } catch (error) {
+    fail(error instanceof ProvisioningAbort ? error.message : String(error));
+  }
+})();
 
 const adminsArg = option(argv, "--admins");
 const managerArg = option(argv, "--manager");
@@ -208,74 +266,86 @@ const emails: [string, string, string] = [
 ];
 const labels = ["Global Admin 1", "Global Admin 2", "Manager"];
 const run = createRunner();
+let pinnedConfigPath: string | null = null;
 
-try {
-  if (target.remote) {
-    await assertRemoteTarget(run, target.expectedDatabaseId!);
-    console.error(
-      `remote target verified: ${target.databaseName} (${target.expectedDatabaseId})`,
+async function main(): Promise<void> {
+  let target: ProvisioningTarget = selection;
+  try {
+    if (selection.kind === "remote") {
+      await assertRemoteTarget(run, selection.expectedDatabaseId);
+      pinnedConfigPath = createPinnedConfig(selection.expectedDatabaseId);
+      target = pinRemoteTarget(selection, pinnedConfigPath);
+      console.error(
+        `remote target pinned: ${remoteStaffDatabaseName} (${selection.expectedDatabaseId})`,
+      );
+    }
+    await assertNoExistingTesterRows(run, target, { emails, certificationSlug });
+  } catch (error) {
+    fail(error instanceof ProvisioningAbort ? error.message : String(error));
+  }
+
+  let passwords: string[];
+  if (argv.includes("--password-stdin")) {
+    passwords = await readPasswordsFromStdin();
+  } else {
+    passwords = [];
+    for (const [index, label] of labels.entries()) {
+      const password = await readSecret(`${label} (${emails[index]}), password: `);
+      const confirmation = await readSecret(`${label}, repeat password: `);
+      if (password !== confirmation) fail(`${label}: the passwords did not match`);
+      passwords.push(password);
+    }
+  }
+  for (const [index, label] of labels.entries()) {
+    validatePassword(
+      passwords[index]!,
+      label,
+      emails[index]!,
+      passwords.filter((_, other) => other !== index),
     );
   }
-  await assertNoExistingTesterRows(run, target, { emails, certificationSlug });
-} catch (error) {
-  fail(error instanceof ProvisioningAbort ? error.message : String(error));
-}
 
-let passwords: string[];
-if (argv.includes("--password-stdin")) {
-  passwords = await readPasswordsFromStdin();
-} else {
-  passwords = [];
-  for (const [index, label] of labels.entries()) {
-    const password = await readSecret(`${label} (${emails[index]}), password: `);
-    const confirmation = await readSecret(`${label}, repeat password: `);
-    if (password !== confirmation) fail(`${label}: the passwords did not match`);
-    passwords.push(password);
+  const hashes: string[] = [];
+  for (const [index, password] of passwords.entries()) {
+    console.error(`hashing ${labels[index]} credential…`);
+    hashes.push(await hashLearnerPassword(password));
   }
-}
-for (const [index, label] of labels.entries()) {
-  validatePassword(
-    passwords[index]!,
-    label,
-    emails[index]!,
-    passwords.filter((_, other) => other !== index),
+
+  const identifiers: ProvisioningIdentifiers = {
+    emails,
+    userIds: [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()],
+    certificationId: crypto.randomUUID(),
+    examVersionId: crypto.randomUUID(),
+    certificationSlug,
+    certificationName,
+    examVersionKey,
+    hashes: [hashes[0]!, hashes[1]!, hashes[2]!],
+    now: Date.now(),
+  };
+
+  try {
+    await applyProvisioning(run, target, identifiers);
+    await confirmProvisioning(run, target, identifiers);
+  } catch (error) {
+    fail(error instanceof ProvisioningAbort ? error.message : String(error));
+  }
+
+  console.log(
+    `Provisioned the tester staff accounts in ${target.kind === "remote" ? `${remoteStaffDatabaseName} (pinned ${target.expectedDatabaseId})` : `${target.databaseName} (local)`}.`,
+  );
+  console.log(`Global Admin 1: ${emails[0]} (${identifiers.userIds[0]})`);
+  console.log(`Global Admin 2: ${emails[1]} (${identifiers.userIds[1]})`);
+  console.log(`Manager:        ${emails[2]} (${identifiers.userIds[2]})`);
+  console.log(
+    `Synthetic exam: ${certificationSlug} (${identifiers.certificationId}), version ${examVersionKey} (${identifiers.examVersionId})`,
+  );
+  console.log(
+    "Passwords were hashed in this process and were not printed. Store them in your password manager now; they cannot be recovered.",
   );
 }
 
-const hashes: string[] = [];
-for (const [index, password] of passwords.entries()) {
-  console.error(`hashing ${labels[index]} credential…`);
-  hashes.push(await hashLearnerPassword(password));
-}
-
-const identifiers: ProvisioningIdentifiers = {
-  emails,
-  userIds: [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()],
-  certificationId: crypto.randomUUID(),
-  examVersionId: crypto.randomUUID(),
-  certificationSlug,
-  certificationName,
-  examVersionKey,
-  hashes: [hashes[0]!, hashes[1]!, hashes[2]!],
-  now: Date.now(),
-};
-
 try {
-  await applyProvisioning(run, target, identifiers);
-  await confirmProvisioning(run, target, identifiers);
-} catch (error) {
-  fail(error instanceof ProvisioningAbort ? error.message : String(error));
+  await main();
+} finally {
+  if (pinnedConfigPath) rmSync(pinnedConfigPath, { force: true });
 }
-
-console.log(
-  `Provisioned the tester staff accounts in ${target.databaseName}${target.remote ? " (remote)" : " (local)"}.`,
-);
-console.log(`Global Admin 1: ${emails[0]} (${identifiers.userIds[0]})`);
-console.log(`Global Admin 2: ${emails[1]} (${identifiers.userIds[1]})`);
-console.log(`Manager:        ${emails[2]} (${identifiers.userIds[2]})`);
-console.log(
-  `Synthetic exam: ${certificationSlug} (${identifiers.certificationId}), version ${examVersionKey} (${identifiers.examVersionId})`,
-);
-console.log(
-  "Passwords were hashed in this process and were not printed. Store them in your password manager now; they cannot be recovered.",
-);

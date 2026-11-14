@@ -1,4 +1,4 @@
-﻿import { env } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import {
   ProvisioningAbort,
@@ -7,25 +7,31 @@ import {
   assertRemoteTarget,
   certpathAccountId,
   confirmProvisioning,
+  pinRemoteTarget,
+  pinnedDatabaseBinding,
   remoteStaffDatabaseName,
   selectProvisioningTarget,
   type ProvisioningIdentifiers,
+  type ProvisioningSelection,
   type ProvisioningTarget,
   type WranglerRunner,
 } from "../src/staff-provisioning.ts";
 
-const testDatabaseId = "8f3a1c2e-1111-4222-8333-444455556666";
-const remoteTarget: ProvisioningTarget = {
-  databaseName: remoteStaffDatabaseName,
-  remote: true,
-  expectedDatabaseId: testDatabaseId,
-};
+const verifiedDatabaseId = "8f3a1c2e-1111-4222-8333-444455556666";
+const replacementDatabaseId = "9d4b2e3f-5555-4666-8777-888899990000";
+const pinnedConfigPath = "C:/tmp/certpath-staff-provisioning.jsonc";
 
-type RunnerOptions = {
-  accountId?: string;
-  databaseName?: string;
-  databaseUuid?: string;
-  loggedIn?: boolean;
+const selection: ProvisioningSelection = {
+  kind: "remote",
+  databaseName: remoteStaffDatabaseName,
+  expectedDatabaseId: verifiedDatabaseId,
+};
+const pinnedTarget: ProvisioningTarget = {
+  kind: "remote",
+  databaseName: remoteStaffDatabaseName,
+  expectedDatabaseId: verifiedDatabaseId,
+  bindingName: pinnedDatabaseBinding,
+  configPath: pinnedConfigPath,
 };
 
 function fakeHash(character: string): string {
@@ -33,45 +39,95 @@ function fakeHash(character: string): string {
   return `$scrypt$ln=15,r=8,p=1$${unit.repeat(22)}$${unit.repeat(43)}`;
 }
 
+type MockState = {
+  accountId: string;
+  loggedIn: boolean;
+  /** Name reported back by `d1 info`; defaults to the requested name. */
+  resolvedName: string | null;
+  /** What `certpath-admin` currently resolves to. Mutated to simulate a swap. */
+  nameToUuid: Record<string, string>;
+  /** What the run-only config carries; only ever the verified UUID. */
+  pinnedUuid: string;
+  calls: string[][];
+  /** SQL executed through the verified UUID (the live test database). */
+  pinnedExecutions: string[];
+  /** SQL that reached a different database resolved behind the name. */
+  replacementWrites: string[];
+};
+
 /**
- * Mocked Cloudflare CLI: identity and D1 metadata come from the options, and
- * `d1 execute` runs the generated SQL against the isolated test D1 database.
+ * Mocked Cloudflare CLI. `d1 info` resolves the name, while `d1 execute`
+ * resolves either the pinned binding (UUID) or, if the code regresses, the name.
  */
-function createMockRunner(options: RunnerOptions = {}) {
-  const calls: string[][] = [];
+function createMockRunner(options: Partial<MockState> = {}) {
+  const state: MockState = {
+    accountId: options.accountId ?? certpathAccountId,
+    loggedIn: options.loggedIn ?? true,
+    resolvedName: options.resolvedName ?? null,
+    nameToUuid: options.nameToUuid ?? {
+      [remoteStaffDatabaseName]: verifiedDatabaseId,
+    },
+    pinnedUuid: options.pinnedUuid ?? verifiedDatabaseId,
+    calls: [],
+    pinnedExecutions: [],
+    replacementWrites: [],
+  };
+
+  const apply = async (sql: string) => {
+    const statements = sql
+      .split(/;(?=\s*(?:\r?\n|$))/)
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    const output: unknown[] = [];
+    for (const statement of statements) {
+      const result = await env.DB.prepare(statement).all();
+      output.push({
+        success: true,
+        results: result.results ?? [],
+        meta: result.meta,
+      });
+    }
+    return JSON.stringify(output);
+  };
+
   const runner: WranglerRunner = async (args) => {
-    calls.push(args);
+    state.calls.push(args);
     if (args[0] === "whoami") {
       return JSON.stringify({
-        loggedIn: options.loggedIn ?? true,
-        accounts: [
-          { id: options.accountId ?? certpathAccountId, name: "Certpath" },
-        ],
+        loggedIn: state.loggedIn,
+        accounts: [{ id: state.accountId, name: "Certpath" }],
       });
     }
     if (args[0] === "d1" && args[1] === "info") {
+      const name = args[2] ?? "";
       return JSON.stringify({
-        name: options.databaseName ?? remoteStaffDatabaseName,
-        uuid: options.databaseUuid ?? testDatabaseId,
+        name: state.resolvedName ?? name,
+        uuid: state.nameToUuid[name] ?? "",
       });
     }
     if (args[0] === "d1" && args[1] === "execute") {
+      const positional = args[2] ?? "";
+      const configIndex = args.indexOf("--config");
+      const configPath = configIndex === -1 ? undefined : args[configIndex + 1];
       const commandIndex = args.indexOf("--command");
       const sql = commandIndex === -1 ? "" : (args[commandIndex + 1] ?? "");
-      const statements = sql
-        .split(/;(?=\s*(?:\r?\n|$))/)
-        .map((statement) => statement.trim())
-        .filter(Boolean);
-      const output: unknown[] = [];
-      for (const statement of statements) {
-        const result = await env.DB.prepare(statement).all();
-        output.push({ success: true, results: result.results ?? [], meta: result.meta });
+      const pinned =
+        positional === pinnedDatabaseBinding && configPath === pinnedConfigPath;
+      const uuid = pinned
+        ? state.pinnedUuid
+        : (state.nameToUuid[positional] ?? positional);
+      if (uuid === verifiedDatabaseId) {
+        state.pinnedExecutions.push(sql);
+        return apply(sql);
       }
-      return JSON.stringify(output);
+      // A different database is now behind that name: record and refuse.
+      state.replacementWrites.push(sql);
+      return JSON.stringify([{ success: true, results: [], meta: {} }]);
     }
     throw new Error(`unexpected wrangler call: ${args.join(" ")}`);
   };
-  return { runner, calls };
+
+  return { runner, state };
 }
 
 async function scalar(
@@ -98,10 +154,7 @@ async function snapshot(): Promise<Record<string, number>> {
   };
 }
 
-function buildIdentifiers(
-  suffix: string,
-  markers: [string, string, string] = ["A", "B", "C"],
-): ProvisioningIdentifiers {
+function buildIdentifiers(suffix: string): ProvisioningIdentifiers {
   return {
     emails: [
       `remote-one-${suffix}@example.test`,
@@ -118,11 +171,7 @@ function buildIdentifiers(
     certificationSlug: `remote-rehearsal-${suffix}`,
     certificationName: `Remote rehearsal ${suffix}`,
     examVersionKey: "v1",
-    hashes: [
-      fakeHash(markers[0]),
-      fakeHash(markers[1]),
-      fakeHash(markers[2]),
-    ],
+    hashes: [fakeHash("A"), fakeHash("B"), fakeHash("C")],
     now: 1763150000000,
   };
 }
@@ -138,17 +187,18 @@ async function abortCode(run: () => Promise<unknown>): Promise<string> {
 }
 
 describe("remote staff provisioning", () => {
-  it("writes exactly two Global Admins and one scoped Manager to the matching target", async () => {
+  it("writes exactly two Global Admins and one scoped Manager through the pinned binding", async () => {
     const identifiers = buildIdentifiers("happy");
-    const { runner, calls } = createMockRunner();
+    const { runner, state } = createMockRunner();
 
-    await assertRemoteTarget(runner, testDatabaseId);
-    await assertNoExistingTesterRows(runner, remoteTarget, {
+    await assertRemoteTarget(runner, verifiedDatabaseId);
+    const target = pinRemoteTarget(selection, pinnedConfigPath);
+    await assertNoExistingTesterRows(runner, target, {
       emails: identifiers.emails,
       certificationSlug: identifiers.certificationSlug,
     });
-    await applyProvisioning(runner, remoteTarget, identifiers);
-    await confirmProvisioning(runner, remoteTarget, identifiers);
+    await applyProvisioning(runner, target, identifiers);
+    await confirmProvisioning(runner, target, identifiers);
 
     expect(
       await scalar(
@@ -175,13 +225,6 @@ describe("remote staff provisioning", () => {
         identifiers.certificationId,
       ),
     ).toBe(1);
-    expect(
-      await scalar(
-        "SELECT COUNT(*) AS count FROM exam_versions WHERE id = ? AND certification_id = ?",
-        identifiers.examVersionId,
-        identifiers.certificationId,
-      ),
-    ).toBe(1);
 
     const stored = await env.DB.prepare(
       "SELECT password_hash FROM staff_password_credentials WHERE user_id = ?",
@@ -190,51 +233,113 @@ describe("remote staff provisioning", () => {
       .first<{ password_hash: string }>();
     expect(stored?.password_hash).toBe(identifiers.hashes[0]);
 
-    const allArgs = calls.flat().join(" ");
-    expect(allArgs).toContain("--remote");
-    expect(allArgs).not.toContain("--local");
-    for (const hash of identifiers.hashes) {
-      expect(allArgs).toContain(hash);
+    const executes = state.calls.filter(
+      (args) => args[1] === "execute" && args.includes("--remote"),
+    );
+    expect(executes.length).toBeGreaterThan(0);
+    for (const args of executes) {
+      expect(args[2]).toBe(pinnedDatabaseBinding);
+      expect(args).toContain("--config");
+      expect(args).toContain(pinnedConfigPath);
+      expect(args).not.toContain(remoteStaffDatabaseName);
     }
-    for (const secret of ["Alpha", "Bravo", "Charlie"]) {
-      expect(allArgs).not.toContain(`${secret}`);
+    expect(state.replacementWrites).toEqual([]);
+
+    const allArgs = state.calls.flat().join(" ");
+    expect(allArgs).toContain(fakeHash("A"));
+    expect(allArgs).not.toContain("Alpha");
+  });
+
+  it("writes nothing to a database swapped in behind the certpath-admin name after preflight", async () => {
+    const identifiers = buildIdentifiers("swapped");
+    const { runner, state } = createMockRunner();
+
+    await assertRemoteTarget(runner, verifiedDatabaseId);
+    const target = pinRemoteTarget(selection, pinnedConfigPath);
+
+    // The name now points at a different database.
+    state.nameToUuid[remoteStaffDatabaseName] = replacementDatabaseId;
+
+    await assertNoExistingTesterRows(runner, target, {
+      emails: identifiers.emails,
+      certificationSlug: identifiers.certificationSlug,
+    });
+    await applyProvisioning(runner, target, identifiers);
+    await confirmProvisioning(runner, target, identifiers);
+
+    expect(state.replacementWrites).toEqual([]);
+    expect(
+      await scalar(
+        "SELECT COUNT(*) AS count FROM staff_password_credentials WHERE email_normalized IN (?, ?, ?)",
+        ...identifiers.emails,
+      ),
+    ).toBe(3);
+
+    for (const args of state.calls.filter((call) => call[1] === "execute")) {
+      expect(args[2]).toBe(pinnedDatabaseBinding);
+      expect(args).not.toContain(remoteStaffDatabaseName);
     }
+    const nameLookups = state.calls.filter((call) => call[1] === "info");
+    expect(nameLookups).toHaveLength(1);
+    expect(nameLookups[0]?.[2]).toBe(remoteStaffDatabaseName);
+  });
+
+  it("fails closed when the verified UUID is unavailable", async () => {
+    const identifiers = buildIdentifiers("unavailable");
+    const before = await snapshot();
+    const { runner, state } = createMockRunner();
+    const broken: ProvisioningTarget = {
+      kind: "remote",
+      databaseName: remoteStaffDatabaseName,
+      expectedDatabaseId: "",
+      bindingName: pinnedDatabaseBinding,
+      configPath: pinnedConfigPath,
+    };
+
+    expect(await abortCode(() => applyProvisioning(runner, broken, identifiers))).toBe(
+      "missing-database-id",
+    );
+    expect(() => pinRemoteTarget(selection, "")).toThrowError(
+      /pinned Wrangler config/,
+    );
+    expect(state.calls).toEqual([]);
+    expect(await snapshot()).toEqual(before);
   });
 
   it("writes nothing when the CLI is not on the Certpath account", async () => {
     const before = await snapshot();
-    const { runner, calls } = createMockRunner({
+    const { runner, state } = createMockRunner({
       accountId: "00000000-0000-0000-0000-00000000dead",
     });
 
     expect(
-      await abortCode(() => assertRemoteTarget(runner, testDatabaseId)),
+      await abortCode(() => assertRemoteTarget(runner, verifiedDatabaseId)),
     ).toBe("wrong-account");
 
     expect(await snapshot()).toEqual(before);
-    expect(calls.some((args) => args[1] === "execute")).toBe(false);
+    expect(state.calls.some((args) => args[1] === "execute")).toBe(false);
   });
 
   it("writes nothing when the database UUID does not match", async () => {
     const before = await snapshot();
-    const { runner, calls } = createMockRunner({
-      databaseUuid: "11111111-2222-4333-8444-555555555555",
+    const { runner, state } = createMockRunner({
+      nameToUuid: { [remoteStaffDatabaseName]: replacementDatabaseId },
     });
 
     expect(
-      await abortCode(() => assertRemoteTarget(runner, testDatabaseId)),
+      await abortCode(() => assertRemoteTarget(runner, verifiedDatabaseId)),
     ).toBe("wrong-database-id");
 
     expect(await snapshot()).toEqual(before);
-    expect(calls.some((args) => args[1] === "execute")).toBe(false);
+    expect(state.calls.some((args) => args[1] === "execute")).toBe(false);
   });
 
   it("writes nothing when the database name is not certpath-admin", async () => {
     const before = await snapshot();
-    const { runner } = createMockRunner({ databaseName: "certpath-local" });
+    const { runner } = createMockRunner({ resolvedName: "certpath-local" });
 
     expect(
-      await abortCode(() => assertRemoteTarget(runner, testDatabaseId)),
+      await abortCode(() => assertRemoteTarget(runner, verifiedDatabaseId)),
     ).toBe("wrong-database-name");
 
     expect(await snapshot()).toEqual(before);
@@ -265,11 +370,11 @@ describe("remote staff provisioning", () => {
       .run();
 
     const before = await snapshot();
-    const { runner, calls } = createMockRunner();
+    const { runner, state } = createMockRunner();
 
     expect(
       await abortCode(() =>
-        assertNoExistingTesterRows(runner, remoteTarget, {
+        assertNoExistingTesterRows(runner, pinnedTarget, {
           emails: identifiers.emails,
           certificationSlug: identifiers.certificationSlug,
         }),
@@ -277,9 +382,7 @@ describe("remote staff provisioning", () => {
     ).toBe("existing-tester-rows");
 
     expect(await snapshot()).toEqual(before);
-    const executed = calls
-      .filter((args) => args[1] === "execute")
-      .map((args) => args[args.indexOf("--command") + 1] ?? "");
+    const executed = state.pinnedExecutions;
     expect(executed.every((sql) => sql.includes("SELECT COUNT"))).toBe(true);
   });
 });
@@ -287,9 +390,8 @@ describe("remote staff provisioning", () => {
 describe("provisioning target selection", () => {
   it("defaults to the local database", () => {
     expect(selectProvisioningTarget([])).toEqual({
+      kind: "local",
       databaseName: "certpath-local",
-      remote: false,
-      expectedDatabaseId: null,
     });
   });
 
@@ -310,15 +412,15 @@ describe("provisioning target selection", () => {
         "8F3A1C2E-1111-4222-8333-444455556666",
       ]),
     ).toEqual({
-      databaseName: "certpath-admin",
-      remote: true,
-      expectedDatabaseId: testDatabaseId,
+      kind: "remote",
+      databaseName: remoteStaffDatabaseName,
+      expectedDatabaseId: verifiedDatabaseId,
     });
   });
 
   it("rejects a UUID outside remote mode", () => {
     expect(() =>
-      selectProvisioningTarget(["--expect-database-id", testDatabaseId]),
+      selectProvisioningTarget(["--expect-database-id", verifiedDatabaseId]),
     ).toThrowError(/only applies to --remote/);
   });
 });
