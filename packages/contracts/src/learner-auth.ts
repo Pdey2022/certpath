@@ -32,6 +32,20 @@ export const learnerPasswordResetRequestSchema = z
   })
   .strict();
 
+export const learnerEmailSignInLinkTokenSchema = z
+  .object({
+    token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  })
+  .strict();
+
+export const learnerEmailSignInInspectResponseSchema = z
+  .object({ status: z.enum(["valid", "invalid"]) })
+  .strict();
+
+export const learnerEmailSignInRedeemResponseSchema = z
+  .object({ redirectTo: z.literal("/app/home") })
+  .strict();
+
 export const localLearnerAuthPreflightResponseSchema = z
   .object({
     signInEnabled: z.boolean(),
@@ -55,7 +69,7 @@ export const localTestInboxResponseSchema = z
           .object({
             id: z.string().uuid(),
             email: z.string().min(3).max(254),
-            kind: z.enum(["verify_email", "password_reset"]),
+            kind: z.enum(["verify_email", "password_reset", "sign_in_link"]),
             link: z.string().url().max(2048),
             sentAt: z.number().int().safe(),
           })
@@ -75,3 +89,10 @@ export type LocalLearnerSignInResponse = z.infer<
   typeof localLearnerSignInResponseSchema
 >;
 export type LocalTestInboxResponse = z.infer<typeof localTestInboxResponseSchema>;
+
+export type LearnerEmailSignInInspectResponse = z.infer<
+  typeof learnerEmailSignInInspectResponseSchema
+>;
+export type LearnerEmailSignInRedeemResponse = z.infer<
+  typeof learnerEmailSignInRedeemResponseSchema
+>;

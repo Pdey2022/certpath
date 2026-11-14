@@ -3,6 +3,8 @@ import { healthResponseSchema } from "@certpath/contracts";
 import { protectedContentApi } from "./protected-content.ts";
 import { learnerPracticeApi } from "./learner-practice.ts";
 import { createCognitoLearnerSandboxApi } from "./cognito-learner-sandbox.ts";
+import { createLearnerEmailSignInApi } from "./learner-email-sign-in.ts";
+import { LocalTestMailAdapter } from "./local-test-mail.ts";
 import {
   createApplicationSessionApi,
   createLocalLearnerAuthApi,
@@ -25,6 +27,7 @@ type ApiBindings = {
   STAFF_MFA_ALLOWED_METHODS?: string;
   CSRF_HMAC_SECRET?: string;
   LOCAL_LEARNER_AUTH_ENABLED?: string;
+  LOCAL_LEARNER_EMAIL_LINK_ENABLED?: string;
   LOCAL_TEST_MAIL_ENABLED?: string;
   LOCAL_AUTH_RATE_LIMIT_HMAC_SECRET?: string;
   STAGING_LEARNER_AUTH_ENABLED?: string;
@@ -60,6 +63,7 @@ export function createApi(
   stagingVerifier?: StagingPasswordVerifier,
 ) {
   const application = new Hono<{ Bindings: ApiBindings }>().basePath("/api");
+  const localTestMail = new LocalTestMailAdapter();
   const verifyStagingPassword =
     stagingVerifier ??
     createLambdaPasswordVerifier(fetcher, () => new Date(now()));
@@ -92,10 +96,14 @@ export function createApi(
     "/auth/cognito",
     createCognitoLearnerSandboxApi(fetcher),
   );
-  application.route("/auth/local", createLocalLearnerAuthApi(now));
+  application.route("/auth/local", createLocalLearnerAuthApi(now, localTestMail));
   application.route(
     "/auth/staging",
     createStagingLearnerAuthApi(now, verifyStagingPassword),
+  );
+  application.route(
+    "/auth/email-link",
+    createLearnerEmailSignInApi(localTestMail, now),
   );
   application.route("/auth/google", createGoogleLearnerAuthApi(fetcher));
   application.route("/auth/session", createApplicationSessionApi(now));

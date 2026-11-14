@@ -17,16 +17,27 @@ import {
 } from "./security/password-hashing.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 import {
+  clearSessionCookie,
   constantTimeEqual,
   createCsrfToken,
   LEGACY_SESSION_COOKIE,
   opaqueCookieToken,
+  sessionCookie,
   sessionCookieToken,
   sessionCookieName,
   sessionDigest,
   STAGING_SESSION_COOKIE,
   type SessionCookieName,
 } from "./security/http-session.ts";
+import {
+  consumeLocalRateLimit,
+  createOpaqueToken,
+  isLocalOrigin,
+  isSyntheticEmail,
+  normalizeEmail,
+  readJsonBody,
+  validRequestOrigin,
+} from "./security/local-learner-request.ts";
 import {
   findActiveApplicationSession,
 } from "./security/repository.ts";
@@ -64,16 +75,6 @@ export type StagingPasswordVerifier = (
   bindings: LambdaPasswordVerifierBindings,
 ) => Promise<boolean>;
 
-type JsonBody =
-  | { ok: true; value: unknown }
-  | { ok: false; status: 400 | 413 | 415 };
-
-type RateAction =
-  | "registration"
-  | "sign_in"
-  | "recovery"
-  | "verification"
-  | "password_reset";
 
 export const localPasswordIssuer = "https://local-password.certpath.invalid";
 export const stagingPasswordIssuer = "https://staging-password.certpath.invalid";
@@ -82,20 +83,9 @@ export const stagingLearnerAuthOrigin =
 const verificationLifetimeMs = 24 * 60 * 60 * 1000;
 const passwordResetLifetimeMs = 30 * 60 * 1000;
 const learnerSessionLifetimeMs = 8 * 60 * 60 * 1000;
-const maxJsonBodyBytes = 6 * 1024;
-const maxActiveRateLimitRows = 5_000;
+
 const stagingSignInCsrfCookie = "__Host-certpath_signin_csrf";
 
-const ratePolicies: Record<
-  RateAction,
-  { windowMs: number; maxIp: number; maxEmail?: number }
-> = {
-  registration: { windowMs: 60 * 60 * 1000, maxIp: 10, maxEmail: 3 },
-  sign_in: { windowMs: 15 * 60 * 1000, maxIp: 30, maxEmail: 5 },
-  recovery: { windowMs: 60 * 60 * 1000, maxIp: 10, maxEmail: 3 },
-  verification: { windowMs: 60 * 60 * 1000, maxIp: 20 },
-  password_reset: { windowMs: 60 * 60 * 1000, maxIp: 10 },
-};
 
 const responseMessages = {
   accepted: "If the address is eligible, check the local test inbox.",
@@ -104,64 +94,6 @@ const responseMessages = {
   signedOut: "Signed out.",
 } as const;
 
-function isLocalOrigin(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    return (
-      (url.protocol === "https:" || url.protocol === "http:") &&
-      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isSyntheticEmail(email: string): boolean {
-  return email.toLowerCase().endsWith("@example.test");
-}
-
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-function encodeBase64Url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-}
-
-function createRawToken(): string {
-  return encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
-}
-
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-  return buffer;
-}
-
-async function digestRateLimitBucket(
-  secret: string,
-  scope: string,
-  value: string,
-): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    toArrayBuffer(new TextEncoder().encode(secret)),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const digest = new Uint8Array(
-    await crypto.subtle.sign(
-      "HMAC",
-      key,
-      toArrayBuffer(new TextEncoder().encode(`${scope}\n${value}`)),
-    ),
-  );
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
 
 function responseMessage(message: string) {
   return localLearnerAuthMessageResponseSchema.parse({ message });
@@ -175,46 +107,6 @@ function jsonResponseError(
   return context.json({ error: { code } }, status);
 }
 
-async function readJsonBody(request: Request): Promise<JsonBody> {
-  if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get("content-type") ?? "")) {
-    return { ok: false, status: 415 };
-  }
-  const contentLength = Number(request.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maxJsonBodyBytes) {
-    return { ok: false, status: 413 };
-  }
-  if (!request.body) return { ok: false, status: 400 };
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxJsonBodyBytes) {
-        await reader.cancel();
-        return { ok: false, status: 413 };
-      }
-      chunks.push(value);
-    }
-  } catch {
-    return { ok: false, status: 400 };
-  }
-
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return { ok: true, value: JSON.parse(new TextDecoder().decode(bytes)) };
-  } catch {
-    return { ok: false, status: 400 };
-  }
-}
 
 function localAuthIsConfigured(
   origin: string | undefined,
@@ -265,79 +157,7 @@ function stagingAuthIsConfigured(bindings: LocalAuthBindings): boolean {
   );
 }
 
-function validRequestOrigin(
-  request: Request,
-  expectedOrigin: string,
-  requireHeader: boolean,
-): boolean {
-  if (new URL(request.url).origin !== expectedOrigin) return false;
-  const supplied = request.headers.get("origin");
-  return supplied === expectedOrigin || (!requireHeader && supplied === null);
-}
 
-async function incrementRateLimit(
-  database: SecurityDatabase,
-  secret: string,
-  action: RateAction,
-  request: Request,
-  email: string | null,
-  now: number,
-): Promise<boolean> {
-  const policy = ratePolicies[action];
-  const windowStartedAt = Math.floor(now / policy.windowMs) * policy.windowMs;
-  const expiresAt = windowStartedAt + policy.windowMs;
-  const ip =
-    request.headers.get("cf-connecting-ip")?.trim() ||
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "local";
-  const buckets: Array<{ scope: string; value: string; limit: number }> = [
-    { scope: `${action}_ip`, value: ip, limit: policy.maxIp },
-  ];
-  if (email && policy.maxEmail) {
-    buckets.push({
-      scope: `${action}_email`,
-      value: normalizeEmail(email),
-      limit: policy.maxEmail,
-    });
-  }
-
-  await database
-    .prepare("DELETE FROM local_auth_rate_limit_windows WHERE expires_at <= ?")
-    .bind(now)
-    .run();
-
-  const statements = await Promise.all(
-    buckets.map(async ({ scope, value, limit }) => {
-      const bucketDigest = await digestRateLimitBucket(secret, scope, value);
-      return database
-        .prepare(
-          `INSERT INTO local_auth_rate_limit_windows (
-             scope, bucket_digest, window_started_at, expires_at, request_count
-           )
-           SELECT ?, ?, ?, ?, 1
-           WHERE (
-             SELECT COUNT(*) FROM local_auth_rate_limit_windows
-             WHERE expires_at > ?
-           ) < ?
-           ON CONFLICT(scope, bucket_digest, window_started_at) DO UPDATE SET
-             request_count = request_count + 1
-           WHERE request_count < ?
-           RETURNING request_count`,
-        )
-        .bind(
-          scope,
-          bucketDigest,
-          windowStartedAt,
-          expiresAt,
-          now,
-          maxActiveRateLimitRows,
-          limit,
-        );
-    }),
-  );
-  const results = await database.batch(statements);
-  return results.every((result) => result.meta.changes === 1);
-}
 
 async function pruneExpiredActionTokens(
   database: SecurityDatabase,
@@ -367,21 +187,6 @@ function isResponse(value: unknown): value is Response {
   return value instanceof Response;
 }
 
-function sessionCookie(
-  value: string,
-  maxAgeSeconds: number,
-  secure: boolean,
-  name: SessionCookieName = LEGACY_SESSION_COOKIE,
-): string {
-  return `${name}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
-}
-
-function clearSessionCookie(
-  secure: boolean,
-  name: SessionCookieName = LEGACY_SESSION_COOKIE,
-): string {
-  return `${name}=; Path=/; Max-Age=0; HttpOnly;${secure ? " Secure;" : ""} SameSite=Lax`;
-}
 
 function signInCsrfCookie(value: string): string {
   return `${stagingSignInCsrfCookie}=${value}; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Strict`;
@@ -449,7 +254,7 @@ function registerSignInRoute(
         : null;
     const timestamp = now();
     if (
-      !(await incrementRateLimit(
+      !(await consumeLocalRateLimit(
         context.env.DB,
         rateSecret,
         "sign_in",
@@ -537,7 +342,7 @@ function registerSignInRoute(
       return jsonResponseError(context, 401, "invalid_credentials");
     }
 
-    const rawSessionToken = createRawToken();
+    const rawSessionToken = createOpaqueToken();
     const tokenDigest = await sessionDigest(rawSessionToken);
     const operationId = `sign-in:${crypto.randomUUID()}`;
     const expiry = timestamp + learnerSessionLifetimeMs;
@@ -609,9 +414,11 @@ function actionLink(origin: string, path: string, token: string): string {
   return `${origin}/${path}#token=${encodeURIComponent(token)}`;
 }
 
-export function createLocalLearnerAuthApi(now: () => number = Date.now) {
+export function createLocalLearnerAuthApi(
+  now: () => number = Date.now,
+  mail: LocalTestMailAdapter = new LocalTestMailAdapter(),
+) {
   const router = new Hono<{ Bindings: LocalAuthBindings }>();
-  const mail = new LocalTestMailAdapter();
 
   router.use("*", async (context, next) => {
     context.header("Cache-Control", "no-store");
@@ -665,7 +472,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     }
     const timestamp = now();
     if (
-      !(await incrementRateLimit(
+      !(await consumeLocalRateLimit(
         context.env.DB,
         secret,
         "registration",
@@ -680,7 +487,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
 
     const userId = crypto.randomUUID();
     const subject = crypto.randomUUID();
-    const token = createRawToken();
+    const token = createOpaqueToken();
     const tokenDigest = await sessionDigest(token);
     const operationId = `register:${crypto.randomUUID()}`;
     const expiry = timestamp + verificationLifetimeMs;
@@ -778,7 +585,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     if (isResponse(input)) return input;
     const timestamp = now();
     if (
-      !(await incrementRateLimit(
+      !(await consumeLocalRateLimit(
         context.env.DB,
         secret,
         "verification",
@@ -885,7 +692,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     const email = normalizeEmail(input.email);
     const timestamp = now();
     if (
-      !(await incrementRateLimit(
+      !(await consumeLocalRateLimit(
         context.env.DB,
         secret,
         "recovery",
@@ -898,7 +705,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     }
     await pruneExpiredActionTokens(context.env.DB, timestamp);
     if (isSyntheticEmail(email)) {
-      const token = createRawToken();
+      const token = createOpaqueToken();
       const tokenDigest = await sessionDigest(token);
       const expiry = timestamp + passwordResetLifetimeMs;
       const result = await context.env.DB.prepare(
@@ -956,7 +763,7 @@ export function createLocalLearnerAuthApi(now: () => number = Date.now) {
     if (isResponse(input)) return input;
     const timestamp = now();
     if (
-      !(await incrementRateLimit(
+      !(await consumeLocalRateLimit(
         context.env.DB,
         secret,
         "password_reset",
@@ -1134,7 +941,7 @@ export function createStagingLearnerAuthApi(
       return jsonResponseError(context, 503, "service_unavailable");
     }
 
-    const nonce = createRawToken();
+    const nonce = createOpaqueToken();
     const csrfToken = await createCsrfToken(
       origin,
       await sessionDigest(nonce),
