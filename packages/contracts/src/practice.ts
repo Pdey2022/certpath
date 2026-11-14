@@ -241,6 +241,48 @@ export const learnerDashboardAttemptSchema = z
   })
   .strict();
 
+export const readinessBasisSchema = z
+  .object({
+    mocks: safeInteger.min(0).max(3),
+    questions: safeInteger.min(0),
+    blueprintWeighted: z.literal(true),
+  })
+  .strict();
+
+export const readinessNextActionSchema = z
+  .object({
+    domainId: id,
+    title: z.string().min(1).max(160),
+    accuracy: safeInteger.min(0).max(100),
+    questions: safeInteger.min(0),
+    blueprintWeight: safeInteger.min(0).max(100),
+  })
+  .strict();
+
+export const learnerReadinessSchema = z
+  .object({
+    band: z.enum(["low", "medium", "ready"]),
+    score: safeInteger.min(0).max(100),
+    isReady: z.boolean(),
+    /** False once the snapshot is older than the 14-day decay window. */
+    isCurrent: z.boolean(),
+    computedAt: safeInteger,
+    basis: readinessBasisSchema,
+    nextAction: readinessNextActionSchema.nullable(),
+    /** True only when the promotion gate, Pro availability and term all pass. */
+    proPrompt: z.boolean(),
+  })
+  .strict();
+
+export const learnerAccessSchema = z
+  .object({
+    state: z.enum(["active", "grace", "expired"]),
+    endsAt: safeInteger.nullable(),
+    graceEndsAt: safeInteger.nullable(),
+    graceDaysRemaining: safeInteger.min(0),
+  })
+  .strict();
+
 export const learnerDashboardGroupSchema = z
   .object({
     certificationId: id,
@@ -248,6 +290,8 @@ export const learnerDashboardGroupSchema = z
     examVersionId: id,
     versionKey: z.string().min(1).max(80),
     examVersionTitle: z.string().min(1).max(160),
+    access: learnerAccessSchema,
+    readiness: learnerReadinessSchema.nullable(),
     resumable: z.array(learnerDashboardAttemptSchema).max(40),
     completed: z.array(learnerDashboardAttemptSchema).max(40),
   })

@@ -1,5 +1,13 @@
 import type { LearnerDashboardResponse } from "@certpath/contracts";
+import {
+  can,
+  evaluateAccess,
+  graceDaysRemaining,
+  type AccessGrantRecord,
+} from "../entitlements.ts";
+import { proMinimumStandardDays, proOffered } from "../pricing.ts";
 import type { SecurityDatabase } from "./database.ts";
+import { loadLatestReadiness } from "./readiness-snapshots.ts";
 
 interface ScopeRow {
   certification_id: string;
@@ -8,6 +16,16 @@ interface ScopeRow {
   version_key: string;
   exam_version_title: string;
 }
+
+interface GrantRow {
+  certification_id: string;
+  feature: "standard" | "pro";
+  starts_at: number;
+  expires_at: number;
+  revoked_at: number | null;
+}
+
+const dayMs = 86_400_000;
 
 interface DashboardAttemptRow {
   certification_id: string;
@@ -125,6 +143,8 @@ export async function getLearnerDashboard(
   tokenDigest: string,
   now: number,
 ): Promise<LearnerDashboardResponse> {
+  // Scopes come from any live grant: a learner in grace still sees the exam,
+  // with a renewal prompt and no attempt history (ADR 0005).
   const scopes = await database
     .prepare(
       `SELECT DISTINCT certification.id AS certification_id,
@@ -137,10 +157,7 @@ export async function getLearnerDashboard(
        JOIN exam_versions AS version
          ON version.certification_id = grant_record.certification_id
        WHERE grant_record.user_id = ?
-         AND grant_record.feature = 'standard'
          AND grant_record.revoked_at IS NULL
-         AND grant_record.starts_at <= ?
-         AND grant_record.expires_at > ?
          AND EXISTS (
            SELECT 1 FROM app_sessions AS active_session
            JOIN users AS active_user ON active_user.id = active_session.user_id
@@ -153,10 +170,30 @@ export async function getLearnerDashboard(
        ORDER BY certification.display_name, version.version_key
        LIMIT 201`,
     )
-    .bind(userId, now, now, tokenDigest, now)
+    .bind(userId, tokenDigest, now)
     .all<ScopeRow>();
   if (scopes.results.length > 200) {
     throw new Error("Authorized learner dashboard scopes exceed their response bound");
+  }
+
+  const grants = await database
+    .prepare(
+      `SELECT certification_id, feature, starts_at, expires_at, revoked_at
+       FROM learner_access_grants
+       WHERE user_id = ? AND revoked_at IS NULL`,
+    )
+    .bind(userId)
+    .all<GrantRow>();
+  const grantsByCertification = new Map<string, AccessGrantRecord[]>();
+  for (const grant of grants.results) {
+    const list = grantsByCertification.get(grant.certification_id) ?? [];
+    list.push({
+      feature: grant.feature,
+      startsAt: grant.starts_at,
+      expiresAt: grant.expires_at,
+      revokedAt: grant.revoked_at,
+    });
+    grantsByCertification.set(grant.certification_id, list);
   }
 
   const [practice, timedMocks] = await Promise.all([
@@ -165,20 +202,35 @@ export async function getLearnerDashboard(
     bindDashboardQuery(database, "timed_mock", userId, tokenDigest, now)
       .all<DashboardAttemptRow>(),
   ]);
-  const groups = new Map(
-    scopes.results.map((scope) => [
-      `${scope.certification_id}\n${scope.exam_version_id}`,
-      {
-        certificationId: scope.certification_id,
-        certificationName: scope.certification_name,
-        examVersionId: scope.exam_version_id,
-        versionKey: scope.version_key,
-        examVersionTitle: scope.exam_version_title,
-        resumable: [] as LearnerDashboardResponse["groups"][number]["resumable"],
-        completed: [] as LearnerDashboardResponse["groups"][number]["completed"],
+  const groups = new Map<
+    string,
+    LearnerDashboardResponse["groups"][number]
+  >();
+  for (const scope of scopes.results) {
+    const access = evaluateAccess(
+      grantsByCertification.get(scope.certification_id) ?? [],
+      now,
+    );
+    // Read access is what the dashboard itself needs; grace grants that, an
+    // expired membership does not.
+    if (!can(access, "results")) continue;
+    groups.set(`${scope.certification_id}\n${scope.exam_version_id}`, {
+      certificationId: scope.certification_id,
+      certificationName: scope.certification_name,
+      examVersionId: scope.exam_version_id,
+      versionKey: scope.version_key,
+      examVersionTitle: scope.exam_version_title,
+      access: {
+        state: access.standard.state,
+        endsAt: access.standard.endsAt,
+        graceEndsAt: access.standard.graceEndsAt,
+        graceDaysRemaining: graceDaysRemaining(access.standard, now),
       },
-    ]),
-  );
+      readiness: null,
+      resumable: [],
+      completed: [],
+    });
+  }
 
   for (const row of [...practice.results, ...timedMocks.results]) {
     const group = groups.get(`${row.certification_id}\n${row.exam_version_id}`);
@@ -214,6 +266,41 @@ export async function getLearnerDashboard(
         (left.completedAt ?? left.updatedAt),
     );
   }
+
+  // Readiness and the Pro prompt are read-only projections of stored snapshots;
+  // the dashboard never computes or writes readiness itself.
+  await Promise.all(
+    [...groups.values()].map(async (group) => {
+      const stored = await loadLatestReadiness(
+        database,
+        {
+          userId,
+          certificationId: group.certificationId,
+          examVersionId: group.examVersionId,
+        },
+        now,
+      );
+      if (!stored) return;
+      const standardRemainingDays =
+        group.access.state === "active" && group.access.endsAt !== null
+          ? Math.floor((group.access.endsAt - now) / dayMs)
+          : 0;
+      group.readiness = {
+        band: stored.band,
+        score: stored.score,
+        isReady: stored.isReady,
+        isCurrent: stored.isCurrent,
+        computedAt: stored.computedAt,
+        basis: stored.basis,
+        nextAction: stored.nextAction,
+        proPrompt:
+          stored.isCurrent &&
+          stored.isReady &&
+          proOffered(group.certificationId) &&
+          standardRemainingDays >= proMinimumStandardDays,
+      };
+    }),
+  );
 
   return { groups: [...groups.values()] };
 }

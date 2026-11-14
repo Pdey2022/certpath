@@ -56,6 +56,13 @@ function dashboardResponse() {
         examVersionId: "version-1",
         versionKey: "v1",
         examVersionTitle: "Synthetic version",
+        access: {
+          state: "active",
+          endsAt: null,
+          graceEndsAt: null,
+          graceDaysRemaining: 0,
+        },
+        readiness: null,
         resumable: [
           {
             id: "practice-resume",

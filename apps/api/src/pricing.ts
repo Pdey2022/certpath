@@ -135,6 +135,15 @@ export function requiresBundle(standardRemainingDays: number): boolean {
   return standardRemainingDays < proMinimumStandardDays;
 }
 
+/**
+ * Pro is only offered where the real exam is adaptive. No exam carries that
+ * capability yet — it arrives with the CAT engine (Phase 6) — so nothing is
+ * advertised before pricing ships. Phase 4 replaces the body, not the callers.
+ */
+export function proOffered(_certificationId: string): boolean {
+  return false;
+}
+
 export function amountFor(sku: Sku): number {
   return priceList[sku].amountMinor;
 }

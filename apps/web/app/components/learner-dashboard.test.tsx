@@ -63,6 +63,13 @@ test("shows acknowledged progress and opens the selected timed-out mock result",
           examVersionId: "version-1",
           versionKey: "v1",
           examVersionTitle: "Synthetic exam",
+          access: {
+            state: "active",
+            endsAt: 900,
+            graceEndsAt: null,
+            graceDaysRemaining: 0,
+          },
+          readiness: null,
           resumable: [
             {
               id: "practice-1",
@@ -109,6 +116,131 @@ test("shows acknowledged progress and opens the selected timed-out mock result",
   assert.equal(router.state.location.pathname, "/app/mock/live");
   assert.equal(router.state.location.search, "?attemptId=mock-1");
   assert.deepEqual(paths, ["/api/practice/dashboard"]);
+});
+
+test("shows readiness with its basis and next action, and no Pro prompt", async () => {
+  installDashboardFetch(
+    jsonResponse({
+      groups: [
+        {
+          certificationId: "cert-1",
+          certificationName: "Synthetic certification",
+          examVersionId: "version-1",
+          versionKey: "v1",
+          examVersionTitle: "Synthetic exam",
+          access: {
+            state: "active",
+            endsAt: 900,
+            graceEndsAt: null,
+            graceDaysRemaining: 0,
+          },
+          readiness: {
+            band: "medium",
+            score: 62,
+            isReady: false,
+            isCurrent: true,
+            computedAt: 800,
+            basis: { mocks: 2, questions: 40, blueprintWeighted: true },
+            nextAction: {
+              domainId: "domain-2",
+              title: "Asset Security",
+              accuracy: 50,
+              questions: 10,
+              blueprintWeight: 30,
+            },
+            proPrompt: false,
+          },
+          resumable: [],
+          completed: [],
+        },
+      ],
+    }),
+  );
+  renderDashboard();
+
+  await screen.findByText("Building up");
+  assert.ok(screen.getByText(/2 mocks, 40 questions, blueprint-weighted/));
+  assert.ok(screen.getByText(/Asset Security/));
+  assert.equal(screen.queryByText(/Pro is available/i), null);
+});
+
+test("renders Pro only when the promotion gate and term both pass", async () => {
+  installDashboardFetch(
+    jsonResponse({
+      groups: [
+        {
+          certificationId: "cert-1",
+          certificationName: "Synthetic certification",
+          examVersionId: "version-1",
+          versionKey: "v1",
+          examVersionTitle: "Synthetic exam",
+          access: {
+            state: "active",
+            endsAt: 900,
+            graceEndsAt: null,
+            graceDaysRemaining: 0,
+          },
+          readiness: {
+            band: "ready",
+            score: 81,
+            isReady: true,
+            isCurrent: true,
+            computedAt: 800,
+            basis: { mocks: 3, questions: 60, blueprintWeighted: true },
+            nextAction: null,
+            proPrompt: true,
+          },
+          resumable: [],
+          completed: [],
+        },
+      ],
+    }),
+  );
+  renderDashboard();
+
+  await screen.findByText("In form");
+  assert.ok(screen.getByText(/You have met the readiness rule/));
+  assert.ok(screen.getByText(/Pro is available/i));
+});
+
+test("shows the grace countdown and asks for a fresh mock instead of a stale band", async () => {
+  installDashboardFetch(
+    jsonResponse({
+      groups: [
+        {
+          certificationId: "cert-1",
+          certificationName: "Synthetic certification",
+          examVersionId: "version-1",
+          versionKey: "v1",
+          examVersionTitle: "Synthetic exam",
+          access: {
+            state: "grace",
+            endsAt: 700,
+            graceEndsAt: 900,
+            graceDaysRemaining: 4,
+          },
+          readiness: {
+            band: "ready",
+            score: 81,
+            isReady: true,
+            isCurrent: false,
+            computedAt: 100,
+            basis: { mocks: 3, questions: 60, blueprintWeighted: true },
+            nextAction: null,
+            proPrompt: false,
+          },
+          resumable: [],
+          completed: [],
+        },
+      ],
+    }),
+  );
+  renderDashboard();
+
+  await screen.findByText(/Read-only for 4 days/);
+  await screen.findByText(/more than 14 days old/);
+  assert.equal(screen.queryByText("In form"), null);
+  assert.equal(screen.queryByText(/Pro is available/i), null);
 });
 
 test("shows an empty state and a retryable failure", async () => {
