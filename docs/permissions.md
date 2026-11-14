@@ -5,24 +5,41 @@ review steps and assignments are not additional roles.
 
 ## Global Admin
 
-May manage all certifications, Manager assignments, prices, customer access,
-payments/refunds, security, integrations, settings and audit reports.
+May manage all certifications, Manager assignments, prices, discounts, coupons,
+customer access and entitlements, payments/refunds, staff and roles, security,
+integrations, settings and audit reports.
 
 ## Manager
 
 May add and maintain modules, domains, topics, questions, explanations and
 mock/adaptive profiles only within explicitly assigned certifications. May
 amend, review, publish and retire assigned content and inspect its quality
-reports. May see only minimal learner context needed to investigate content
 reports.
 
-Managers cannot manage prices, payments, access grants, staff, security,
-secrets, or unrestricted customer data. Global Admin creates certification
-roots and assigns Managers. Enforce scope server-side for lists, direct IDs,
-nested resources, mutations, reassignment, import and export. Check both the
-current and proposed certification when moving content. Assignment changes
-apply on subsequent requests and are audited. Deny by default; both staff
+Managers also handle learner support **across the platform**: look up an account,
+reset a password, resend verification, correct a profile and deactivate an
+account. Learner data is masked by default - account id, masked contact,
+membership state, attempt counts and last activity - and full contact details
+require an audited reveal. Every learner record view and reveal is audited, not
+only changes.
+
+The governing principle, which settles new capabilities without a new debate:
+
+> If it changes what a learner paid for, what they can access, or who can act on
+> the platform, it is **Global Admin only**.
+
+So Managers cannot manage prices, discounts, coupons, refunds, credits or payment
+views; cannot grant, extend or revoke access or enable Pro for a certification;
+cannot manage staff, roles, security, secrets or integrations; and cannot export
+learner data in bulk or hard-delete any record. Global Admin creates
+certification roots and assigns Managers. Enforce scope server-side for lists,
+direct IDs, nested resources, mutations, reassignment, import and export. Check
+both the current and proposed certification when moving content. Assignment
+changes apply on subsequent requests and are audited. Deny by default; both staff
 roles require MFA.
+
+See [ADR 0004](decisions/0004-staff-capabilities-and-learner-data.md) for the
+capability table and the rejected alternatives.
 
 Milestone 0 renders a non-functional admin shell only. It has no fixture
 identity, role switching, permission enforcement or privileged data.

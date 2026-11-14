@@ -2,6 +2,8 @@
 
 Read product-design.md as the product baseline. Proposed decisions remain proposals until accepted. Each milestone has its own branch and pull request. Do not implement the entire application in a single agent prompt.
 
+Sequencing for everything after Milestone 3 - phase order, dependencies, exit criteria and GitHub issue tracking - lives in [delivery-plan.md](delivery-plan.md). Product rules settled since this plan was written are recorded in `docs/decisions/` and summarised in [open-decisions.md](open-decisions.md).
+
 ## Cross-cutting requirements
 
 Read product-design.md v0.2 before every milestone. Include: SEO-ready public HTML; consent-aware acquisition/product tracking; reliable save/resume; mobile/tablet/desktop layouts; exactly two staff roles (Global Admin and exam-scoped Manager). Resolve the Cloudflare-compatible public SSR/prerender strategy before scaffolding; there is no Vite-only public shell assumption. The previous interactive demo is a synthetic design reference, not production code or a functional backend.
