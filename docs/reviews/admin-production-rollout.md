@@ -27,21 +27,47 @@ production data — those are what this rollout adds.
 |---|---|
 | Account | `Certpath`, account id `ef67137c4d1556f7f51f1cb3f1f420f3` |
 | Admin Worker | `certpath-foundation` - the name in the committed [`apps/web/wrangler.jsonc`](../../apps/web/wrangler.jsonc) |
-| Admin D1 | `certpath-local` - the committed binding name; its `database_id` is still the placeholder `00000000-0000-0000-0000-000000000000` |
+| Admin D1 | **`certpath-admin`** - a dedicated tester database, not the committed `certpath-local` binding. Its `database_id` stays the recorded placeholder `<certpath-admin UUID>` until the approved provisioning step records the real UUID |
 | Planned hostname | `certpath-foundation.<workers.dev subdomain>.workers.dev` (currently `certpath`) |
 | Public site and demo | `certpath-site`, `certpath-ui-preview` - **not targets** |
 
 Read-only inventory on 14 November 2026: Workers are `certpath-site`,
 `certpath-staff-mfa-sandbox`, and `certpath-ui-preview`; the only D1 database is
-`certpath-staff-mfa-sandbox`. **Neither `certpath-foundation` nor `certpath-local`
-exists yet**, so the approved rollout either creates both or binds to an existing
-Worker and database the owner designates. That choice is an approval item, not an
-assumption in this document.
+`certpath-staff-mfa-sandbox`. **Neither `certpath-foundation` nor `certpath-admin`
+exists yet.** The committed [`apps/web/wrangler.jsonc`](../../apps/web/wrangler.jsonc)
+still binds `DB` to `certpath-local`; the approved rollout repoints that binding to
+`certpath-admin` and its recorded UUID at deploy time. Creating both resources is an
+approval item, not an assumption in this document.
 
 Record **before** creating anything, so a partial rollout can still be reverted and
-every later command can be pinned: account id, Worker name, planned hostname, D1
-name, operator egress IPs for the allowlist. Record **after**: Worker version id and
-deployment id, the real D1 UUID, and the timestamp of the first sign-in.
+every later command can be pinned:
+
+| Record | Value |
+|---|---|
+| Account | `Certpath` / `ef67137c4d1556f7f51f1cb3f1f420f3` |
+| Worker name | `certpath-foundation` |
+| Planned hostname | `https://certpath-foundation.<subdomain>.workers.dev` |
+| D1 name | `certpath-admin` |
+| **D1 UUID** | `<certpath-admin UUID>` - placeholder until the create step returns it |
+| Operator egress IPs | the addresses that will appear as `cf-connecting-ip` |
+
+Record **after**: Worker version id and deployment id, the real `certpath-admin`
+UUID, the three tester `user_id` values, and the timestamp of the first sign-in.
+
+### Provisioning preconditions the command must enforce
+
+The provisioning command must abort **before the first write** unless both checks
+pass:
+
+```powershell
+$env:CLOUDFLARE_ACCOUNT_ID='ef67137c4d1556f7f51f1cb3f1f420f3'
+npx wrangler whoami                          # must print: Certpath | ef67137c4d1556f7f51f1cb3f1f420f3
+npx wrangler d1 info certpath-admin --json   # .result.uuid must equal the recorded <certpath-admin UUID>
+```
+
+A wrong account, a differently named database, or any other UUID is a hard stop -
+writing staff credentials into the wrong database is unrecoverable. The same two
+values are pinned on every later `wrangler d1 execute` call for this rollout.
 
 ## Tester gate
 
@@ -91,7 +117,10 @@ period only. Removing it means switching to a real MFA method, deleting the
 | Manager 1 | `manager` | **one** synthetic certification only, via `manager_certification_assignments` |
 
 Two individual accounts exist so no single mailbox is the only way in. The Manager
-exists to prove exam scoping on real infrastructure.
+exists to prove exam scoping on real infrastructure. **Exactly these three accounts
+are provisioned** - no shared mailbox, no `admin@`-style alias, no extra tester, and
+no fourth account for convenience. Their three `user_id` values become the scope for
+every rollback statement.
 
 Passwords: **fresh, unique per account, entered privately during the approved
 provisioning step** - hidden prompt or stdin, never a command-line argument, never
@@ -104,7 +133,8 @@ containment of the email local part, and no reuse across the three accounts.
 Miniflare database and refuses `--remote` by design. Production provisioning
 therefore needs an owner-approved remote path - either an approved extension of that
 script or the same statements applied to the pinned production D1 with the hashes
-generated locally and the passwords never leaving the operator's terminal. This plan
+generated locally and the passwords never leaving the operator's terminal. Either
+path must run the account and UUID checks above before its first write. This plan
 does not authorize either; it records the gap.
 
 The script seeds exactly one synthetic certification and exam version
@@ -123,7 +153,7 @@ Run before any provisioning. Every command below is a read.
 | D1 capacity | `GET /accounts/{account_id}/d1/database` or dashboard D1 list | no free database slot |
 | Request quota | GraphQL `workersInvocationsAdaptive`, previous 24 h | less headroom than the rollout plus check requests need |
 | D1 quota | GraphQL `d1AnalyticsAdaptiveGroups`, previous 24 h | less headroom than the rollout's writes need |
-| Name collisions | same two inventories, filtered for the target names | a `certpath-foundation` or `certpath-local` already exists that this plan did not account for |
+| Name collisions | same two inventories, filtered for the target names | a `certpath-foundation` or `certpath-admin` already exists that this plan did not account for |
 | Telemetry | Workers Observability reachable for the account | traces cannot be read - CPU will stay unmeasured and must be reported as such |
 
 Measured on 14 November 2026: 3 Workers, 1 D1, 125 Worker requests in the day, 8,654
@@ -157,37 +187,132 @@ Short by design - one pass, no probes.
 
 ## Rollback
 
-Any one step closes access within seconds; do them in order for a full retreat.
+Order matters: close the gate first so nothing new can be authorized, then unwind
+the three recorded tester identities. Every statement below is scoped to the three
+recorded `user_id` values - `<ga1-id>`, `<ga2-id>`, `<manager-id>` - never to "all
+staff", never by email pattern, never by role membership.
 
-1. **Close the gate (seconds).** Blank `ADMIN_TESTER_IPS` and redeploy. Every admin
-   page and admin API returns `503`; the public site and demo are untouched.
-2. **Revoke staff sessions.**
+1. **Close the tester gate first (seconds).** Blank `ADMIN_TESTER_IPS` and redeploy
+   the admin Worker. Every admin page and admin API returns `503` from that moment;
+   the public site and demo are untouched. Do this before anything else - the steps
+   below assume no new request can authenticate.
+2. **Revoke tester sessions with a unique operation ID per session.**
 
    ```sql
    UPDATE app_sessions
       SET revoked_at = <now>,
-          revocation_operation_id = 'rollback:<nonce>',
+          revocation_operation_id = 'rollback:session:' || token_digest,
           revoked_by_user_id = user_id
     WHERE revoked_at IS NULL
-      AND user_id IN (SELECT user_id FROM staff_roles WHERE active = 1);
+      AND user_id IN ('<ga1-id>', '<ga2-id>', '<manager-id>');
    ```
 
-3. **Disable sign-in.** `DELETE FROM staff_password_credentials;` (or delete only
-   the three tester rows) so no password can mint a session.
-4. **Retire the roles.** Deactivate `staff_roles` and the Manager's
-   `manager_certification_assignments` row.
-5. **Remove the temporary policy.** Delete `tester-gate` from
+   The suffix is `token_digest`, unique per session, because
+   `app_sessions.revocation_operation_id` is `UNIQUE` **and** the
+   `app_sessions_audit_revoke` trigger writes that same value into
+   `audit_events.operation_id`, which is unique as well. A single shared nonce for
+   all sessions fails with `UNIQUE constraint failed` and revokes nothing.
+   `WHERE revoked_at IS NULL` leaves already-revoked sessions and their history
+   untouched.
+3. **Disable sign-in for those three accounts.**
+
+   ```sql
+   DELETE FROM staff_password_credentials
+    WHERE user_id IN ('<ga1-id>', '<ga2-id>', '<manager-id>');
+   ```
+
+   The scoped `WHERE` is what keeps unrelated staff credentials alive.
+4. **Retire the roles.**
+
+   ```sql
+   UPDATE staff_roles
+      SET active = 0,
+          changed_by_user_id = NULL,
+          changed_by_ref = 'rollback',
+          operation_id = 'rollback:role:' || user_id,
+          reason = 'Tester rollout rollback',
+          changed_at = <now>
+    WHERE user_id IN ('<ga1-id>', '<ga2-id>', '<manager-id>')
+      AND active = 1;
+   ```
+
+5. **Retire the Manager's assignment.**
+
+   ```sql
+   UPDATE manager_certification_assignments
+      SET active = 0,
+          changed_by_user_id = '<ga1-id>',
+          operation_id = 'rollback:assignment:' || manager_user_id,
+          reason = 'Tester rollout rollback',
+          changed_at = <now>
+    WHERE manager_user_id = '<manager-id>'
+      AND certification_id = '<synthetic certification id>'
+      AND active = 1;
+   ```
+
+   `changed_by_user_id` is `NOT NULL` on this table (unlike `staff_roles`), so it
+   must name an existing user; the rehearsal used the first Global Admin's ID. The
+   table's audit trigger records `manager_assignment_revoked`.
+6. **Remove the temporary policy.** Delete `tester-gate` from
    `STAFF_MFA_ALLOWED_METHODS`, set `ADMIN_TESTER_ASSURANCE` to `false`, and
-   redeploy so the admin surface fails closed.
-6. **Rotate secrets.** Replace `CSRF_HMAC_SECRET` and
+   redeploy so the admin surface fails closed on configuration as well as on the
+   allowlist.
+7. **Rotate secrets.** Replace `CSRF_HMAC_SECRET` and
    `STAFF_RATE_LIMIT_HMAC_SECRET` if either may have been exposed.
-7. **Verify.** Admin paths return `503`, `certpath-site` and `certpath-ui-preview`
-   return `200`, and inventory matches the recorded targets.
+8. **Verify, scoped.**
+
+   ```sql
+   SELECT
+     (SELECT COUNT(*) FROM app_sessions
+       WHERE revoked_at IS NULL
+         AND user_id IN ('<ga1-id>', '<ga2-id>', '<manager-id>')) AS tester_active_sessions,
+     (SELECT COUNT(*) FROM app_sessions
+       WHERE revoked_at IS NULL
+         AND user_id NOT IN ('<ga1-id>', '<ga2-id>', '<manager-id>')) AS unrelated_active_sessions,
+     (SELECT COUNT(*) FROM staff_password_credentials
+       WHERE user_id IN ('<ga1-id>', '<ga2-id>', '<manager-id>')) AS tester_credentials,
+     (SELECT COUNT(*) FROM staff_roles
+       WHERE active = 1
+         AND user_id IN ('<ga1-id>', '<ga2-id>', '<manager-id>')) AS tester_active_roles,
+     (SELECT COUNT(*) FROM manager_certification_assignments
+       WHERE active = 1
+         AND manager_user_id = '<manager-id>') AS tester_active_assignments;
+   ```
+
+   The four tester columns must read `0`; `unrelated_active_sessions` must equal the
+   reading taken before rollback. Also confirm admin paths return `503`,
+   `certpath-site` and `certpath-ui-preview` return `200`, and inventory matches the
+   recorded targets.
+
+### Rollback rehearsal (local D1, no cloud resources)
+
+On 14 November 2026 the statements above were run against an isolated local D1
+database (`--local --persist-to <temp dir>`, migrations `0001`-`0012`). The scenario
+had five users - the three testers plus one unrelated staff account with its own
+credential, role, assignment, and sessions, and one learner - and ten sessions: six
+tester sessions (two each, all active), three unrelated active sessions, and one
+tester session already revoked.
+
+| Observation | Result |
+|---|---|
+| Single shared operation ID for all tester sessions | **Failed**: `UNIQUE constraint failed: app_sessions.revocation_operation_id`, zero rows changed |
+| Per-session operation IDs | 6 tester sessions revoked, **6 distinct** `revocation_operation_id` values |
+| Tester active sessions after rollback | **0** |
+| Unrelated active sessions after rollback | **3** - preserved |
+| Already-revoked tester session | operation ID unchanged (`pre-existing-revocation`) |
+| Credentials left | **1** - the unrelated staff account |
+| Active roles / assignments | **1 / 1** - the unrelated account's |
+| User rows | **5** - nothing deleted |
+| Audit | 1 `manager_assignment_revoked` event written by the assignment trigger |
+
+Re-run it with any local tooling: apply the migrations to an isolated local
+database, insert the roles/credentials/sessions above, run steps 2-5, and compare the
+same counts. No Cloudflare resource is involved.
 
 ## Approvals needed before execution
 
-- [ ] Target Worker and D1: create `certpath-foundation` + `certpath-local`, or
-      designate existing resources
+- [ ] Target Worker and D1: create `certpath-foundation` + the dedicated
+      `certpath-admin` database and record its UUID
 - [ ] Operator egress IPs for `ADMIN_TESTER_IPS`
 - [ ] The temporary `tester-gate` assurance policy while MFA is parked
 - [ ] The two Global Admin addresses and the one Manager address (individuals, not
