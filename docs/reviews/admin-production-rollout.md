@@ -128,14 +128,16 @@ captured in a transcript, never written to a file. The provisioning script enfor
 16-1024 characters, at least three of lower case/upper case/digits/symbols, no
 containment of the email local part, and no reuse across the three accounts.
 
-**Provisioning path - approval item.** `npm run staff:provision`
-(`apps/api/scripts/provision-staff-accounts.ts`) currently writes the **local**
-Miniflare database and refuses `--remote` by design. Production provisioning
-therefore needs an owner-approved remote path - either an approved extension of that
-script or the same statements applied to the pinned production D1 with the hashes
-generated locally and the passwords never leaving the operator's terminal. Either
-path must run the account and UUID checks above before its first write. This plan
-does not authorize either; it records the gap.
+**Provisioning path.** `npm run staff:provision`
+(`apps/api/scripts/provision-staff-accounts.ts`) supports an explicit remote mode:
+`--remote --expect-database-id <recorded certpath-admin UUID>`. Before its first
+write it checks `wrangler whoami --json` for the Certpath account and
+`wrangler d1 info certpath-admin --json` for the exact UUID, and it aborts with zero
+writes on a wrong account, a wrong database name, a wrong UUID, or an existing
+tester account or synthetic certification. Local mode stays the default. Running it
+against the production database is still an owner-approved step, and the remote path
+has so far been exercised only by tests that mock the Cloudflare CLI against an
+isolated D1 - never against the real database.
 
 The script seeds exactly one synthetic certification and exam version
 (`--certification-slug`, `--certification-name`, `--exam-version-key`) and assigns
