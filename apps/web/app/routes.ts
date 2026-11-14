@@ -13,6 +13,7 @@ export default [
   route("app/practice/live", "routes/learner-practice.tsx"),
   route("app/mock/live", "routes/learner-timed-mock.tsx"),
   route("app/*", "routes/learner.tsx"),
+  route("admin/sign-in", "routes/admin-sign-in.tsx"),
   route("admin/question-editor", "routes/admin-question-editor.tsx"),
   route("admin/*", "routes/admin.tsx"),
   route("robots.txt", "routes/robots.ts"),

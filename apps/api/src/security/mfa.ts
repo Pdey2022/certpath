@@ -1,4 +1,8 @@
-export type SupportedMfaMethod = "totp" | "webauthn" | "sms";
+export type SupportedMfaMethod =
+  | "totp"
+  | "webauthn"
+  | "sms"
+  | "tester-gate";
 
 export interface StaffMfaPolicy {
   maxAgeMs: number;
@@ -17,7 +21,12 @@ export type MfaFailure =
   | "assurance-unsupported"
   | "assurance-stale";
 
-const supportedMethods: readonly string[] = ["totp", "webauthn", "sms"];
+const supportedMethods: readonly string[] = [
+  "totp",
+  "webauthn",
+  "sms",
+  "tester-gate",
+];
 
 export function getMfaFailure(
   assurance: MfaAssurance,

@@ -33,6 +33,11 @@ import {
 } from "@certpath/contracts";
 import type { SecurityDatabase } from "./security/database.ts";
 import {
+  readStaffSecurityConfiguration,
+  type StaffSecurityBindings,
+  type StaffSecurityConfiguration,
+} from "./security/staff-configuration.ts";
+import {
   createDomain,
   createDraftQuestion,
   createExamVersion,
@@ -51,7 +56,7 @@ import {
   previewQuestionImport,
   QUESTION_IMPORT_MAX_BYTES,
 } from "./security/question-imports.ts";
-import type { StaffMfaPolicy } from "./security/mfa.ts";
+
 import {
   listAuthorizedCertifications,
   listDomains,
@@ -73,24 +78,14 @@ import {
   sessionDigest,
 } from "./security/http-session.ts";
 
-type ApiBindings = {
+type ApiBindings = StaffSecurityBindings & {
   DB: SecurityDatabase;
-  PUBLIC_SITE_ORIGIN?: string;
-  STAFF_MFA_MAX_AGE_MS?: string;
-  STAFF_MFA_ALLOWED_METHODS?: string;
-  CSRF_HMAC_SECRET?: string;
 };
-
-interface SecurityConfiguration {
-  origin: string;
-  policy: StaffMfaPolicy;
-  csrfSecret: Uint8Array;
-}
 
 interface RequestPrincipal {
   tokenDigest: string;
   userId: string;
-  configuration: SecurityConfiguration;
+  configuration: StaffSecurityConfiguration;
 }
 
 interface ProtectedVariables {
@@ -132,55 +127,6 @@ function errorResponse(
     }),
     { status, headers },
   );
-}
-
-function readSecurityConfiguration(bindings: ApiBindings): SecurityConfiguration | null {
-  const originValue = bindings.PUBLIC_SITE_ORIGIN;
-  const ageValue = bindings.STAFF_MFA_MAX_AGE_MS;
-  const methodsValue = bindings.STAFF_MFA_ALLOWED_METHODS;
-  const secretValue = bindings.CSRF_HMAC_SECRET;
-  if (!originValue || !ageValue || !methodsValue || !secretValue) return null;
-
-  let origin: URL;
-  try {
-    origin = new URL(originValue);
-  } catch {
-    return null;
-  }
-  if (
-    origin.protocol !== "https:" ||
-    origin.origin !== originValue ||
-    origin.username !== "" ||
-    origin.password !== "" ||
-    origin.pathname !== "/" ||
-    origin.search !== "" ||
-    origin.hash !== ""
-  ) {
-    return null;
-  }
-  if (!/^[1-9]\d*$/.test(ageValue)) return null;
-  const maxAgeMs = Number(ageValue);
-  if (!Number.isSafeInteger(maxAgeMs)) return null;
-
-  const methodValues = methodsValue.split(",").map((method) => method.trim());
-  const allowed = new Set(["totp", "webauthn", "sms"]);
-  if (
-    methodValues.length === 0 ||
-    methodValues.some((method) => !allowed.has(method)) ||
-    new Set(methodValues).size !== methodValues.length
-  ) {
-    return null;
-  }
-  const csrfSecret = new TextEncoder().encode(secretValue);
-  if (csrfSecret.byteLength < 32) return null;
-  return {
-    origin: originValue,
-    policy: {
-      maxAgeMs,
-      allowedMethods: methodValues as StaffMfaPolicy["allowedMethods"],
-    },
-    csrfSecret,
-  };
 }
 
 async function csrfToken(principal: RequestPrincipal): Promise<string> {
@@ -498,7 +444,7 @@ protectedApi.use("*", async (context, next) => {
   const requestId = crypto.randomUUID();
   context.set("requestId", requestId);
   configurePrivateResponse(context);
-  const configuration = readSecurityConfiguration(context.env);
+  const configuration = readStaffSecurityConfiguration(context.env);
   if (!configuration) {
     return errorResponse(context, 503, "service_unavailable");
   }
