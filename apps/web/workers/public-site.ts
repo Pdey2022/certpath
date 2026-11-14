@@ -1,51 +1,41 @@
 import { createRequestHandler, RouterContextProvider } from "react-router";
 import { cloudflareContext } from "../app/lib/cloudflare-context";
+import {
+  pathMatchesPrefix,
+  publicReleaseExcludedPaths,
+} from "../app/lib/worker-routes";
 
 const requestHandler = createRequestHandler(
   () => import("virtual:react-router/server-build"),
   import.meta.env.MODE,
 );
 
-// The public release serves the landing page and exam catalogue only. Sign-in,
-// registration, checkout, admin, and learner routes are not part of it.
-const excludedPrefixes = [
-  "/api",
-  "/app",
-  "/admin",
-  "/sign-in",
-  "/verify-email",
-  "/recover-password",
-  "/reset-password",
-  "/local-inbox",
-];
-
-function isExcluded(pathname: string): boolean {
-  return excludedPrefixes.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
-  );
+function withPreviewHeaders(response: Response) {
+  const headers = new Headers(response.headers);
+  headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
-function notFound(): Response {
-  return new Response(
-    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Page not found | CertPath</title><meta name=\"robots\" content=\"noindex,nofollow\"></head><body><main><h1>Page not found</h1><p>This page is not part of the CertPath public site.</p><p><a href=\"/\">Return to the home page</a></p></main></body></html>",
-    {
-      status: 404,
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "text/html; charset=utf-8",
-        "X-Robots-Tag": "noindex, nofollow",
-      },
-    },
-  );
-}
-
+// Public release Worker: the landing page and exam catalogue only. No API, D1,
+// scheduled handler, or secrets are bound.
 export default {
   async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
-    if (isExcluded(pathname)) return notFound();
+    if (pathMatchesPrefix(pathname, publicReleaseExcludedPaths)) {
+      return withPreviewHeaders(
+        Response.json(
+          { error: { code: "preview_only" } },
+          { status: 404, headers: { "Cache-Control": "no-store" } },
+        ),
+      );
+    }
 
     const loadContext = new RouterContextProvider();
     loadContext.set(cloudflareContext, { env, ctx });
-    return requestHandler(request, loadContext);
+    return withPreviewHeaders(await requestHandler(request, loadContext));
   },
 } satisfies ExportedHandler<Env>;

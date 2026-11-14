@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { Link } from "react-router";
 import { isUiPreview } from "../lib/preview-mode";
+import { isPilotSite } from "../lib/learner-auth-api";
 import { isPublicReleaseSite } from "../lib/release-mode";
 import { demoLink, independenceNotice } from "../lib/site-content";
 import { getLearnerAuthPreflight } from "../lib/learner-auth-api";
@@ -29,11 +30,13 @@ export function useLearnerSignInAvailability() {
 
 export function PublicLayout({ children }: { children: React.ReactNode }) {
   const [availability, setAvailability] = useState<LearnerSignInAvailability>(
-    isUiPreview || isPublicReleaseSite ? "unavailable" : "checking",
+    isUiPreview || isPublicReleaseSite || isPilotSite()
+      ? "unavailable"
+      : "checking",
   );
 
   useEffect(() => {
-    if (isUiPreview || isPublicReleaseSite) return;
+    if (isUiPreview || isPublicReleaseSite || isPilotSite()) return;
     let active = true;
     void checkLearnerSignInAvailability().then((result) => {
       if (active) setAvailability(result);
@@ -64,6 +67,8 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
                   <Link to="/admin?demoRole=manager">Manager demo</Link>
                   <Link to="/admin">Global Admin demo</Link>
                 </>
+              ) : isPilotSite() ? (
+                <Link to="/sign-in">Learner sign in</Link>
               ) : availability === "enabled" ? (
                 <Link to="/sign-in">Learner sign in</Link>
               ) : (
@@ -75,7 +80,7 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
                       : "Learner sign-in unavailable"}
                 </span>
               )}
-              {!isUiPreview && !isPublicReleaseSite && (
+              {!isUiPreview && !isPublicReleaseSite && !isPilotSite() && (
                 <Link to="/app">Learner preview</Link>
               )}
             </nav>

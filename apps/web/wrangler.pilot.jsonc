@@ -1,0 +1,27 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "certpath-pilot",
+	"compatibility_date": "2026-11-10",
+	"main": "./workers/pilot.ts",
+	"workers_dev": true,
+	"preview_urls": false,
+	"vars": {
+		"INDEXING_ENABLED": "false",
+		"PUBLIC_SITE_ORIGIN": "https://certpath-pilot.certpath.workers.dev",
+		"LEARNER_GOOGLE_OIDC_ENABLED": "true",
+		"GOOGLE_OIDC_CLIENT_ID": "",
+		"GOOGLE_OIDC_REDIRECT_URI": "https://certpath-pilot.certpath.workers.dev/api/auth/google/callback"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "certpath-pilot",
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "../../db/migrations"
+		}
+	],
+	"observability": {
+		"enabled": false
+	},
+	"upload_source_maps": true
+}

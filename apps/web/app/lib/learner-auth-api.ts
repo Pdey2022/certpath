@@ -13,6 +13,8 @@ const stagingAuthOrigin =
   "https://learner-auth-staging.certpath.workers.dev";
 const localStagingAuthOrigin =
   import.meta.env?.VITE_CERTPATH_STAGING_LOCAL_ORIGIN;
+const pilotOrigin = import.meta.env?.VITE_CERTPATH_PILOT_ORIGIN;
+const pilotOriginFallback = "https://certpath-pilot.certpath.workers.dev";
 
 export function isStagingLearnerAuth(): boolean {
   return (
@@ -20,6 +22,22 @@ export function isStagingLearnerAuth(): boolean {
     (window.location.origin === stagingAuthOrigin ||
       window.location.origin === localStagingAuthOrigin)
   );
+}
+
+export function isPilotSite(): boolean {
+  if (typeof window === "undefined") return false;
+  return (
+    window.location.origin === pilotOrigin ||
+    window.location.origin === pilotOriginFallback
+  );
+}
+
+/**
+ * Google sign-in is offered on the staging origin and on the private pilot
+ * origin, independently of whether password sign-in is configured.
+ */
+export function isGoogleSignInOrigin(): boolean {
+  return isStagingLearnerAuth() || isPilotSite();
 }
 
 export function startGoogleSignIn(): void {
