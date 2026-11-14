@@ -404,15 +404,23 @@ describe("protected learner practice Worker/D1 boundary", () => {
     );
     const expiredDashboard = await request(learner, "/dashboard");
     assertPrivate(expiredDashboard);
-    expect(await expiredDashboard.json()).toMatchObject({
-      groups: [
-        {
-          certificationId: otherScope.certificationId,
-          resumable: [],
-          completed: [],
-        },
-      ],
+    const graceBody = await expiredDashboard.json() as typeof dashboard;
+    // The ended cert stays visible in grace with a countdown, but its attempts
+    // are withheld: read access is for results, not history browsing.
+    expect(graceBody.groups).toHaveLength(2);
+    const graceGroup = graceBody.groups.find(
+      (group) => group.certificationId === scope.certificationId,
+    );
+    expect(graceGroup).toMatchObject({
+      access: { state: "grace", graceDaysRemaining: 15 },
+      resumable: [],
+      completed: [],
     });
+    expect(
+      graceBody.groups.find(
+        (group) => group.certificationId === otherScope.certificationId,
+      ),
+    ).toMatchObject({ access: { state: "active" }, resumable: [], completed: [] });
   });
 
   it("creates immutable published snapshots, reveals answers only after submission, resumes, and locks completion", async () => {
@@ -1438,6 +1446,57 @@ describe("protected learner practice Worker/D1 boundary", () => {
     await expect(
       database.prepare("DELETE FROM readiness_snapshots").run(),
     ).rejects.toThrow(/append-only/);
+  });
+
+  it("surfaces stored readiness on the dashboard without recomputing it", async () => {
+    const scope = await createContentScope(database);
+    await publishTimedMockQuestions(scope);
+    const learner = await createLearner(scope.certificationId);
+    const snapshotCount = () =>
+      database
+        .prepare(
+          "SELECT COUNT(*) AS count FROM readiness_snapshots WHERE user_id = ?",
+        )
+        .bind(learner.userId)
+        .first<{ count: number }>();
+
+    const beforeMock = await (await request(learner, "/dashboard")).json() as {
+      groups: Array<{ readiness: unknown; access: { state: string } }>;
+    };
+    expect(beforeMock.groups[0]).toMatchObject({
+      readiness: null,
+      access: { state: "active" },
+    });
+
+    const started = await createTimedMock(learner, scope);
+    await request(learner, `/mocks/${started.body.attempt.id}/submit`, {
+      method: "POST",
+      body: { expectedVersion: 1, requestId: crypto.randomUUID() },
+    });
+    expect(await snapshotCount()).toMatchObject({ count: 1 });
+
+    const dashboard = await (await request(learner, "/dashboard")).json() as {
+      groups: Array<{
+        readiness: {
+          band: string;
+          score: number;
+          isReady: boolean;
+          isCurrent: boolean;
+          basis: { mocks: number; questions: number };
+          proPrompt: boolean;
+        } | null;
+      }>;
+    };
+    expect(dashboard.groups[0]?.readiness).toMatchObject({
+      isReady: false,
+      isCurrent: true,
+      basis: { mocks: 1, questions: 10 },
+      proPrompt: false,
+    });
+    expect(dashboard.groups[0]?.readiness?.band).toMatch(/low|medium|ready/);
+
+    // Reading the dashboard must not add evidence of its own.
+    expect(await snapshotCount()).toMatchObject({ count: 1 });
   });
 
   it("never records readiness from practice alone", async () => {    const scope = await createContentScope(database);

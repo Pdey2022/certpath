@@ -96,6 +96,84 @@ function AttemptCard({
   );
 }
 
+function readinessBandLabel(band: "low" | "medium" | "ready"): string {
+  if (band === "ready") return "In form";
+  return band === "medium" ? "Building up" : "Early days";
+}
+
+function basisLine(basis: {
+  mocks: number;
+  questions: number;
+  blueprintWeighted: boolean;
+}): string {
+  const mocks = basis.mocks === 1 ? "1 mock" : `${basis.mocks} mocks`;
+  const questions =
+    basis.questions === 1 ? "1 question" : `${basis.questions} questions`;
+  return `${mocks}, ${questions}${
+    basis.blueprintWeighted ? ", blueprint-weighted" : ""
+  }`;
+}
+
+function ReadinessPanel({
+  group,
+}: {
+  group: LearnerDashboard["groups"][number];
+}) {
+  const readiness = group.readiness;
+
+  if (!readiness) {
+    return (
+      <section className="card learner-dashboard-section">
+        <h3>Readiness</h3>
+        <p>
+          No timed mock yet. Readiness appears once you have completed one —
+          practice alone cannot raise it.
+        </p>
+      </section>
+    );
+  }
+
+  if (!readiness.isCurrent) {
+    return (
+      <section className="card learner-dashboard-section">
+        <h3>Readiness</h3>
+        <p>
+          Your last readiness check is more than 14 days old, so it no longer
+          counts. Sit another timed mock to refresh it.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="card learner-dashboard-section">
+      <h3>Readiness</h3>
+      <p>
+        <strong>{readinessBandLabel(readiness.band)}</strong> ·{" "}
+        {readiness.score}% · {basisLine(readiness.basis)}
+      </p>
+      <p>
+        {readiness.isReady
+          ? "You have met the readiness rule for this exam."
+          : "Keep going: the readiness rule needs more consistent mock results."}
+      </p>
+      {readiness.nextAction && (
+        <p>
+          Focus next: <strong>{readiness.nextAction.title}</strong> (
+          {readiness.nextAction.accuracy}% across{" "}
+          {readiness.nextAction.questions} questions)
+        </p>
+      )}
+      {readiness.proPrompt && (
+        <p>
+          Pro is available for this exam while your Standard access runs for at
+          least 90 more days.
+        </p>
+      )}
+    </section>
+  );
+}
+
 export function LearnerDashboard() {
   const navigate = useNavigate();
   const [dashboard, setDashboard] = useState<LearnerDashboard | null>(null);
@@ -198,6 +276,17 @@ export function LearnerDashboard() {
                 </h2>
                 <p>{group.versionKey} · {group.examVersionTitle}</p>
               </header>
+
+              {group.access.state !== "active" && (
+                <p className="card" role="status">
+                  Your access ended. Read-only for{" "}
+                  {group.access.graceDaysRemaining}{" "}
+                  {group.access.graceDaysRemaining === 1 ? "day" : "days"} — renew
+                  to start new practice or mocks.
+                </p>
+              )}
+
+              <ReadinessPanel group={group} />
 
               {group.resumable.length > 0 && (
                 <div className="learner-dashboard-section">

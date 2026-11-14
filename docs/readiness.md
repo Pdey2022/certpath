@@ -70,8 +70,26 @@ to prove it.
 
 Nothing is backfilled: snapshots start existing when this migration ships.
 
-## Not in this phase
+## On the dashboard
 
-The dashboard rendering, the grace countdown and the Pro prompt placement are
-the second half of Phase 2 and land in their own PR. This phase defines and
-stores the numbers; it does not display them.
+`/api/dashboard` returns, per exam:
+
+- `access` — `state` (`active` / `grace` / `expired`), `endsAt`, `graceEndsAt`
+  and `graceDaysRemaining`, resolved by `apps/api/src/entitlements.ts`.
+- `readiness` — `band`, `score`, `isReady`, `isCurrent`, `computedAt`, `basis`,
+  `nextAction` and `proPrompt`, or `null` before the first completed mock.
+
+The read path is read-only: it never computes or stores readiness. A stale
+snapshot is shown as stale ("sit another timed mock") rather than refreshed, and
+`band` is labelled as form ("Early days", "Building up", "In form") while
+readiness is stated separately, so a learner never reads "Ready" from the band
+alone.
+
+Grace behaves as ADR 0005 describes: the exam stays on the dashboard with a
+countdown and a renewal prompt, and its attempt history is withheld. An expired
+membership drops off the dashboard entirely.
+
+`proPrompt` is `isCurrent && isReady && proOffered(exam) && >= 90 days Standard
+remaining`. `proOffered()` returns `false` for every exam until the CAT engine
+gives an exam an adaptive capability in Phase 6 and checkout exists in Phase 4,
+so nothing is advertised early.
