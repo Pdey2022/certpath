@@ -62,11 +62,17 @@ The read-only list calls used `GET /accounts/{account_id}/workers/scripts` and
    ```powershell
    npx wrangler secret put STAGING_TESTER_IPS -c apps/web/wrangler.pilot.jsonc
    npx wrangler secret put STAGING_AUTH_RATE_LIMIT_HMAC_SECRET -c apps/web/wrangler.pilot.jsonc
+   npx wrangler secret put CSRF_HMAC_SECRET -c apps/web/wrangler.pilot.jsonc
    npx wrangler secret put GOOGLE_OIDC_CLIENT_SECRET -c apps/web/wrangler.pilot.jsonc
    npx wrangler secret put GOOGLE_OIDC_TRANSACTION_KEY -c apps/web/wrangler.pilot.jsonc
    ```
-   `STAGING_TESTER_IPS` is the tester's egress IP list, `*_SECRET` and
-   `GOOGLE_OIDC_TRANSACTION_KEY` are at least 32 bytes of random data. Never
+   `STAGING_TESTER_IPS` is the tester's egress IP list. The other four values are
+   at least 32 bytes of random data: `STAGING_AUTH_RATE_LIMIT_HMAC_SECRET` for the
+   Google start and callback limits, `GOOGLE_OIDC_CLIENT_SECRET` and
+   `GOOGLE_OIDC_TRANSACTION_KEY` for the OIDC exchange and login transaction, and
+   `CSRF_HMAC_SECRET` for the dashboard and practice CSRF tokens. Without
+   `CSRF_HMAC_SECRET`, `/api/auth/session/csrf` and `/api/auth/session/logout`
+   return `503`, so the dashboard loads but sign-out cannot be completed. Never
    commit any of them. Do **not** set `AWS_*`, `LAMBDA_FUNCTION_URL`,
    `LOCAL_*`, or `STAGING_LEARNER_AUTH_ENABLED`.
 6. **Deploy with the client id.**
@@ -75,7 +81,7 @@ The read-only list calls used `GET /accounts/{account_id}/workers/scripts` and
    (`npm run deploy:pilot` deploys without the var; use it only if the id is
    already in the config.)
 7. **Link the invited Google identity** to the seeded learner:
-   `npx tsx apps/api/scripts/link-google-learner.ts --user-id <u> --subject <google-sub> --remote`
+   `npx tsx apps/api/scripts/link-google-learner.ts --user-id <u> --subject <google-sub> --database certpath-pilot --config apps/web/wrangler.pilot.jsonc --remote`
    The subject is the Google account's `sub` claim, not its email. The statement
    refuses unknown, disabled, already-linked learners and duplicate subjects.
 8. **Confirm the gate before telling anyone the URL exists:** an unsigned request
@@ -133,4 +139,5 @@ Workers Free and D1 Free only: no paid plan, no AWS resources, no email, and
 | `npm run dry-run:pilot` | passed, 1,695 KiB upload, bindings `DB`, `PUBLIC_SITE_ORIGIN`, `GOOGLE_OIDC_REDIRECT_URI` only |
 | `npx vitest run --config vitest.config.ts test/pilot-seed.test.ts` (in `apps/api`) | 4 passed: creates user/exam/grant, is idempotent, creates no identity, rejects unsafe input |
 | `npx tsx --test app/lib/worker-routes.test.ts app/components/learner-sign-in-pilot.test.tsx` (in `apps/web`) | 6 passed: excluded-path matching and the pilot sign-in page |
+| Invite command check | `--database certpath-pilot --config apps/web/wrangler.pilot.jsonc` accepted by the script; `--print` emits the linking statement for the pilot database |
 | `npm run verify` | see the pull request for the recorded result |
