@@ -36,7 +36,6 @@ export interface StaffActor {
 }
 
 export type CapabilityFailure =
-  | "not-staff"
   | "insufficient-role"
   | "unknown-capability"
   | "resource-kind-mismatch"

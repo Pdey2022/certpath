@@ -99,7 +99,16 @@ describe("local security D1 schema", () => {
            user_id, role, active, changed_by_user_id, operation_id, reason, changed_at
          ) VALUES (?, 'manager', 1, ?, ?, 'test audit', ?)`,
       )
-      .bind(identity.userId, identity.userId, "append-only-audit-test", testNow)
+      .bind(
+        identity.userId,
+        identity.userId,
+        "append-only-audit-test",
+        // The audit row this insert writes carries this timestamp, and the delete
+        // below must be refused as inside the retention window. `testNow` is a
+        // fixed future instant, so it would stop being "recent" and turn this
+        // assertion into a time bomb; the wall clock is always inside the window.
+        Date.now(),
+      )
       .run();
 
     await expect(
@@ -250,6 +259,7 @@ describe("admin capability schema guarantees", () => {
     const triggerNames = triggers.results.map((trigger) => trigger.name);
     for (const name of [
       "audit_events_no_delete",
+      "audit_events_no_replace",
       "audit_events_details_valid_insert",
       "users_deactivation_requires_operation",
       "users_no_reactivation",
@@ -292,6 +302,39 @@ describe("admin capability schema guarantees", () => {
         .bind("schema-audit-append-only")
         .run(),
     ).rejects.toThrow(/retained for 12 months/);
+  });
+
+  it("refuses INSERT OR REPLACE that would rewrite an audit row", async () => {
+    const identity = await createTestIdentity(database);
+    const operationId = `schema-audit-no-replace-${crypto.randomUUID()}`;
+    const insert = (reason: string) =>
+      database
+        .prepare(
+          `INSERT OR REPLACE INTO audit_events (
+             operation_id, actor_user_id, actor_ref, action, subject_type,
+             subject_id, certification_id, reason, occurred_at
+           ) VALUES (?, ?, NULL, 'learner_record_viewed', 'user', ?, NULL, ?, ?)`,
+        )
+        .bind(
+          operationId,
+          identity.userId,
+          identity.userId,
+          reason,
+          Date.now(),
+        )
+        .run();
+
+    await insert("Original reason");
+
+    // SQLite resolves the primary-key conflict by deleting the existing row,
+    // which fires no delete trigger unless recursive triggers are enabled. The
+    // explicit `audit_events_no_replace` guard must abort instead.
+    await expect(insert("Replaced reason")).rejects.toThrow(/append-only/);
+    const row = await database
+      .prepare("SELECT reason, occurred_at FROM audit_events WHERE operation_id = ?")
+      .bind(operationId)
+      .first<{ reason: string }>();
+    expect(row?.reason).toBe("Original reason");
   });
 
   it("requires an operation id for deactivation and forbids reactivation", async () => {

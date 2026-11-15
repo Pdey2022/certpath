@@ -1,7 +1,9 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { createApi } from "../src/index.ts";
+import { localPasswordIssuer } from "../src/local-learner-auth.ts";
 import type { SecurityDatabase } from "../src/security/database.ts";
+import { hashLearnerPassword } from "../src/security/password-hashing.ts";
 import { createTestSessionCredentials } from "./factories.ts";
 import { createTestIdentity, grantTestRole } from "./factories.ts";
 
@@ -201,6 +203,108 @@ async function createInviteOnly(
 
 const unknownLearnerId = "00000000-0000-0000-0000-000000000000";
 
+/** A live single-use link token for an existing invite, as issued by `0011`. */
+async function createSignInToken(
+  userId: string,
+  inviteEmail: string,
+): Promise<string> {
+  const tokenDigest = [...crypto.getRandomValues(new Uint8Array(32))]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  await database
+    .prepare(
+      `INSERT INTO learner_email_sign_in_tokens (
+         token_digest, invite_email, user_id, created_at, expires_at,
+         consumed_at, consumed_operation_id
+       ) VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+    )
+    .bind(tokenDigest, inviteEmail, userId, clock, clock + 15 * 60 * 1000)
+    .run();
+  return tokenDigest;
+}
+
+async function inviteState(
+  userId: string,
+): Promise<{ email: string; revokedAt: number | null } | null> {
+  const row = await database
+    .prepare(
+      `SELECT email_normalized, revoked_at FROM learner_email_sign_in_invites
+       WHERE user_id = ?`,
+    )
+    .bind(userId)
+    .first<{ email_normalized: string; revoked_at: number | null }>();
+  return row
+    ? { email: row.email_normalized, revokedAt: row.revoked_at }
+    : null;
+}
+
+async function tokenState(tokenDigest: string): Promise<number | null> {
+  const row = await database
+    .prepare(
+      "SELECT consumed_at FROM learner_email_sign_in_tokens WHERE token_digest = ?",
+    )
+    .bind(tokenDigest)
+    .first<{ consumed_at: number | null }>();
+  return row?.consumed_at ?? null;
+}
+
+/**
+ * A learner who can actually sign in with a password through the local proof:
+ * a real scrypt hash, a verified address, and the local identity the sign-in
+ * route joins on.
+ */
+async function createPasswordLearner(
+  password: string,
+): Promise<{ userId: string; email: string }> {
+  const userId = await createLearner();
+  const email = uniqueEmail("signin").toLowerCase();
+  const subject = crypto.randomUUID();
+  await database
+    .prepare(
+      "INSERT INTO auth_identities (issuer, subject, user_id, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(localPasswordIssuer, subject, userId, clock)
+    .run();
+  await database
+    .prepare(
+      `INSERT INTO learner_password_credentials (
+         user_id, email, email_normalized, subject, password_hash,
+         email_verified_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      userId,
+      email,
+      email,
+      subject,
+      await hashLearnerPassword(password),
+      clock,
+      clock,
+      clock,
+    )
+    .run();
+  return { userId, email };
+}
+
+function signIn(email: string, password: string, ip: string) {
+  return application.fetch(
+    new Request(url("/auth/local/sign-in"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        "CF-Connecting-IP": ip,
+      },
+      body: JSON.stringify({ email, password }),
+    }),
+    {
+      ...bindings,
+      LOCAL_LEARNER_AUTH_ENABLED: "true",
+      LOCAL_TEST_MAIL_ENABLED: "true",
+    },
+  );
+}
+
 function learnerRoutes(learnerId: string) {
   return [
     { method: "GET" as const, path: "/admin/csrf" },
@@ -361,6 +465,28 @@ describe("admin learner support", () => {
         400,
       ]);
     }
+    expect(await auditRows(learner.userId)).toBe(0);
+  });
+
+  it("refuses a lookup without CSRF or with a foreign origin and writes nothing", async () => {
+    const admin = await staffActor("global_admin");
+    const learner = await createLedger();
+
+    const noCsrf = await adminRequest("POST", "/admin/learners/lookup", {
+      cookie: admin.cookie,
+      body: { email: learner.email },
+    });
+    expect(noCsrf.status).toBe(400);
+    expect(await errorCode(noCsrf)).toBe("invalid_csrf");
+
+    const foreignOrigin = await adminRequest("POST", "/admin/learners/lookup", {
+      cookie: admin.cookie,
+      token: admin.token,
+      origin: "https://attacker.example",
+      body: { email: learner.email },
+    });
+    expect(foreignOrigin.status).toBe(400);
+    expect(await errorCode(foreignOrigin)).toBe("invalid_origin");
     expect(await auditRows(learner.userId)).toBe(0);
   });
 
@@ -676,6 +802,265 @@ describe("admin learner support", () => {
     expect(await auditRows(learner.userId, "learner_contact_corrected")).toBe(1);
   });
 
+  it("revokes the invite at the old address and its live tokens when a contact is corrected", async () => {
+    const admin = await staffActor("global_admin");
+    const learner = await createLedger();
+    const oldAddress = learner.email;
+    await database
+      .prepare(
+        `INSERT INTO learner_email_sign_in_invites (
+           email_normalized, user_id, created_at, revoked_at
+         ) VALUES (?, ?, ?, NULL)`,
+      )
+      .bind(oldAddress, learner.userId, clock)
+      .run();
+    const firstToken = await createSignInToken(learner.userId, oldAddress);
+    const secondToken = await createSignInToken(learner.userId, oldAddress);
+
+    const replacement = uniqueEmail("revoked-invite");
+    const corrected = await adminRequest(
+      "POST",
+      `/admin/learners/${learner.userId}/contact`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: { email: replacement, reason: "Learner changed address" },
+      },
+    );
+    expect(corrected.status).toBe(200);
+    const { operationId } = (await corrected.json()) as { operationId: string };
+
+    // The old address stays as a reserved (revoked) row so re-provisioning stays
+    // idempotent, but it is no longer a live sign-in key and the links minted for
+    // it are dead.
+    const invite = await inviteState(learner.userId);
+    expect(invite?.email).toBe(oldAddress);
+    expect(invite?.revokedAt).not.toBeNull();
+    expect(await tokenState(firstToken)).not.toBeNull();
+    expect(await tokenState(secondToken)).not.toBeNull();
+
+    const audit = await database
+      .prepare("SELECT details_json FROM audit_events WHERE operation_id = ?")
+      .bind(operationId)
+      .first<{ details_json: string }>();
+    expect(JSON.parse(audit!.details_json)).toEqual({
+      fields: ["email"],
+      // `learner_email_sign_in_invites.user_id` is unique, so a learner holds at
+      // most one invite row and this count is 0 or 1.
+      revokedInvites: 1,
+    });
+    expect(audit!.details_json).not.toContain(oldAddress);
+    expect(audit!.details_json).not.toContain(replacement.toLowerCase());
+  });
+
+  it("leaves an invite the learner does not hold at the old address alone", async () => {
+    const admin = await staffActor("global_admin");
+    const learner = await createLedger();
+    const bystander = await createInviteOnly();
+    const bystanderToken = await createSignInToken(
+      bystander.userId,
+      bystander.email,
+    );
+
+    const corrected = await adminRequest(
+      "POST",
+      `/admin/learners/${learner.userId}/contact`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: {
+          email: uniqueEmail("no-invite"),
+          reason: "Learner changed address",
+        },
+      },
+    );
+    expect(corrected.status).toBe(200);
+    const { operationId } = (await corrected.json()) as { operationId: string };
+
+    expect(await inviteState(bystander.userId)).toEqual({
+      email: bystander.email,
+      revokedAt: null,
+    });
+    expect(await tokenState(bystanderToken)).toBeNull();
+    const audit = await database
+      .prepare("SELECT details_json FROM audit_events WHERE operation_id = ?")
+      .bind(operationId)
+      .first<{ details_json: string }>();
+    expect(JSON.parse(audit!.details_json)).toEqual({
+      fields: ["email"],
+      revokedInvites: 0,
+    });
+  });
+
+  it("refuses a correction onto another learner's invite address and leaves it live", async () => {
+    const admin = await staffActor("global_admin");
+    const learner = await createLedger();
+    const holder = await createInviteOnly();
+    const holderToken = await createSignInToken(holder.userId, holder.email);
+
+    // The identity triggers make this address unrepresentable for a second
+    // learner; the request must reject rather than silently succeed.
+    const response = await adminRequest(
+      "POST",
+      `/admin/learners/${learner.userId}/contact`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: { email: holder.email, reason: "Support request" },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(await errorCode(response)).toBe("contact_taken");
+
+    expect(await inviteState(holder.userId)).toEqual({
+      email: holder.email,
+      revokedAt: null,
+    });
+    expect(await tokenState(holderToken)).toBeNull();
+    const stored = await database
+      .prepare(
+        "SELECT email_normalized FROM learner_password_credentials WHERE user_id = ?",
+      )
+      .bind(learner.userId)
+      .first<{ email_normalized: string }>();
+    expect(stored?.email_normalized).toBe(learner.email);
+    expect(await auditRows(learner.userId, "learner_contact_corrected")).toBe(0);
+  });
+
+  it("keeps password sign-in working only at the corrected address", async () => {
+    const admin = await staffActor("global_admin");
+    const password = `synthetic-${crypto.randomUUID()}-learner-password`;
+    const learner = await createPasswordLearner(password);
+    await database
+      .prepare(
+        `INSERT INTO learner_email_sign_in_invites (
+           email_normalized, user_id, created_at, revoked_at
+         ) VALUES (?, ?, ?, NULL)`,
+      )
+      .bind(learner.email, learner.userId, clock)
+      .run();
+    const minted = await createSignInToken(learner.userId, learner.email);
+    expect(
+      (await signIn(learner.email, password, "198.51.100.201")).status,
+    ).toBe(200);
+
+    const replacement = uniqueEmail("moved").toLowerCase();
+    const corrected = await adminRequest(
+      "POST",
+      `/admin/learners/${learner.userId}/contact`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: { email: replacement, reason: "Learner changed address" },
+      },
+    );
+    expect(corrected.status).toBe(200);
+    expect((await inviteState(learner.userId))?.revokedAt).not.toBeNull();
+    expect(await tokenState(minted)).not.toBeNull();
+
+    expect(
+      (await signIn(learner.email, password, "198.51.100.202")).status,
+    ).toBe(401);
+    expect((await signIn(replacement, password, "198.51.100.203")).status).toBe(
+      200,
+    );
+  }, 60_000);
+
+  it("separates a lost race from a missing learner on both mutations", async () => {
+    const admin = await staffActor("global_admin");
+
+    const missingDeactivation = await adminRequest(
+      "POST",
+      `/admin/learners/${unknownLearnerId}/deactivate`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: { reason: "Support request" },
+      },
+    );
+    expect(missingDeactivation.status).toBe(404);
+    expect(await errorCode(missingDeactivation)).toBe("not_found");
+    const missingCorrection = await adminRequest(
+      "POST",
+      `/admin/learners/${unknownLearnerId}/contact`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: {
+          email: uniqueEmail("missing"),
+          reason: "Support request",
+        },
+      },
+    );
+    expect(missingCorrection.status).toBe(404);
+    expect(await errorCode(missingCorrection)).toBe("not_found");
+
+    // Losing a deactivation race: the account is disabled between the route's
+    // pre-check and its batch, so the guarded update matches no row.
+    const racer = await createLedger();
+    const deactivationRace: SecurityDatabase = {
+      prepare: (query) => database.prepare(query),
+      withSession: (constraint) => database.withSession(constraint),
+      batch: async (statements) => {
+        await database
+          .prepare(
+            `UPDATE users SET status = 'disabled', deactivation_operation_id = ?
+             WHERE id = ?`,
+          )
+          .bind("race-probe", racer.userId)
+          .run();
+        return database.batch(statements);
+      },
+    };
+    const racedDeactivation = await adminRequest(
+      "POST",
+      `/admin/learners/${racer.userId}/deactivate`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: { reason: "Support request" },
+        databaseOverride: deactivationRace,
+      },
+    );
+    expect(racedDeactivation.status).toBe(409);
+    expect(await errorCode(racedDeactivation)).toBe("conflict");
+    expect(await auditRows(racer.userId, "learner_deactivated")).toBe(0);
+
+    // Losing a correction race: another writer already moved the address to the
+    // requested value, so the guarded update matches no row and nothing is
+    // revoked.
+    const target = await createLedger();
+    const replacement = uniqueEmail("raced").toLowerCase();
+    const correctionRace: SecurityDatabase = {
+      prepare: (query) => database.prepare(query),
+      withSession: (constraint) => database.withSession(constraint),
+      batch: async (statements) => {
+        await database
+          .prepare(
+            `UPDATE learner_password_credentials
+             SET email = ?, email_normalized = ?, updated_at = ?
+             WHERE user_id = ?`,
+          )
+          .bind(replacement, replacement, clock, target.userId)
+          .run();
+        return database.batch(statements);
+      },
+    };
+    const racedCorrection = await adminRequest(
+      "POST",
+      `/admin/learners/${target.userId}/contact`,
+      {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: { email: replacement, reason: "Support request" },
+        databaseOverride: correctionRace,
+      },
+    );
+    expect(racedCorrection.status).toBe(409);
+    expect(await errorCode(racedCorrection)).toBe("conflict");
+    expect(await auditRows(target.userId, "learner_contact_corrected")).toBe(0);
+  });
+
   it("returns the same 409 for every contact collision and writes nothing", async () => {
     const admin = await staffActor("global_admin");
     const target = await createLedger();
@@ -702,19 +1087,16 @@ describe("admin learner support", () => {
         },
       );
       expect([candidate.label, response.status]).toEqual([candidate.label, 409]);
-      const body = (await response.json()) as {
+      const parsed = (await response.json()) as {
         error: { code: string; requestId: string };
       };
-      expect(body.error.code).toBe("contact_taken");
-      // The envelope carries a per-request id by design; everything else about
-      // the body must be identical, so the body cannot disclose which sign-in
-      // path the other account uses.
-      serialised.push(
-        JSON.stringify({ code: body.error.code }).replace(
-          body.error.requestId,
-          "",
-        ),
-      );
+      expect(parsed.error.code).toBe("contact_taken");
+      // Destructure the per-request id out of the whole parsed body and compare
+      // everything that remains. Serialising only the fields this test chose to
+      // read would pass even if the response carried a distinguishing field.
+      const { requestId: _requestId, ...rest } = parsed.error;
+      expect(rest).toEqual({ code: "contact_taken" });
+      serialised.push(JSON.stringify(rest));
     }
     expect(new Set(serialised).size).toBe(1);
     expect(await auditRows(target.userId, "learner_contact_corrected")).toBe(0);
@@ -820,28 +1202,45 @@ describe("admin learner support", () => {
     expect(await auditRows(invited.userId)).toBe(0);
   });
 
-  it("answers both email actions with the honest unavailable refusal", async () => {
+  it("answers the email actions honestly: verified resend is already_verified", async () => {
     const admin = await staffActor("global_admin");
-    const learner = await createLedger({ verified: true });
+    const verified = await createLedger({ verified: true });
+    const unverified = await createLedger();
     const tokensBefore = await database
       .prepare("SELECT COUNT(*) AS count FROM learner_auth_tokens")
       .first<{ count: number }>();
 
-    for (const action of ["password-reset", "resend-verification"]) {
-      const response = await adminRequest(
-        "POST",
-        `/admin/learners/${learner.userId}/${action}`,
-        { cookie: admin.cookie, token: admin.token, body: {} },
-      );
-      expect([action, response.status]).toEqual([action, 409]);
-      expect(await errorCode(response)).toBe("email_unavailable");
-    }
+    const asPost = (learnerId: string, action: string) =>
+      adminRequest("POST", `/admin/learners/${learnerId}/${action}`, {
+        cookie: admin.cookie,
+        token: admin.token,
+        body: {},
+      });
+
+    // A reset has no pre-condition on verification: the transport gate decides.
+    const reset = await asPost(verified.userId, "password-reset");
+    expect(reset.status).toBe(409);
+    expect(await errorCode(reset)).toBe("email_unavailable");
+
+    // A verified account needs no verification mail, and that refusal is decided
+    // before the transport gate, so it is reachable while email is off.
+    const resendVerified = await asPost(verified.userId, "resend-verification");
+    expect(resendVerified.status).toBe(409);
+    expect(await errorCode(resendVerified)).toBe("already_verified");
+
+    const resendUnverified = await asPost(
+      unverified.userId,
+      "resend-verification",
+    );
+    expect(resendUnverified.status).toBe(409);
+    expect(await errorCode(resendUnverified)).toBe("email_unavailable");
 
     const tokensAfter = await database
       .prepare("SELECT COUNT(*) AS count FROM learner_auth_tokens")
       .first<{ count: number }>();
     expect(tokensAfter?.count).toBe(tokensBefore?.count);
-    expect(await auditRows(learner.userId)).toBe(0);
+    expect(await auditRows(verified.userId)).toBe(0);
+    expect(await auditRows(unverified.userId)).toBe(0);
   });
 
   it("shows support history by role only and audits its own read", async () => {

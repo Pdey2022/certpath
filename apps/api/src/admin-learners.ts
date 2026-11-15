@@ -32,6 +32,7 @@ import {
   findLearnerUserIdByEmail,
   hasPasswordCredential,
   learnerAccountStatus,
+  learnerSubjectExists,
   listLearnerSupportHistory,
   maskEmail,
   readMaskedLearnerRecord,
@@ -266,6 +267,8 @@ function staffFailureResponse(
       return errorResponse(context, 409, "contact_not_correctable");
     case "already-deactivated":
       return errorResponse(context, 409, "already_deactivated");
+    case "conflict":
+      return errorResponse(context, 409, "conflict");
     default:
       return errorResponse(context, 403, "forbidden");
   }
@@ -315,27 +318,6 @@ function parseQuery<T>(
   return parsed.success
     ? { value: parsed.data }
     : { response: errorResponse(context, 400, "validation_error") };
-}
-
-/** True for an existing account that holds no active staff role. */
-async function learnerSubjectPresent(
-  database: SecurityDatabase,
-  learnerUserId: string,
-): Promise<boolean> {
-  const row = await database
-    .withSession("first-primary")
-    .prepare(
-      `SELECT 1 AS present FROM users AS subject
-       WHERE subject.id = ?
-         AND NOT EXISTS (
-           SELECT 1 FROM staff_roles AS subject_role
-           WHERE subject_role.user_id = subject.id
-             AND subject_role.active = 1
-         )`,
-    )
-    .bind(learnerUserId)
-    .first<{ present: number }>();
-  return row !== null;
 }
 
 async function isVerifiedCredential(
@@ -449,6 +431,10 @@ adminLearnersApi.post("/learners/lookup", async (context) => {
     kind: "platform",
   });
   if ("response" in staff) return staff.response;
+  // A lookup is a POST, so it carries the same origin and CSRF checks as every
+  // other POST here, even though it writes nothing on a miss.
+  const csrfFailure = await mutationProtection(context);
+  if (csrfFailure) return csrfFailure;
 
   const body = await readJsonBody(context, learnerLookupRequestSchema);
   if ("response" in body) return body.response;
@@ -467,7 +453,7 @@ adminLearnersApi.post("/learners/lookup", async (context) => {
     );
   } else if (
     body.value.userId !== undefined &&
-    (await learnerSubjectPresent(context.env.DB, body.value.userId))
+    (await learnerSubjectExists(context.env.DB, body.value.userId))
   ) {
     learnerUserId = body.value.userId;
   }
@@ -668,6 +654,9 @@ adminLearnersApi.post(
     if (!supportEmailConfigured(context.env)) {
       return errorResponse(context, 409, "email_unavailable");
     }
+    // Tripwire: unreachable while `supportEmailConfigured()` returns false for
+    // every binding. It stays so a future transport cannot claim a reset mail was
+    // sent from a route that never sends one.
     return errorResponse(context, 503, "service_unavailable");
   },
 );
@@ -686,12 +675,19 @@ adminLearnersApi.post(
     if (csrfFailure) return csrfFailure;
     const body = await readJsonBody(context, emptyMutationRequestSchema);
     if ("response" in body) return body.response;
-    if (!supportEmailConfigured(context.env)) {
-      return errorResponse(context, 409, "email_unavailable");
-    }
+    // The verified-account refusal is decided before the transport gate, so it is
+    // reachable while `supportEmailConfigured()` is false. A verified account
+    // needs no verification mail, and answering `email_unavailable` for it would
+    // hide a real, actionable state behind a transport limitation.
     if (await isVerifiedCredential(context.env.DB, learnerId)) {
       return errorResponse(context, 409, "already_verified");
     }
+    if (!supportEmailConfigured(context.env)) {
+      return errorResponse(context, 409, "email_unavailable");
+    }
+    // Tripwire: unreachable while `supportEmailConfigured()` returns false for
+    // every binding. If a transport is ever added, this 503 is what stops the
+    // route from silently claiming a mail was sent.
     return errorResponse(context, 503, "service_unavailable");
   },
 );

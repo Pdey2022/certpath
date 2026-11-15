@@ -1,9 +1,10 @@
 -- 0016: admin capability model and learner support.
 --
 -- Adds the audit detail column and its JSON guard, replaces the blanket
--- no-delete audit trigger with a twelve-month retention bound, records the
--- operation that deactivated an account, records the operation that corrected a
--- learner contact address, and closes the cross-table contact identity hole.
+-- no-delete audit trigger with a twelve-month retention bound, closes the
+-- `INSERT OR REPLACE` hole in the audit log, records the operation that
+-- deactivated an account, records the operation that corrected a learner contact
+-- address, and closes the cross-table contact identity hole.
 --
 -- No table is rebuilt, no data is copied, and every added column is nullable.
 --
@@ -25,6 +26,12 @@ CREATE INDEX audit_events_occurred_at_idx ON audit_events(occurred_at);
 -- 2. Retention. Replaces the blanket append-only delete trigger: a row is
 -- deletable once D1's own clock says it is older than 365 days, and nothing
 -- younger can be deleted from any code path.
+--
+-- The comparison has up to one second of slack on purpose: `strftime('%s','now')`
+-- truncates to whole seconds, so it can report a clock up to 999 ms behind
+-- `Date.now()`. The slack only ever makes the window slightly *longer*, which is
+-- the safe direction for a retention floor. Do not "fix" it to millisecond
+-- precision - the floor must not depend on the caller's clock.
 DROP TRIGGER audit_events_no_delete;
 
 CREATE TRIGGER audit_events_no_delete
@@ -32,6 +39,17 @@ BEFORE DELETE ON audit_events
 WHEN OLD.occurred_at >= (CAST(strftime('%s','now') AS INTEGER) * 1000 - 31536000000)
 BEGIN
   SELECT RAISE(ABORT, 'audit events are retained for 12 months');
+END;
+
+-- `audit_events_no_update` does not stop `INSERT OR REPLACE`: SQLite resolves the
+-- primary-key conflict by deleting the existing row, which fires no delete
+-- trigger unless recursive triggers are enabled. This explicit guard aborts the
+-- replacement before it can remove an in-window audit row, whoever issues it.
+CREATE TRIGGER audit_events_no_replace
+BEFORE INSERT ON audit_events
+WHEN EXISTS (SELECT 1 FROM audit_events WHERE operation_id = NEW.operation_id)
+BEGIN
+  SELECT RAISE(ABORT, 'audit events are append-only');
 END;
 
 -- 3. Deactivation is terminal and witnessed.

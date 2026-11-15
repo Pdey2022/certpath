@@ -4,6 +4,21 @@ Status: implemented behind the tester gate. No learner-support UI ships in this
 phase; the server rules are the whole change.
 Rules: [ADR 0004](decisions/0004-staff-capabilities-and-learner-data.md).
 
+## Owner decisions
+
+Three owner decisions govern this surface. They are not open questions and the
+sections below explain the mechanics rather than re-arguing them.
+
+1. **Deactivation is terminal.** A deactivated learner cannot be reactivated;
+   undo requires an owner-approved migration. See
+   [§ Deactivation is terminal](#️-deactivation-is-terminal).
+2. **A reveal records field names only.** The address is never written to the
+   audit table, a log line, an error message or a response outside the reveal
+   itself. See [§5](#5-masked-by-default-revealed-once).
+3. **Retention is a flat twelve months with no legal hold.** Every audit row is
+   deleted at the window, including reveal and deactivation rows. See
+   [§8](#8-audit-retention--twelve-months-flat).
+
 ## ⚠️ Deactivation is terminal
 
 A deactivated learner **cannot be reactivated**. `users_no_reactivation` is a
@@ -67,11 +82,15 @@ The decision function is named `canCapability`, **not** `can`:
 learners, and a second `can` with a different signature in every module that
 needs both is a readability trap.
 
-Failures: `not-staff`, `insufficient-role`, `unknown-capability`,
-`resource-kind-mismatch`, `certification-not-found`, `certification-unassigned`,
-`learner-not-found`. A learner resource that belongs to an account holding an
-active staff role answers `learner-not-found`, which is indistinguishable from a
-missing account.
+Failures returned by `canCapability`: `insufficient-role`,
+`unknown-capability`, `resource-kind-mismatch`, `certification-not-found`,
+`certification-unassigned`, `learner-not-found`. A learner resource that belongs
+to an account holding an active staff role answers `learner-not-found`, which is
+indistinguishable from a missing account.
+
+`not-staff` is **not** a capability failure: it belongs to the session layer
+(`AuthorizationFailure` in `security/repository.ts`), which refuses a live
+session with no `staff_roles` row before `canCapability` is reached.
 
 ## 3. Three layers, all server-side
 
@@ -140,9 +159,11 @@ mints a token only for an account holding an active staff role.
 | Staff role withdrawn | 404 `not_found` (capabilities only) |
 | MFA missing, stale or unsupported | 403 `forbidden` |
 | Capability denied | 403 `forbidden` |
-| Subject missing **or holding an active staff role** | 404 `not_found` |
+| Id-addressed endpoint, subject missing **or holding an active staff role** | 404 `not_found` |
+| Lookup by a staff subject's `userId` | 200 `{"items":[]}` (identical to no match) |
 | Reveal with no contact on file | 409 `contact_not_available` (no audit row) |
 | Deactivation of a disabled account | 409 `already_deactivated` (no audit row) |
+| Deactivation or correction that loses a race with another writer | 409 `conflict` (no audit row) |
 | Contact correction to the current address | 409 `contact_unchanged` (no audit row) |
 | Contact correction for an invite-only account | 409 `contact_not_correctable` |
 | Contact address held by another learner | 409 `contact_taken` (nothing written) |
@@ -150,17 +171,27 @@ mints a token only for an account holding an active staff role.
 | Resend verification for a verified account | 409 `already_verified` |
 | Invalid staff security configuration | 503 `service_unavailable` |
 
-A staff subject is a 404 on **every** learner endpoint, for both roles, and
-writes nothing: resetting a staff member's password is "who can act on the
-platform" and therefore a Global Admin path, not learner support.
+An **id-addressed** learner endpoint answers `404 not_found` for a staff subject,
+for both roles, and writes nothing: resetting a staff member's password is "who
+can act on the platform" and therefore a Global Admin path, not learner support.
+
+`POST /api/admin/learners/lookup` is the exception, and it must be: it answers
+`200 {"items":[]}` for a staff subject's `userId`, exactly as it does for a
+`userId` that matches no account. Answering `404` there would distinguish a
+staff account from a nonexistent one, which is precisely what the 404 rule
+exists to prevent. Every other learner endpoint is id-addressed and returns
+`404`.
 
 ## 5. Masked by default, revealed once
 
-There is exactly one unmasked read in the codebase:
-`revealLearnerContact()` in `apps/api/src/security/learner-access.ts`. The reveal
-is a `batch([audit insert, select email])` where both statements carry the same
-contact predicate and the same statement guard, so a reveal either writes one
-audit row and returns the address, or writes nothing at all.
+Exactly one unmasked value is returned to a caller:
+`revealLearnerContact()` in `apps/api/src/security/learner-access.ts`. (The raw
+column is also selected internally by `readContact`,
+`readStoredCredentialEmail` and the reveal's own select, but none of those
+returns it in a response.) The reveal is a `batch([audit insert, select email])`
+where both statements carry the same contact predicate and the same statement
+guard, so a reveal either writes one audit row and returns the address, or
+writes nothing at all.
 
 ### Audited events
 
@@ -168,15 +199,17 @@ audit row and returns the address, or writes nothing at all.
 |---|---|---|---|
 | `learner_record_viewed` | one per successful lookup hit or record read | `NULL` | server constant |
 | `learner_contact_revealed` | one per successful reveal | `{"fields":["email"]}` | server constant |
-| `learner_contact_corrected` | one per applied correction | `{"fields":["email"]}` | staff-supplied, validated |
+| `learner_contact_corrected` | one per applied correction | `{"fields":["email"],"revokedInvites":n}` | staff-supplied, validated |
 | `learner_deactivated` | one per applied deactivation | `NULL` | staff-supplied, validated |
 | `learner_support_history_viewed` | one per history read | `NULL` | server constant |
 
 **Owner decision: a reveal records field names only.** The address and the
 search term are never written to the audit table, a log line, an error message
-or a response outside the reveal itself. `details_json` holds `{"fields":["email"]}`
-and nothing else. A malformed value is rejected by the
-`audit_events_details_valid_insert` trigger.
+or a response outside the reveal itself. The reveal row's `details_json` holds
+`{"fields":["email"]}` and nothing else. The correction row adds one scalar,
+`revokedInvites`, because the correction revokes sign-in material and the count
+is the only evidence of it that can be stored without an address. A malformed
+value is rejected by the `audit_events_details_valid_insert` trigger.
 
 Denied and no-op requests write nothing. Mutations use a guarded `UPDATE`, a
 witness column (`users.deactivation_operation_id`,
@@ -199,13 +232,39 @@ One migration, no table rebuilds, no data copy, every added column nullable.
 1. `audit_events.details_json` plus `audit_events_details_valid_insert` and
    `audit_events_occurred_at_idx`. `audit_events_no_update` is untouched: the
    table stays append-only except for retention.
-2. Retention: `audit_events_no_delete` is replaced by a trigger that aborts any
+2. `audit_events_no_replace` aborts an `INSERT OR REPLACE` whose key already
+   exists. Without it, `INSERT OR REPLACE` resolves the primary-key conflict by
+   deleting the existing row, which fires no delete trigger unless recursive
+   triggers are enabled — an in-window audit row could be removed by a path that
+   never names `DELETE`. The guard is explicit rather than implied.
+3. Retention: `audit_events_no_delete` is replaced by a trigger that aborts any
    delete of a row whose `occurred_at` is inside the window, measured against
    **D1's own clock**, not the caller's.
-3. `users.deactivation_operation_id`, `users_deactivation_requires_operation`
-   (no unaudited disable) and `users_no_reactivation` (terminal state).
-4. `learner_password_credentials.contact_operation_id`.
-5. Four contact-identity triggers closing the cross-table hole described next.
+4. `users.deactivation_operation_id`, `users_deactivation_requires_operation`
+   (no disable without an operation id) and `users_no_reactivation` (terminal
+   state).
+5. `learner_password_credentials.contact_operation_id`.
+6. Four contact-identity triggers closing the cross-table hole described next.
+
+### What `users_deactivation_requires_operation` does and does not prove
+
+It guarantees **no disable without an operation id**: an update that sets
+`status = 'disabled'` with a missing or malformed `deactivation_operation_id`
+aborts inside storage, whatever code path issues it.
+
+It cannot prove that an audit row exists. It only checks that the witness value
+is present and well formed, and an `INSERT` of an already-disabled user never
+runs a `BEFORE UPDATE OF status` trigger at all. The real protection is the
+route: the only code path that can disable an account writes its audit row in
+the same `DB.batch()` as the update, and `deactivateLearner` reports success only
+when both statements changed exactly one row. So the guarantee is:
+
+> no disable without an operation id; the only route that can disable writes its
+> audit row in the same batch.
+
+Enforcing the stronger "an audit row must exist" claim in storage would be a new
+design (a trigger cannot see a row inserted later in the same batch), and is not
+attempted here.
 
 ## 7. One address, one learner
 
@@ -240,6 +299,53 @@ Consequences:
   already-provisioned address is indistinguishable from a fresh one. Before this,
   registering an invited address created a second account for one address.
 
+### 7.1 Upgrade pre-flight — a prerequisite, not an option
+
+The triggers guard new writes; they do not rewrite rows that already collide. Run
+this query on the target database **before** applying `0016` and require zero
+rows:
+
+```sql
+SELECT email_normalized, COUNT(DISTINCT user_id) AS learners
+FROM (
+  SELECT email_normalized, user_id FROM learner_password_credentials
+  UNION
+  SELECT email_normalized, user_id FROM learner_email_sign_in_invites
+)
+GROUP BY email_normalized
+HAVING COUNT(DISTINCT user_id) > 1;
+```
+
+Zero rows is what makes the lookup's deduplicating `LIMIT 1` sound: after the
+pre-flight, one address can identify at most one learner, so there is no tie to
+break. Skipping the pre-flight does not fail the migration, it only leaves
+collisions that the triggers cannot see.
+
+### 7.2 Correcting an address revokes the old address as a sign-in key
+
+**Owner decision.** `POST /learners/:id/contact` is not only an edit of one
+column. In the same `DB.batch()` as the credential update it:
+
+1. sets `revoked_at` on **this learner's** `learner_email_sign_in_invites` row at
+   the **old** address;
+2. consumes every outstanding `learner_email_sign_in_tokens` row for that invite,
+   so a link already minted for the old address dies too — tokens have no
+   revocation column, and a re-provision that clears `revoked_at` must not
+   revive an old link;
+3. writes the `learner_contact_corrected` audit row with
+   `{"fields":["email"],"revokedInvites":n}`.
+
+Without step 1, correcting A → B would leave A as a live sign-in key to that
+learner. The old address is read from the credential row *inside* the
+transaction, every statement is scoped by `user_id`, and the invite row stays in
+place (revoked) so re-provisioning stays idempotent. Another learner's invite at
+that address is impossible to create — the identity triggers abort — so a
+correction onto an address someone else holds answers `409 contact_taken` and
+revokes nothing.
+
+Do not re-litigate this: the correction's purpose is that the old address stops
+working.
+
 ## 8. Audit retention — twelve months, flat
 
 `cleanupExpiredAuditEvents(database, now, limit = 500)` deletes at most `limit`
@@ -267,8 +373,11 @@ transport exists, and minting a reset token that cannot be delivered would leave
 a live credential with no legitimate reader. No token row, no audit row, no
 address logged. The handler sits behind `supportEmailConfigured(env)`, which
 returns false for every binding this phase can set, so the routes cannot be
-switched on by configuration drift alone. `resend-verification` answers
-`409 already_verified` for a verified account before it reaches that refusal.
+switched on by configuration drift alone. `resend-verification` checks
+`isVerifiedCredential` **before** that gate, so a verified account answers
+`409 already_verified` — a real, actionable state, not a transport limitation.
+The 503 tails behind the gate are unreachable tripwires, kept so a future
+transport cannot claim a mail was sent from a route that never sends one.
 
 ## 10. Failure modes
 
@@ -277,15 +386,18 @@ switched on by configuration drift alone. `resend-verification` answers
   `ADMIN_TESTER_IPS` returns 503 before routing.
 - **Atomic audit.** D1 `batch()` is one transaction: if the audit insert or the
   read fails, the whole batch rolls back and the route answers with an error
-  status and an empty body.
+  status and the repository JSON envelope (`{ "error": { "code", "requestId" } }`).
 - **Idempotency.** Reveal, view and history are intentionally non-idempotent —
   a second look is a second act. Deactivation and contact correction are
   idempotent in effect: a replay returns 409 and writes nothing. Operation ids are
   per request, so no `audit_events` primary-key collision is possible.
 - **Concurrency.** Two deactivations race on `status = 'active'`; SQLite
-  serialises, the loser changes 0 rows and answers 409. Two corrections serialise;
-  the identity triggers reject a duplicate address and roll the batch back. A
-  concurrent assignment revocation is caught by the statement guard.
+  serialises, the loser changes 0 rows and answers `409 conflict` — a subject that
+  exists but lost the race is a conflict, never a `404 not_found`, which is
+  reserved for a subject that does not exist. Two corrections serialise; the
+  identity triggers reject a duplicate address and roll the batch back. A
+  concurrent assignment revocation is caught by the statement guard. Both
+  outcomes are fail-closed and write zero audit rows.
 - **Revocation and deactivation take effect on the next request.** Every session
   read joins `users.status = 'active'` and every guard re-reads `staff_roles`.
   Live session rows stay in place with their history; they simply stop

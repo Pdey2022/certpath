@@ -15,9 +15,12 @@ import type { StaffMfaPolicy } from "./mfa.ts";
 //
 // Two rules keep it honest:
 //
-//   1. Every read returns `maskEmail(...)`-masked contact data. There is exactly
-//      one unmasked read in the codebase - `revealLearnerContact` - and it writes
-//      its audit row in the same D1 batch as the select.
+//   1. Every read returns `maskEmail(...)`-masked contact data. This module holds
+//      exactly one unmasked value returned to a caller - `revealLearnerContact` -
+//      and it writes its audit row in the same D1 batch as the select. The raw
+//      column is also selected internally by `readContact`,
+//      `readStoredCredentialEmail` and the reveal's own select; none of those
+//      returns it to a caller.
 //   2. Every write carries `learnerGuard(...)` in its own WHERE clause, so a
 //      revoked role, a disabled staff account or a stale MFA assurance is refused
 //      by the statement itself, not only by the route.
@@ -56,6 +59,10 @@ export interface SupportMutation {
 export type LearnerAccessFailure =
   | "invalid-input"
   | "not-found"
+  // The subject exists but the guarded statement changed no row: the caller lost
+  // a race, so the answer is a conflict rather than the not-found that hides a
+  // missing subject.
+  | "conflict"
   | "contact-not-available"
   | "contact-unchanged"
   | "contact-taken"
@@ -136,6 +143,12 @@ export function maskEmail(email: string): string {
  * Contact lookup. A same-user address can legitimately appear in both tables
  * (the storage trigger compares `user_id`), so results are deduplicated by
  * `user_id`. Revoked invites keep reserving their address - no revoked filter.
+ *
+ * `LIMIT 1` has no tiebreak because it needs none: the upgrade pre-flight query
+ * documented in `docs/admin-capabilities.md` §7 must return zero rows before
+ * `0016` is applied, so one address can never identify two learners. That
+ * pre-flight is a prerequisite of the contact-identity triggers, not an optional
+ * check; without it this limit would pick an arbitrary learner.
  */
 export async function findLearnerUserIdByEmail(
   database: SecurityDatabase,
@@ -382,6 +395,31 @@ export async function learnerAccountStatus(
   return row.status === "disabled" ? "deactivated" : "active";
 }
 
+/**
+ * Whether an account exists and holds no active staff role - the definition of a
+ * learner subject. This is the same predicate `canCapability` uses for a learner
+ * resource, kept here so the mutation error mapping cannot drift from it.
+ */
+export async function learnerSubjectExists(
+  database: SecurityDatabase,
+  learnerUserId: string,
+): Promise<boolean> {
+  const row = await database
+    .withSession("first-primary")
+    .prepare(
+      `SELECT 1 AS present FROM users AS subject
+       WHERE subject.id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM staff_roles AS subject_role
+           WHERE subject_role.user_id = subject.id
+             AND subject_role.active = 1
+         )`,
+    )
+    .bind(learnerUserId)
+    .first<{ present: number }>();
+  return row !== null;
+}
+
 function auditStatement(
   database: SecurityDatabase,
   input: {
@@ -391,18 +429,26 @@ function auditStatement(
     learnerUserId: string;
     reason: string;
     detailsJson: string | null;
+    /**
+     * Overrides `detailsJson` when the value can only be computed inside the
+     * batch - the contact correction's revoked-invite count. Placeholders are
+     * bound immediately after `reason`.
+     */
+    detailsExpression?: { sql: string; values: (string | number)[] };
     now: number;
     predicateSql: string;
     predicateValues: (string | number)[];
   },
 ): D1PreparedStatement {
+  const detailsSql = input.detailsExpression?.sql ?? "?";
+  const detailsValues = input.detailsExpression?.values ?? [input.detailsJson];
   return database
     .prepare(
       `INSERT INTO audit_events (
          operation_id, actor_user_id, actor_ref, action, subject_type,
          subject_id, certification_id, reason, details_json, occurred_at
        )
-       SELECT ?, ?, NULL, ?, 'user', ?, NULL, ?, ?, ?
+       SELECT ?, ?, NULL, ?, 'user', ?, NULL, ?, ${detailsSql}, ?
        WHERE ${input.predicateSql}
        RETURNING operation_id`,
     )
@@ -412,7 +458,7 @@ function auditStatement(
       input.action,
       input.learnerUserId,
       input.reason,
-      input.detailsJson,
+      ...detailsValues,
       input.now,
       ...input.predicateValues,
     );
@@ -580,9 +626,17 @@ export async function deactivateLearner(
   const applied = results[0]?.meta.changes ?? 0;
   const audited = results[1]?.meta.changes ?? 0;
   if (applied !== 1 || audited !== 1) {
-    // Zero rows changed and zero audit rows written: the guard refused the write
-    // or the account was already disabled. Both are fail-closed.
-    return { ok: false, reason: "not-found" };
+    // Zero rows changed and zero audit rows written: either the subject is gone
+    // or it exists and the guarded update lost a race (the account was disabled
+    // between the route's pre-check and this batch). Both are fail-closed; only
+    // the existence probe distinguishes them, and it uses the same
+    // staff-subject-excluding predicate as the capability layer.
+    return {
+      ok: false,
+      reason: (await learnerSubjectExists(database, input.learnerUserId))
+        ? "conflict"
+        : "not-found",
+    };
   }
   return { ok: true, value: { deactivatedAt: input.metadata.now } };
 }
@@ -645,8 +699,72 @@ export async function correctLearnerContact(
     input.metadata.now,
     input.policy,
   );
+  // Owner decision (issue #46): moving the contact address must kill the old
+  // address as a sign-in key. The invite row is the sign-in key, so a correction
+  // revokes this learner's invite at the old address and consumes any token that
+  // was already minted for it. Without this, correcting A -> B would leave a
+  // live link keyed to A pointing at the same learner.
+  //
+  // The old address is read inside the transaction from the credential row
+  // itself, never from a value the route read earlier, so the revocation cannot
+  // target a stale address. `user_id` on every statement is what stops it from
+  // touching another learner's invite, and the identity triggers reject any
+  // attempt to create a second holder of one address.
+  const changePending = `EXISTS (
+    SELECT 1 FROM learner_password_credentials AS previous_credential
+    WHERE previous_credential.user_id = ?
+      AND previous_credential.email_normalized <> ?
+  )`;
   try {
     const results = await database.batch([
+      database
+        .prepare(
+          `UPDATE learner_email_sign_in_invites
+           SET revoked_at = ?
+           WHERE user_id = ?
+             AND revoked_at IS NULL
+             AND email_normalized = (
+               SELECT email_normalized FROM learner_password_credentials
+               WHERE user_id = ?
+             )
+             AND ${changePending}
+             AND ${guard.sql}`,
+        )
+        .bind(
+          input.metadata.now,
+          input.learnerUserId,
+          input.learnerUserId,
+          input.learnerUserId,
+          input.emailNormalized,
+          ...guard.values,
+        ),
+      // Tokens have no revocation column, so `consumed_at` is the existing kill
+      // switch. The operation id is suffixed with the token digest to keep the
+      // `consumed_operation_id` uniqueness constraint true for every row, and a
+      // re-provision that clears `revoked_at` cannot revive an old link.
+      database
+        .prepare(
+          `UPDATE learner_email_sign_in_tokens
+           SET consumed_at = ?,
+               consumed_operation_id = ? || ':' || token_digest
+           WHERE user_id = ?
+             AND consumed_at IS NULL
+             AND invite_email = (
+               SELECT email_normalized FROM learner_password_credentials
+               WHERE user_id = ?
+             )
+             AND ${changePending}
+             AND ${guard.sql}`,
+        )
+        .bind(
+          input.metadata.now,
+          input.metadata.operationId,
+          input.learnerUserId,
+          input.learnerUserId,
+          input.learnerUserId,
+          input.emailNormalized,
+          ...guard.values,
+        ),
       database
         .prepare(
           `UPDATE learner_password_credentials
@@ -674,7 +792,20 @@ export async function correctLearnerContact(
         action: "learner_contact_corrected",
         learnerUserId: input.learnerUserId,
         reason: input.metadata.reason,
-        detailsJson: '{"fields":["email"]}',
+        detailsJson: null,
+        // Field names plus the count of invites this operation revoked. No
+        // address: `revoked_at = now` is this operation's own timestamp, so the
+        // count is exact while the statement above is the only writer of it.
+        detailsExpression: {
+          sql: `json_object(
+            'fields', json_array('email'),
+            'revokedInvites', (
+              SELECT COUNT(*) FROM learner_email_sign_in_invites
+              WHERE user_id = ? AND revoked_at = ?
+            )
+          )`,
+          values: [input.learnerUserId, input.metadata.now],
+        },
         now: input.metadata.now,
         predicateSql: `EXISTS (
           SELECT 1 FROM learner_password_credentials AS corrected
@@ -685,10 +816,17 @@ export async function correctLearnerContact(
       }),
     ]);
 
-    const applied = results[0]?.meta.changes ?? 0;
-    const audited = results[1]?.meta.changes ?? 0;
+    const applied = results[2]?.meta.changes ?? 0;
+    const audited = results[3]?.meta.changes ?? 0;
     if (applied !== 1 || audited !== 1) {
-      return { ok: false, reason: "not-found" };
+      // Subject gone, or the guarded write lost a race. Fail-closed either way;
+      // existence decides 404 versus 409.
+      return {
+        ok: false,
+        reason: (await learnerSubjectExists(database, input.learnerUserId))
+          ? "conflict"
+          : "not-found",
+      };
     }
     return { ok: true, value: { email: input.email } };
   } catch (error) {

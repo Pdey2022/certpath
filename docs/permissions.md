@@ -69,12 +69,18 @@ never accepts a capability from a client; `GET /api/admin/capabilities` only
 `audit.read` are Global Admin only in the matrix and have **no route** in this
 phase. A learner (non-staff) session gets 401 on every route above.
 
-### Staff subjects are 404
+### Staff subjects are 404 on every id-addressed endpoint
 
 A learner-support request whose subject holds an active staff role answers
-`404 not_found`, for both roles, and writes nothing — the same answer as a
-missing account. Learner support cannot be used to enumerate staff or to reset a
-staff member's credential; that is a Global Admin path.
+`404 not_found` on every **id-addressed** learner endpoint, for both roles, and
+writes nothing — the same answer as a missing account. Learner support cannot be
+used to enumerate staff or to reset a staff member's credential; that is a Global
+Admin path.
+
+`POST /api/admin/learners/lookup` is the deliberate exception: it answers
+`200 {"items":[]}` for a staff subject's `userId`, identical to a `userId` that
+matches no account. A `404` there would distinguish a staff account from a
+nonexistent one, which is exactly what the rule exists to prevent.
 
 ### Deactivation is terminal
 
