@@ -101,7 +101,10 @@ session with no `staff_roles` row before `canCapability` is reached.
    authorization boundary and is not treated as one.
 2. **`requireCapability(...)`** (`security/staff-request.ts`): live session →
    `authorizeStaffSession` (active role + MFA freshness and method) →
-   `canCapability(...)`. Every route uses it.
+   `canCapability(...)`. Every capability-gated route uses it. (`/csrf` and
+   `/capabilities` sit outside it: they read `findStaffRoleRecord` — and
+   `/capabilities` additionally `authorizeStaffSession` — because they mint a
+   token or report the caller's own role rather than act on a resource.)
 3. **Statement guards.** Every write carries `learnerGuard(tokenDigest,
    learnerUserId, now, policy)` inside its own `WHERE`: live session, unexpired,
    staff role active, account active, MFA method in the allowed set and inside the
@@ -147,8 +150,10 @@ mints a token only for an account holding an active staff role.
 `attemptCounts` (all rows, in progress or completed), `lastActivityAt`,
 `createdAt`.
 
-`maskEmail` is shape-preserving and never carries a full label:
-`alice@example.test` → `a***@e***.test`.
+`maskEmail` never carries a full label. A local part or first domain label of
+one or two characters is replaced entirely (`***`); a longer one keeps its first
+character (`a***`); the final domain label is kept. `alice@example.test` →
+`a***@e***.test`; `a@mail.example.test` → `***@m***.test`.
 
 ### 4.2 Refusals
 
@@ -345,6 +350,26 @@ revokes nothing.
 
 Do not re-litigate this: the correction's purpose is that the old address stops
 working.
+
+### 7.3 Two consequences the revocation does not fix
+
+Both are follow-ups for an owner ADR
+([address lifecycle after a contact correction](https://github.com/Pdey2022/certpath/issues/60)).
+The consequences are recorded here now so nobody rediscovers them as a bug:
+
+- **Re-provisioning re-opens a corrected address.** If a learner held a
+  credential and an invite at address A and is corrected to B, the invite at A is
+  revoked — but
+  `npm run learner:provision -- --user-id <id> --email <A>` clears `revoked_at`
+  through `ON CONFLICT … DO UPDATE SET revoked_at = NULL`, which makes A a live
+  sign-in key to that learner again.
+- **A corrected address is reserved indefinitely.** After the correction the
+  revoked invite row still carries A, and neither the identity triggers nor the
+  registration pre-check filters revoked rows, so A stays unregisterable and
+  unprovisionable for every other learner. Reclaiming it is not free:
+  `learner_email_sign_in_tokens.invite_email` is
+  `REFERENCES learner_email_sign_in_invites(email_normalized) ON DELETE RESTRICT`,
+  so the token rows must be pruned before the invite row can be deleted.
 
 ## 8. Audit retention — twelve months, flat
 

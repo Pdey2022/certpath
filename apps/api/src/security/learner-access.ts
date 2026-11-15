@@ -122,8 +122,11 @@ function maskLabel(label: string): string {
 }
 
 /**
- * Shape-preserving mask: `alice@example.test` becomes `a***@e***.test`.
- * Case-insensitive for matching, but the mask never carries a full label.
+ * Masks an address without preserving label lengths: a label of one or two
+ * characters is replaced entirely (`***`) and a longer one keeps its first
+ * character (`a***`), so `alice@example.test` becomes `a***@e***.test` and
+ * `a@mail.example.test` becomes `***@m***.test`. Case-insensitive for matching,
+ * but the mask never carries a full label.
  */
 export function maskEmail(email: string): string {
   const value = email.trim();
@@ -670,7 +673,7 @@ export async function contactHeldByAnotherLearner(
   return row !== null;
 }
 
-function isContactIdentityAbort(error: unknown): boolean {
+export function isContactIdentityAbort(error: unknown): boolean {
   const message =
     error instanceof Error
       ? error.message
@@ -679,8 +682,6 @@ function isContactIdentityAbort(error: unknown): boolean {
         : "";
   return message.includes(contactIdentityMessage);
 }
-
-export { isContactIdentityAbort };
 
 export async function correctLearnerContact(
   database: SecurityDatabase,
@@ -739,14 +740,17 @@ export async function correctLearnerContact(
           ...guard.values,
         ),
       // Tokens have no revocation column, so `consumed_at` is the existing kill
-      // switch. The operation id is suffixed with the token digest to keep the
-      // `consumed_operation_id` uniqueness constraint true for every row, and a
-      // re-provision that clears `revoked_at` cannot revive an old link.
+      // switch, and a re-provision that clears `revoked_at` cannot revive an old
+      // link. `consumed_operation_id` is UNIQUE, so every row needs its own
+      // value: the attempt's operation id plus 8 random bytes. The suffix is
+      // deliberately not the token digest — that column is documented as an
+      // operation id, and copying a digest into a second place would widen the
+      // number of rows that carry one.
       database
         .prepare(
           `UPDATE learner_email_sign_in_tokens
            SET consumed_at = ?,
-               consumed_operation_id = ? || ':' || token_digest
+               consumed_operation_id = ? || ':' || lower(hex(randomblob(8)))
            WHERE user_id = ?
              AND consumed_at IS NULL
              AND invite_email = (
@@ -795,7 +799,11 @@ export async function correctLearnerContact(
         detailsJson: null,
         // Field names plus the count of invites this operation revoked. No
         // address: `revoked_at = now` is this operation's own timestamp, so the
-        // count is exact while the statement above is the only writer of it.
+        // count is rows revoked at exactly this millisecond. The revocation
+        // statement above is one writer of `revoked_at` but not the only one —
+        // `provision-learner-sign-in-invite.mjs --revoke` writes it too — which
+        // is why the count is scoped to this timestamp rather than to "revoked
+        // invites on this learner".
         detailsExpression: {
           sql: `json_object(
             'fields', json_array('email'),

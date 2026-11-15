@@ -17,8 +17,9 @@ amend, review, publish and retire assigned content and inspect its quality
 reports.
 
 Managers also handle learner support **across the platform**: look up an account,
-reset a password, resend verification, correct a profile and deactivate an
-account. Learner data is masked by default - account id, masked contact,
+correct a profile and deactivate an account (password reset and resend
+verification are wired as routes and answer `409 email_unavailable` while email
+is off). Learner data is masked by default - account id, masked contact,
 membership state, attempt counts and last activity - and full contact details
 require an audited reveal. Every learner record view and reveal is audited, not
 only changes. A deactivation is terminal and cannot be reversed without an

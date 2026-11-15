@@ -29,12 +29,18 @@ One principle governs every future argument:
 |---|---|---|
 | Content: add, amend, review, publish, retire | all certifications | assigned certifications only |
 | Content import/export | all | assigned certifications |
-| Learner support: reset password, resend verification, correct profile, deactivate | all learners | all learners |
+| Learner support: reset password¹, resend verification¹, correct profile, deactivate | all learners | all learners |
 | Learner lookup and support history | all | all learners |
 | Prices, discounts, coupons, refunds, credits, payment views | yes | **no** |
 | Access grants, extensions, Pro enablement | yes | **no** |
 | Staff and role management | yes | **no** |
 | Security, secrets, integrations, audit export | yes | no |
+
+¹ Both routes exist and both roles hold `learner.support.email`, but they answer
+`409 email_unavailable` today: no mail transport is bound, and minting a reset
+token that cannot be delivered would leave a live credential with no legitimate
+reader. The capability is real; the action is not available until email lands
+(`docs/admin-capabilities.md` §9).
 
 Consequences of that table:
 
@@ -67,6 +73,14 @@ Consequences of that table:
 - The capability list becomes one server-side function
   (`can(actor, capability, resource)`) with scope resolution, not scattered
   checks per route.
+
+  > _Annotation (implementation, issue #46)._ The function shipped as
+  > `canCapability(actor, capability, resource)` in
+  > `apps/api/src/security/capabilities.ts`. The rename avoids colliding with
+  > `can(access, capability)` in `apps/api/src/entitlements.ts`, which evaluates
+  > a learner's entitlement rather than a staff actor's scope: two functions
+  > called `can` with different arguments in a module that needs both is a
+  > readability trap. Signature and semantics are as decided here.
 - Masking and reveal need a single learner read model, so a new admin route cannot
   accidentally return full contact data.
 - Platform-wide learner access while MFA is parked is acceptable only for the
