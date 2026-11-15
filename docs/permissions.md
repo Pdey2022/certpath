@@ -17,11 +17,13 @@ amend, review, publish and retire assigned content and inspect its quality
 reports.
 
 Managers also handle learner support **across the platform**: look up an account,
-reset a password, resend verification, correct a profile and deactivate an
-account. Learner data is masked by default - account id, masked contact,
+correct a profile and deactivate an account (password reset and resend
+verification are wired as routes and answer `409 email_unavailable` while email
+is off). Learner data is masked by default - account id, masked contact,
 membership state, attempt counts and last activity - and full contact details
 require an audited reveal. Every learner record view and reveal is audited, not
-only changes.
+only changes. A deactivation is terminal and cannot be reversed without an
+owner-approved migration.
 
 The governing principle, which settles new capabilities without a new debate:
 
@@ -39,7 +41,72 @@ changes apply on subsequent requests and are audited. Deny by default; both staf
 roles require MFA.
 
 See [ADR 0004](decisions/0004-staff-capabilities-and-learner-data.md) for the
-capability table and the rejected alternatives.
+capability table and the rejected alternatives, and
+[admin capabilities](admin-capabilities.md) for the implemented model.
+
+## Capability mapping for the learner-support endpoints
+
+Every admin learner-support route goes through one server-side decision
+(`canCapability(actor, capability, resource)` in
+`apps/api/src/security/capabilities.ts`), reached through
+`requireCapability(...)` in `apps/api/src/security/staff-request.ts`. The server
+never accepts a capability from a client; `GET /api/admin/capabilities` only
+*reports* the caller's own role.
+
+| Endpoint | Capability | Global Admin | Manager |
+|---|---|---|---|
+| `GET /api/admin/csrf` | — (live session plus an active staff role) | ✔ | ✔ |
+| `GET /api/admin/capabilities` | — (reports the caller's role) | ✔ | ✔ |
+| `POST /api/admin/learners/lookup` | `learner.lookup` | ✔ | ✔ |
+| `GET /api/admin/learners/:id` | `learner.read` | ✔ | ✔ |
+| `POST /api/admin/learners/:id/contact-reveal` | `learner.reveal` | ✔ | ✔ |
+| `POST /api/admin/learners/:id/deactivate` | `learner.deactivate` | ✔ | ✔ |
+| `POST /api/admin/learners/:id/contact` | `learner.contact.correct` | ✔ | ✔ |
+| `POST /api/admin/learners/:id/password-reset` | `learner.support.email` | 409 `email_unavailable` | 409 `email_unavailable` |
+| `POST /api/admin/learners/:id/resend-verification` | `learner.support.email` | 409 `email_unavailable` | 409 `email_unavailable` |
+| `GET /api/admin/learners/:id/support-history` | `learner.support.history` | ✔ | ✔ |
+
+`commerce.read`, `access.grant`, `staff.manage`, `security.manage` and
+`audit.read` are Global Admin only in the matrix and have **no route** in this
+phase. A learner (non-staff) session gets 401 on every route above.
+
+### Staff subjects are 404 on every id-addressed endpoint
+
+A learner-support request whose subject holds an active staff role answers
+`404 not_found` on every **id-addressed** learner endpoint, for both roles, and
+writes nothing — the same answer as a missing account. Learner support cannot be
+used to enumerate staff or to reset a staff member's credential; that is a Global
+Admin path.
+
+`POST /api/admin/learners/lookup` is the deliberate exception: it answers
+`200 {"items":[]}` for a staff subject's `userId`, identical to a `userId` that
+matches no account. A `404` there would distinguish a staff account from a
+nonexistent one, which is exactly what the rule exists to prevent.
+
+### Deactivation is terminal
+
+`users_no_reactivation` is a storage trigger: `disabled → active` aborts. There
+is no `learner.reactivate` capability. Undoing a deactivation requires an
+owner-approved migration that drops the trigger. See
+[admin capabilities §α](admin-capabilities.md#️-deactivation-is-terminal).
+
+### Audit retention job
+
+`cleanupExpiredAuditEvents` (`apps/api/src/security/audit-retention.ts`) runs
+from the Worker's `scheduled` handler in its own `ctx.waitUntil`, only when
+`AUDIT_RETENTION_ENABLED === "true"`. It deletes at most 500 audit rows older
+than twelve months per run, oldest first, idempotently. Retention is flat: reveal
+and deactivation rows are deleted on the same rule, and there is no legal hold.
+The storage trigger — not the job — enforces the floor, comparing against D1's
+own clock.
+
+### MFA dependency
+
+Platform-wide learner access is acceptable on the labelled `tester-gate`
+assurance only while the IP allowlist is non-empty, because real MFA is parked.
+This surface may not be used for real learner data until an approved MFA factor
+replaces `tester-gate` (Phase 5 gate). That is a security dependency, not a
+preference.
 
 Milestone 0 renders a non-functional admin shell only. It has no fixture
 identity, role switching, permission enforcement or privileged data.

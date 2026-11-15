@@ -12,7 +12,8 @@
 	},
 	"vars": {
 		"INDEXING_ENABLED": "false",
-		"PUBLIC_SITE_ORIGIN": ""
+		"PUBLIC_SITE_ORIGIN": "",
+		"AUDIT_RETENTION_ENABLED": "false"
 	},
 	"d1_databases": [
 		{

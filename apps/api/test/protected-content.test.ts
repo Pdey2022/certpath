@@ -1760,6 +1760,127 @@ describe("protected content HTTP boundary", () => {
     ).toMatchObject({ changed_by_user_id: manager.userId });
   });
 
+  it("refuses publication by a Manager who is not assigned to the certification", async () => {
+    const manager = await createActor({ role: "manager" });
+    const unassigned = await createActor({ role: "manager", assigned: false });
+    const versionResponse = await call(
+      manager,
+      `${apiRoot}/certifications/${manager.certificationId}/exam-versions`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          versionKey: `denial-${crypto.randomUUID()}`,
+          title: "Synthetic denial version",
+          syllabusReference: "Synthetic denial syllabus",
+        }),
+      },
+    );
+    expect(versionResponse.status).toBe(201);
+    const versionId = ((await versionResponse.json()) as { id: string }).id;
+    const scopedVersion = versionPath(manager, versionId);
+    const domainId = (
+      (await (
+        await call(manager, `${scopedVersion}/domains`, {
+          method: "POST",
+          body: JSON.stringify({
+            domainKey: `denial-domain-${crypto.randomUUID()}`,
+            title: "Synthetic denial domain",
+            meaning: "Synthetic stable denial meaning",
+            order: 0,
+          }),
+        })
+      ).json()) as { id: string }
+    ).id;
+    const topicId = (
+      (await (
+        await call(manager, `${scopedVersion}/domains/${domainId}/topics`, {
+          method: "POST",
+          body: JSON.stringify({
+            topicKey: `denial-topic-${crypto.randomUUID()}`,
+            title: "Synthetic denial topic",
+            meaning: "Synthetic stable denial topic meaning",
+            order: 0,
+          }),
+        })
+      ).json()) as { id: string }
+    ).id;
+    const questionResponse = await call(manager, `${scopedVersion}/questions`, {
+      method: "POST",
+      body: JSON.stringify({
+        questionKey: `denial-question-${crypto.randomUUID()}`,
+        domainId,
+        topicId,
+        content: validQuestionContent,
+      }),
+    });
+    expect(questionResponse.status).toBe(201);
+    const question = (await questionResponse.json()) as {
+      questionId: string;
+      revisionId: string;
+    };
+    const questionPath = `${scopedVersion}/questions/${question.questionId}`;
+    const revisionPath = `${questionPath}/revisions/${question.revisionId}`;
+    expect(
+      (await call(manager, `${revisionPath}/submit`, {
+        method: "POST",
+        body: "{}",
+      })).status,
+    ).toBe(200);
+    expect(
+      (await call(manager, `${revisionPath}/review`, {
+        method: "POST",
+        body: JSON.stringify({
+          decision: "approved",
+          notes: "Synthetic denial approval.",
+        }),
+      })).status,
+    ).toBe(201);
+    expect(
+      await (await call(manager, revisionPath)).json(),
+    ).toMatchObject({
+      revisionId: question.revisionId,
+      workflowState: "approved",
+    });
+
+    const eventsBefore = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM content_publication_events
+         WHERE question_id = ?`,
+      )
+      .bind(question.questionId)
+      .first<{ count: number }>();
+
+    // The revision is approved and the pointer is empty, so only the assignment
+    // stands between this actor and a publication.
+    const denied = await call(unassigned, `${questionPath}/publish`, {
+      method: "POST",
+      body: JSON.stringify({
+        revisionId: question.revisionId,
+        expectedPointerVersion: null,
+      }),
+    });
+    expect(denied.status).toBe(404);
+    assertPrivate(denied);
+    expect(
+      await database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM content_publication_events
+           WHERE question_id = ?`,
+        )
+        .bind(question.questionId)
+        .first<{ count: number }>(),
+    ).toEqual(eventsBefore);
+    expect(
+      await database
+        .prepare(
+          `SELECT COUNT(*) AS count FROM exam_version_questions
+           WHERE question_id = ?`,
+        )
+        .bind(question.questionId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
+  });
+
   it("supports bounded import preview, idempotent confirmation, expiry, and scoped export", async () => {
     const actor = await createActor();
     const versionId = crypto.randomUUID();

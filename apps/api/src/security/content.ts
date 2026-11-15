@@ -12,6 +12,7 @@ import { isValidTokenDigest } from "./database.ts";
 import type { StaffMfaPolicy } from "./mfa.ts";
 import { isConfiguredMfaPolicy } from "./mfa.ts";
 import type { MutationMetadata } from "./mutations.ts";
+import { certificationGuard } from "./capabilities.ts";
 
 export type ContentFailure =
   | AuthorizationFailure
@@ -261,43 +262,10 @@ export function createScopeGuard(
   now: number,
   policy: StaffMfaPolicy,
 ): ScopeGuard {
-  const placeholders = policy.allowedMethods.map(() => "?").join(", ");
-  return {
-    sql: `EXISTS (
-      SELECT 1
-      FROM app_sessions AS scope_session
-      JOIN users AS scope_user ON scope_user.id = scope_session.user_id
-      JOIN staff_roles AS scope_role ON scope_role.user_id = scope_user.id
-      WHERE scope_session.token_digest = ?
-        AND scope_session.revoked_at IS NULL
-        AND scope_session.expires_at > ?
-        AND scope_user.status = 'active'
-        AND scope_role.active = 1
-        AND scope_session.mfa_verified_at BETWEEN ? AND ?
-        AND scope_session.mfa_method IN (${placeholders})
-        AND (
-          scope_role.role = 'global_admin'
-          OR (
-            scope_role.role = 'manager'
-            AND EXISTS (
-              SELECT 1
-              FROM manager_certification_assignments AS scope_assignment
-              WHERE scope_assignment.manager_user_id = scope_user.id
-                AND scope_assignment.certification_id = ?
-                AND scope_assignment.active = 1
-            )
-          )
-        )
-    )`,
-    values: [
-      tokenDigest,
-      now,
-      now - policy.maxAgeMs,
-      now,
-      ...policy.allowedMethods,
-      certificationId,
-    ],
-  };
+  // One truth for content scope. The optional proposed certification is what
+  // makes "current and proposed" one function; passing null keeps the original
+  // statement byte-for-byte.
+  return certificationGuard(tokenDigest, certificationId, null, now, policy);
 }
 
 async function authorizeScope(

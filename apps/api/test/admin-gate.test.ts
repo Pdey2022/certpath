@@ -17,6 +17,11 @@ describe("admin tester gate", () => {
       "/api/admin",
       "/api/admin/auth/sign-in",
       "/api/admin/content/certifications",
+      "/api/admin/csrf",
+      "/api/admin/capabilities",
+      "/api/admin/learners/lookup",
+      `/api/admin/learners/${crypto.randomUUID()}/contact-reveal`,
+      `/api/admin/learners/${crypto.randomUUID()}/support-history`,
     ]) {
       expect(isAdminSurfacePath(path)).toBe(true);
     }
