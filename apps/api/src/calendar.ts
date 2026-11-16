@@ -36,8 +36,10 @@ function requireSafeInstant(atMs: number): void {
  * day, but **not** across a day clamp - 30 January 18:00 and 31 January 00:00
  * both clamp into 30 April, so the later instant yields the earlier expiry. Any
  * invariant that compares two calendar-added instants has to be written so it
- * does not depend on that ordering (the bundle's capped Standard leg, which
- * takes `max(coverageEnd, addTerm(now, term))`, is the one that exists).
+ * does not depend on that ordering (the bundle's stacked Standard leg, which
+ * takes `max(addTerm(coverageEnd, term), addTerm(now, term))`, is the one that
+ * exists — the `max` is there because the leg is not capped; see ADR 0003,
+ * 16 November 2026).
  *
  * `months` must be a positive safe integer: a zero or negative term would
  * silently produce a zero-length or inverted grant, which is not a state we can

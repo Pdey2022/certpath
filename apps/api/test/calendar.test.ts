@@ -117,8 +117,10 @@ describe("addCalendarMonths", () => {
     // January onto 30 April, and the time of day then decides the order, so a
     // later instant can produce an earlier expiry. Any invariant that compares
     // two calendar-added instants must therefore be built so that it does not
-    // depend on ordering across a clamp - the bundle's capped Standard leg
-    // (`max(coverageEnd, addTerm(now, term))`) does exactly that.
+    // depend on ordering across a clamp - the bundle's stacked Standard leg,
+    // which takes `max(addTerm(coverageEnd, term), addTerm(now, term))`, is the
+    // one that exists — the `max` is there because the leg is not capped; see
+    // ADR 0003, 16 November 2026.
     const earlier = at("2026-01-30T18:00:00.000Z");
     const later = at("2026-01-31T00:00:00.000Z");
     expect(earlier).toBeLessThan(later);

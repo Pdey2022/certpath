@@ -92,6 +92,9 @@ gate applies before any handler runs.
 | `GET /api/admin/commerce/certifications/:id/pro-enablement` | `commerce.read` | `200 { certificationId, enabled, effectiveAt, history[] }` |
 | `POST /api/admin/commerce/certifications/:id/pro-enablement` | `access.grant` | `200 { certificationId, enabled, effectiveAt, operationId }` |
 
+`effectiveAt` is `null` iff no act has ever been recorded; `enabled: false` with
+`effectiveAt: null` therefore means 'never decided', not 'withdrawn'.
+
 `POST` body: `{ "enabled": boolean, "reason": string }` (reason 1–200
 characters), with `Origin` and `X-CSRF-Token` required. The server mints
 `operationId = "api:pro-enablement:" + <uuid>`.
@@ -164,11 +167,22 @@ construction because `S.starts_at = P.starts_at` and
 **without** any ordering property of month arithmetic. Observable: both rows'
 `starts_at` are byte-identical; `S.expires_at >= P.expires_at` holds in the
 inversion case above; a learner with 11 months of coverage gets a Standard row
-ending 3 calendar months past their previous coverage end.
+ending **at least** 3 calendar months past their previous coverage end. "At
+least" is the whole guarantee: when the `max` picks `addTerm(now, term)` the row
+ends later than `addTerm(coverageEnd, term)`, so no exact figure is stated and
+none may be asserted.
 
 Not yet observable: both legs sharing one `operation_id`. `learner_access_grants`
 `operation_id` is `UNIQUE` and `audit_events.operation_id` is the primary key, so
-one operation id for two rows is refused today. Raised for ARC, not decided here.
+the two grant rows cannot share one id. Decided on 2026-11-16; not implemented,
+and not implemented elsewhere either: the legs will carry
+`"<checkoutId>:standard"` and `"<checkoutId>:pro"`. Two conditions carry that
+decision. The suffix is derived from the checkout id alone, so a replay
+re-inserts the same two ids and fails closed at `UNIQUE` instead of granting
+twice - a random suffix would let a replay double-grant. And it is length-safe:
+`checkoutId` is validated at <= 128 and the `operationId` contracts cap at 128,
+so `":standard"` would make 137 - checkout ids are minted at <= 118 characters,
+or the suffixes shorten to `:s` / `:p`. PR B implements it.
 
 ## Owner decisions carried forward
 
