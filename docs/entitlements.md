@@ -68,20 +68,39 @@ touches a float: `standard-3m` 5900, `standard-6m` 8900, `standard-12m` 12900,
 `pro-3m` 4900, `bundle-standard-3m-pro` 9900, `standard-topup-3m` 3900,
 `standard-extension-30d` 2500 (USD).
 
-`canPurchasePro()` answers one question: may this learner buy Pro right now?
+Each entry carries a **term**, not a day count. Terms are calendar months
+computed in UTC from the purchase instant and clamped to the last valid day
+(`apps/api/src/calendar.ts`), so 3 months bought on 1 February is 89 days and
+3 months bought on 1 July is 92 days. `standard-extension-30d` is the one
+deliberately day-based SKU: 30 days is not a calendar month.
+
+`canPurchasePro()` answers one question: may this learner buy Pro right now? The
+gate is the **coverage** predicate, identical to
+`learner_access_grants_pro_requires_standard` (0013): Standard coverage must
+reach a full Pro term.
 
 | Condition | Result |
 |---|---|
 | the exam is not Pro-capable | `pro-not-offered` |
-| fewer than 90 days of Standard remain | `standard-too-short` (offer the bundle or a top-up) |
-| a Pro window started within the last 90 days | `pro-window-active` |
+| Standard coverage ends before `addTerm(now, proTerm)` | `standard-too-short` (offer the bundle or a top-up) |
+| a Pro grant is still live (`expires_at > now`) | `pro-window-active` |
 | otherwise | allowed |
+
+`proOffered` is storage, not a constant: `isProOffered(record)` is `true` only
+when the current `certification_pro_enablement` row for the exam has
+`enabled = 1`. With no row the answer is `false`. A Global Admin changes it
+through `POST /api/admin/commerce/certifications/:id/pro-enablement`, which
+appends to an append-only log and audits every act by trigger.
+
+The "≈90 days" figure (`proDisplayMinStandardDays`) is display copy for the
+coverage rule. It gates nothing.
 
 The price list is **provisional** until a fake-door test measures conversion. The
 rules around it are not provisional, and no route may hard-code a price.
 
 ## Not in this phase
 
-Checkout, payment provider, receipts and refund execution arrive in Phase 4
-([issue #47](https://github.com/Pdey2022/certpath/issues/47)). This phase only
-defines the model those features write into.
+Checkout, payment provider adapters, webhooks, receipts and refund execution
+arrive in the next commerce change ([issue #47](https://github.com/Pdey2022/certpath/issues/47)).
+`docs/commerce.md` states exactly what exists today and what does not. This phase
+defines the model those features write into, plus Pro enablement itself.

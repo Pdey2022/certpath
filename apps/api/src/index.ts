@@ -20,6 +20,7 @@ import {
 import type { SecurityDatabase } from "./security/database.ts";
 import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
 import { adminLearnersApi } from "./admin-learners.ts";
+import { createAdminCommerceApi } from "./admin-commerce.ts";
 import {
   isStagingLocalTestOrigin,
   stagingTesterGate,
@@ -118,6 +119,9 @@ export function createApi(
   application.route("/auth/google", createGoogleLearnerAuthApi(fetcher));
   application.route("/auth/session", createApplicationSessionApi(now));
   application.route("/admin/auth", createStaffAuthApi(now, staffVerifier));
+  // Registered before the broader `/admin` router so the more specific prefix
+  // wins regardless of Hono's fall-through.
+  application.route("/admin/commerce", createAdminCommerceApi(now));
   application.route("/admin", adminLearnersApi);
   application.route("/admin/content", protectedContentApi);
   application.route("/practice", learnerPracticeApi);

@@ -66,9 +66,22 @@ never accepts a capability from a client; `GET /api/admin/capabilities` only
 | `POST /api/admin/learners/:id/resend-verification` | `learner.support.email` | 409 `email_unavailable` | 409 `email_unavailable` |
 | `GET /api/admin/learners/:id/support-history` | `learner.support.history` | ✔ | ✔ |
 
-`commerce.read`, `access.grant`, `staff.manage`, `security.manage` and
-`audit.read` are Global Admin only in the matrix and have **no route** in this
-phase. A learner (non-staff) session gets 401 on every route above.
+### Commerce: Pro enablement
+
+| Route | Capability | Global Admin | Manager |
+|---|---|---|---|
+| `GET /api/admin/commerce/certifications/:id/pro-enablement` | `commerce.read` | ✔ | 403 |
+| `POST /api/admin/commerce/certifications/:id/pro-enablement` | `access.grant` | ✔ (trigger-audited) | 403 |
+
+`certificationGuard` is deliberately not used here: it admits an assigned
+Manager, and enabling the sale of Pro is a platform-wide commercial act, not an
+exam-scoped content act. The write carries `globalAdminGuard` inside its own
+statement, so a withdrawn role or a stale MFA assurance refuses the insert even
+if the route asked the wrong question.
+
+`staff.manage`, `security.manage` and `audit.read` are Global Admin only in the
+matrix and still have **no route**. A learner (non-staff) session gets 401 on
+every route above.
 
 ### Staff subjects are 404 on every id-addressed endpoint
 

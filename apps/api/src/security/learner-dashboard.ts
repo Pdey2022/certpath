@@ -5,8 +5,9 @@ import {
   graceDaysRemaining,
   type AccessGrantRecord,
 } from "../entitlements.ts";
-import { proMinimumStandardDays, proOffered } from "../pricing.ts";
+import { isProOffered, standardCoversProWindow } from "../pricing.ts";
 import type { SecurityDatabase } from "./database.ts";
+import { readProEnablement } from "./pro-enablement.ts";
 import { loadLatestReadiness } from "./readiness-snapshots.ts";
 
 interface ScopeRow {
@@ -24,8 +25,6 @@ interface GrantRow {
   expires_at: number;
   revoked_at: number | null;
 }
-
-const dayMs = 86_400_000;
 
 interface DashboardAttemptRow {
   certification_id: string;
@@ -269,6 +268,14 @@ export async function getLearnerDashboard(
 
   // Readiness and the Pro prompt are read-only projections of stored snapshots;
   // the dashboard never computes or writes readiness itself.
+  //
+  // Pro availability is a stored commercial fact plus the same coverage
+  // predicate the purchase rule uses, read for every certification on the page
+  // in one query rather than one query per exam.
+  const enablement = await readProEnablement(
+    database,
+    [...groups.values()].map((group) => group.certificationId),
+  );
   await Promise.all(
     [...groups.values()].map(async (group) => {
       const stored = await loadLatestReadiness(
@@ -281,10 +288,6 @@ export async function getLearnerDashboard(
         now,
       );
       if (!stored) return;
-      const standardRemainingDays =
-        group.access.state === "active" && group.access.endsAt !== null
-          ? Math.floor((group.access.endsAt - now) / dayMs)
-          : 0;
       group.readiness = {
         band: stored.band,
         score: stored.score,
@@ -296,8 +299,8 @@ export async function getLearnerDashboard(
         proPrompt:
           stored.isCurrent &&
           stored.isReady &&
-          proOffered(group.certificationId) &&
-          standardRemainingDays >= proMinimumStandardDays,
+          isProOffered(enablement.get(group.certificationId) ?? null) &&
+          standardCoversProWindow(group.access.endsAt, now),
       };
     }),
   );

@@ -89,7 +89,9 @@ Grace behaves as ADR 0005 describes: the exam stays on the dashboard with a
 countdown and a renewal prompt, and its attempt history is withheld. An expired
 membership drops off the dashboard entirely.
 
-`proPrompt` is `isCurrent && isReady && proOffered(exam) && >= 90 days Standard
-remaining`. `proOffered()` returns `false` for every exam until the CAT engine
-gives an exam an adaptive capability in Phase 6 and checkout exists in Phase 4,
-so nothing is advertised early.
+`proPrompt` is `isCurrent && isReady && isProOffered(enablement) &&
+standardCoversProWindow(Standard coverage end, now)` — the readiness signal, the
+stored per-certification Pro enablement fact and the same coverage predicate the
+purchase rule uses. `isProOffered()` is `false` until a Global Admin enables Pro
+for the exam, so nothing is advertised early; the enablement rows for every exam
+on the page are read in one query, never one query per exam.

@@ -8,12 +8,15 @@ import {
   graceWindowMs,
   type AccessGrantRecord,
 } from "../src/entitlements.ts";
+import { addCalendarMonths, addTerm, termLengthDays } from "../src/calendar.ts";
 import {
   canPurchasePro,
   priceList,
-  proMinimumStandardDays,
-  proWindowDays,
+  proTerm,
+  proTermMonths,
   requiresBundle,
+  standardCoversProWindow,
+  termFor,
 } from "../src/pricing.ts";
 
 const day = 86_400_000;
@@ -29,20 +32,20 @@ function pro(startsAt: number, expiresAt: number): AccessGrantRecord {
 
 describe("feature access states", () => {
   it("is active only inside the grant window", () => {
-    const grants = [standard(start, start + 90 * day)];
+    const grants = [standard(start, addCalendarMonths(start, 3))];
     expect(evaluateFeature(grants, "standard", start - 1).state).toBe("expired");
     expect(evaluateFeature(grants, "standard", start).state).toBe("active");
     expect(
-      evaluateFeature(grants, "standard", start + 90 * day - 1).state,
+      evaluateFeature(grants, "standard", addCalendarMonths(start, 3) - 1).state,
     ).toBe("active");
-    expect(evaluateFeature(grants, "standard", start + 90 * day).state).toBe(
+    expect(evaluateFeature(grants, "standard", addCalendarMonths(start, 3)).state).toBe(
       "grace",
     );
   });
 
   it("keeps a 15-day read-only grace window and then expires", () => {
-    const grants = [standard(start, start + 90 * day)];
-    const expiry = start + 90 * day;
+    const grants = [standard(start, addCalendarMonths(start, 3))];
+    const expiry = addCalendarMonths(start, 3);
     const grace = evaluateFeature(grants, "standard", expiry);
     expect(grace.state).toBe("grace");
     expect(grace.graceEndsAt).toBe(expiry + graceWindowMs);
@@ -56,7 +59,7 @@ describe("feature access states", () => {
 
   it("ignores revoked grants entirely", () => {
     const grants: AccessGrantRecord[] = [
-      { ...standard(start, start + 90 * day), revokedAt: start + day },
+      { ...standard(start, addCalendarMonths(start, 3)), revokedAt: start + day },
     ];
     expect(evaluateFeature(grants, "standard", start + 2 * day).state).toBe(
       "expired",
@@ -74,7 +77,7 @@ describe("feature access states", () => {
   });
 
   it("counts grace days downwards", () => {
-    const expiry = start + 90 * day;
+    const expiry = addCalendarMonths(start, 3);
     const grace = evaluateFeature([standard(start, expiry)], "standard", expiry);
     expect(graceDaysRemaining(grace, expiry)).toBe(15);
     expect(graceDaysRemaining(grace, expiry + 14 * day)).toBe(1);
@@ -84,7 +87,7 @@ describe("feature access states", () => {
 
 describe("capabilities", () => {
   it("allows the full Standard surface only while active", () => {
-    const active = evaluateAccess([standard(start, start + 90 * day)], start);
+    const active = evaluateAccess([standard(start, addCalendarMonths(start, 3))], start);
     expect(can(active, "practice")).toBe(true);
     expect(can(active, "mock")).toBe(true);
     expect(can(active, "results")).toBe(true);
@@ -94,14 +97,14 @@ describe("capabilities", () => {
 
   it("allows adaptive mocks only with Standard and Pro both active", () => {
     const grants = [
-      standard(start, start + 90 * day),
-      pro(start, start + 90 * day),
+      standard(start, addCalendarMonths(start, 3)),
+      pro(start, addCalendarMonths(start, 3)),
     ];
     expect(can(evaluateAccess(grants, start), "adaptive-mock")).toBe(true);
   });
 
   it("allows reading but not new work during grace", () => {
-    const expiry = start + 90 * day;
+    const expiry = addCalendarMonths(start, 3);
     const access = evaluateAccess([standard(start, expiry)], expiry + day);
     expect(access.standard.state).toBe("grace");
     expect(can(access, "results")).toBe(true);
@@ -112,7 +115,7 @@ describe("capabilities", () => {
   });
 
   it("denies everything once expired", () => {
-    const expiry = start + 90 * day;
+    const expiry = addCalendarMonths(start, 3);
     const access = evaluateAccess(
       [standard(start, expiry)],
       expiry + graceWindowMs,
@@ -130,14 +133,16 @@ describe("capabilities", () => {
 });
 
 describe("pro purchase rules", () => {
-  const now = start + 10 * day;
+  const now = Date.parse("2026-02-01T00:00:00.000Z");
+  // The end of a Standard grant that covers a full Pro term bought at `now`.
+  const coveringEnd = addTerm(now, proTerm);
 
   it("refuses pro where the exam is not adaptive", () => {
     expect(
       canPurchasePro({
         proOffered: false,
-        standardRemainingDays: 180,
-        lastProStartAt: null,
+        standardCoverageEndMs: coveringEnd,
+        activeProEndsAtMs: null,
         now,
       }),
     ).toEqual({
@@ -147,12 +152,12 @@ describe("pro purchase rules", () => {
     });
   });
 
-  it("refuses pro when standard cannot cover the window", () => {
+  it("refuses pro when standard cannot cover a full pro term", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardRemainingDays: proMinimumStandardDays - 1,
-        lastProStartAt: null,
+        standardCoverageEndMs: coveringEnd - 1,
+        activeProEndsAtMs: null,
         now,
       }),
     ).toEqual({
@@ -160,38 +165,80 @@ describe("pro purchase rules", () => {
       reason: "standard-too-short",
       requiresBundle: true,
     });
-    expect(requiresBundle(proMinimumStandardDays - 1)).toBe(true);
-    expect(requiresBundle(proMinimumStandardDays)).toBe(false);
+    expect(requiresBundle(coveringEnd - 1, now)).toBe(true);
+    expect(requiresBundle(coveringEnd, now)).toBe(false);
   });
 
-  it("refuses a second pro inside the rolling window", () => {
+  it("allows pro when standard ends exactly at the end of a full pro term", () => {
+    // Equality is allowed: 0013 tests `standard.expires_at >= pro.expires_at`.
+    expect(standardCoversProWindow(coveringEnd, now)).toBe(true);
+    expect(standardCoversProWindow(coveringEnd - 1, now)).toBe(false);
     expect(
       canPurchasePro({
         proOffered: true,
-        standardRemainingDays: 200,
-        lastProStartAt: now - (proWindowDays - 1) * day,
-        now,
-      }),
-    ).toMatchObject({ allowed: false, reason: "pro-window-active" });
-  });
-
-  it("allows pro once the previous window has closed", () => {
-    expect(
-      canPurchasePro({
-        proOffered: true,
-        standardRemainingDays: 200,
-        lastProStartAt: now - proWindowDays * day,
+        standardCoverageEndMs: coveringEnd,
+        activeProEndsAtMs: null,
         now,
       }),
     ).toEqual({ allowed: true, requiresBundle: false });
   });
 
-  it("allows the first pro purchase on a long enough membership", () => {
+  it("allows pro on an 89-day standard term bought on 1 February", () => {
+    // The case the flat 90-day gate refused: a full, untouched 3-month term.
+    const term = termFor("standard-3m");
+    expect(termLengthDays(now, term)).toBe(89);
     expect(
       canPurchasePro({
         proOffered: true,
-        standardRemainingDays: 90,
-        lastProStartAt: null,
+        standardCoverageEndMs: addTerm(now, term),
+        activeProEndsAtMs: null,
+        now,
+      }),
+    ).toEqual({ allowed: true, requiresBundle: false });
+  });
+
+  it("refuses pro with no standard coverage at all", () => {
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        standardCoverageEndMs: null,
+        activeProEndsAtMs: null,
+        now,
+      }),
+    ).toMatchObject({ allowed: false, reason: "standard-too-short" });
+  });
+
+  it("refuses a second pro while the stored pro window is live", () => {
+    const activeProEndsAtMs = addTerm(now, proTerm);
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        standardCoverageEndMs: coveringEnd,
+        activeProEndsAtMs,
+        now,
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "pro-window-active",
+      requiresBundle: false,
+    });
+    // One millisecond before the stored expiry is still inside the window.
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        standardCoverageEndMs: coveringEnd,
+        activeProEndsAtMs: activeProEndsAtMs - 1,
+        now,
+      }),
+    ).toMatchObject({ allowed: false, reason: "pro-window-active" });
+  });
+
+  it("allows pro once the stored window has ended", () => {
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        standardCoverageEndMs: coveringEnd,
+        activeProEndsAtMs: now,
         now,
       }),
     ).toEqual({ allowed: true, requiresBundle: false });
@@ -217,9 +264,56 @@ describe("price list", () => {
   });
 
   it("discounts longer terms without making them cheaper per month", () => {
-    const three = priceList["standard-3m"].amountMinor / 3;
-    const twelve = priceList["standard-12m"].amountMinor / 12;
+    // Derived from the term, never from a literal month count, so a term change
+    // cannot leave this assertion measuring something else.
+    const months = (sku: "standard-3m" | "standard-12m"): number => {
+      const term = termFor(sku);
+      if (term.unit !== "calendar_months") {
+        throw new Error(`${sku} is no longer a calendar-month term`);
+      }
+      return term.months;
+    };
+    const three = priceList["standard-3m"].amountMinor / months("standard-3m");
+    const twelve =
+      priceList["standard-12m"].amountMinor / months("standard-12m");
     expect(twelve).toBeLessThan(three);
+  });
+
+  it("prices Standard terms in calendar months and keeps the extension in days", () => {
+    expect(termFor("standard-3m")).toEqual({
+      unit: "calendar_months",
+      months: 3,
+    });
+    expect(termFor("standard-6m")).toEqual({
+      unit: "calendar_months",
+      months: 6,
+    });
+    expect(termFor("standard-12m")).toEqual({
+      unit: "calendar_months",
+      months: 12,
+    });
+    expect(termFor("standard-topup-3m")).toEqual({
+      unit: "calendar_months",
+      months: 3,
+    });
+    // ADR 0003 names the SKU "Standard extension (30 days)": 30 days is not a
+    // calendar month, and no later "consistency" sweep may convert it.
+    expect(termFor("standard-extension-30d")).toEqual({
+      unit: "days",
+      days: 30,
+    });
+  });
+
+  it("gives Pro a three-month calendar term, and the bundle a Standard leg that covers it", () => {
+    expect(proTermMonths).toBe(3);
+    expect(proTerm).toEqual({ unit: "calendar_months", months: 3 });
+    expect(termFor("pro-3m")).toEqual(proTerm);
+    const bundleLeg = termFor("bundle-standard-3m-pro");
+    expect(bundleLeg.unit).toBe("calendar_months");
+    if (bundleLeg.unit !== "calendar_months") {
+      throw new Error("the bundle's Standard leg must be calendar months");
+    }
+    expect(bundleLeg.months).toBeGreaterThanOrEqual(proTermMonths);
   });
 });
 
@@ -293,7 +387,7 @@ describe("storage layer guarantees", () => {
         certificationId,
         feature: "pro",
         startsAt: start,
-        expiresAt: start + 90 * day,
+        expiresAt: addCalendarMonths(start, 3),
       }),
     ).rejects.toThrow(/pro grant requires a standard grant/);
   });
@@ -336,7 +430,7 @@ describe("storage layer guarantees", () => {
       certificationId,
       feature: "standard",
       startsAt: start,
-      expiresAt: start + 90 * day,
+      expiresAt: addCalendarMonths(start, 3),
       operationId,
       createdByUserId: userId,
     });
@@ -364,7 +458,7 @@ describe("storage layer guarantees", () => {
       certificationId,
       feature: "standard",
       startsAt: start,
-      expiresAt: start + 90 * day,
+      expiresAt: addCalendarMonths(start, 3),
     });
 
     await env.DB.prepare(
@@ -426,7 +520,7 @@ describe("grant update guards", () => {
       certificationId,
       feature: "standard",
       startsAt: start,
-      expiresAt: start + 90 * day,
+      expiresAt: addCalendarMonths(start, 3),
     });
 
     await expect(
@@ -447,7 +541,7 @@ describe("grant update guards", () => {
       certificationId,
       feature: "standard",
       startsAt: start,
-      expiresAt: start + 90 * day,
+      expiresAt: addCalendarMonths(start, 3),
     });
     await revokeGrant(grantId, userId, `test-revoke:${crypto.randomUUID()}`);
 
@@ -472,7 +566,7 @@ describe("grant update guards", () => {
       certificationId,
       feature: "standard",
       startsAt: start,
-      expiresAt: start + 90 * day,
+      expiresAt: addCalendarMonths(start, 3),
     });
 
     await expect(
