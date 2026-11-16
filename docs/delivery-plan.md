@@ -23,7 +23,7 @@ decision record where a product rule is involved.
 | Phase | Issue | Scope | Depends on |
 |---|---|---|---|
 | **0. Decision records** | this PR | ADRs 0003-0006, permissions rewrite, open-decisions reconciliation, this plan | - |
-| **1. Entitlement and price model** | #44 | Price list (server-side), access grants, `canAccess` with active/grace/expired, Pro 90-day rules, entitlement = Global Admin only | Phase 0 |
+| **1. Entitlement and price model** | #44 | Price list (server-side), access grants, `canAccess` with active/grace/expired, Pro coverage rules, entitlement = Global Admin only | Phase 0 |
 | **2. Readiness and dashboard v1** | #45 | Readiness v1 snapshots, bands, decay, next action, Pro prompt | Phase 1 |
 | **3. Admin capability model** | #46 | Capability table, learner support with masked data and audited reveal, audit retention | Phase 1 |
 | **4. Commerce** | #47 | `PaymentProvider` port with a fake, checkout, webhooks, refunds and access revocation | Phases 1, 3 |

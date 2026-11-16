@@ -109,7 +109,11 @@ session with no `staff_roles` row before `canCapability` is reached.
    learnerUserId, now, policy)` inside its own `WHERE`: live session, unexpired,
    staff role active, account active, MFA method in the allowed set and inside the
    maximum age, and the subject holding no active staff role. Content keeps the
-   equivalent `certificationGuard(...)`.
+   equivalent `certificationGuard(...)`. Platform-wide commercial acts use
+   `globalAdminGuard(tokenDigest, now, policy)` — the same SQL the staff
+   mutations already carried, now exported from `security/capabilities.ts` and
+   used by both `security/mutations.ts` and Pro enablement, so there is one
+   definition rather than two.
 
 ## 4. Interface
 

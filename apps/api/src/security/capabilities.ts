@@ -217,6 +217,39 @@ export interface StatementGuard {
 }
 
 /**
+ * Statement-level Global Admin scope: the live session, the active
+ * `global_admin` role and the MFA assurance are re-read inside the write itself.
+ * This is the one truth for a platform-wide write - staff mutation or Pro
+ * enablement (`access.grant`) - and `mutations.ts` delegates here rather than
+ * keeping a second copy of the same SQL.
+ */
+export function globalAdminGuard(
+  tokenDigest: string,
+  now: number,
+  policy: StaffMfaPolicy,
+): StatementGuard {
+  const methods = policy.allowedMethods;
+  const placeholders = methods.map(() => "?").join(", ");
+  return {
+    sql: `EXISTS (
+      SELECT 1
+      FROM app_sessions AS actor_session
+      JOIN users AS actor_user ON actor_user.id = actor_session.user_id
+      JOIN staff_roles AS actor_role ON actor_role.user_id = actor_user.id
+      WHERE actor_session.token_digest = ?
+        AND actor_session.revoked_at IS NULL
+        AND actor_session.expires_at > ?
+        AND actor_user.status = 'active'
+        AND actor_role.role = 'global_admin'
+        AND actor_role.active = 1
+        AND actor_session.mfa_verified_at BETWEEN ? AND ?
+        AND actor_session.mfa_method IN (${placeholders})
+    )`,
+    values: [tokenDigest, now, now - policy.maxAgeMs, now, ...methods],
+  };
+}
+
+/**
  * Statement-level content scope: the live session, the active role and the
  * assignment are re-read inside the write itself, for the current certification
  * and, when it differs, for the proposed one. This is the one truth for content

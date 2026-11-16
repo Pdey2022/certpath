@@ -9,11 +9,11 @@ need an owner or architect decision.
 | Decision | Outcome | Record |
 |---|---|---|
 | Price ladder | $59 / $89 / $129 (3 / 6 / 12 months), USD | [ADR 0003](decisions/0003-pricing-pro-and-refunds.md) |
-| Pro price and rules | $49 flat, 3 months, CAT exams only, requires 90 days Standard | ADR 0003 |
+| Pro price and rules | $49 flat, 3 calendar months, CAT exams only, requires Standard coverage of a full Pro term (90 days kept as a display-only constant) | ADR 0003, amended 2026-11-16 |
 | Refunds | 7 days, no questions, one per account per exam | ADR 0003 |
 | Free sample | Guest sample: 10 questions + a mini mock, no account | ADR 0003 |
 | Recurring vs fixed term | Fixed-term one-off; no recurring at launch | ADR 0003 |
-| Pro repurchase | One Pro per rolling 90 days while Standard is active | ADR 0003 |
+| Pro repurchase | Sold again once the stored Pro window has ended, while Standard still covers a full Pro term | ADR 0003, amended 2026-11-16 |
 | Post-expiry readability | 15-day read-only grace, then locked | [ADR 0005](decisions/0005-readiness-and-access-lifecycle.md) |
 | Readiness definition | v1 formula, bands 50/75, 14-day decay | ADR 0005 |
 | Learner dashboard behaviour | Readiness + next action; no streaks or goals | ADR 0005 |

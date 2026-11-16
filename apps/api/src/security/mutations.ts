@@ -8,8 +8,9 @@ import {
   authorizeGlobalAdmin,
   findActiveApplicationSession,
 } from "./repository.ts";
-import type { StaffMfaPolicy, SupportedMfaMethod } from "./mfa.ts";
+import type { StaffMfaPolicy } from "./mfa.ts";
 import { isConfiguredMfaPolicy } from "./mfa.ts";
+import { globalAdminGuard } from "./capabilities.ts";
 
 export type MutationResult =
   | { applied: true }
@@ -32,11 +33,6 @@ interface AdminActor {
   userId: string;
 }
 
-interface AdminGuard {
-  sql: string;
-  values: (string | number)[];
-}
-
 function isValidOperation(metadata: MutationMetadata): boolean {
   return (
     /^[a-zA-Z0-9:_-]{1,128}$/.test(metadata.operationId) &&
@@ -44,38 +40,6 @@ function isValidOperation(metadata: MutationMetadata): boolean {
     metadata.reason.length <= 500 &&
     Number.isSafeInteger(metadata.now)
   );
-}
-
-function createAdminGuard(
-  tokenDigest: string,
-  now: number,
-  policy: StaffMfaPolicy,
-): AdminGuard {
-  const methods = policy.allowedMethods as readonly SupportedMfaMethod[];
-  const placeholders = methods.map(() => "?").join(", ");
-  return {
-    sql: `EXISTS (
-      SELECT 1
-      FROM app_sessions AS actor_session
-      JOIN users AS actor_user ON actor_user.id = actor_session.user_id
-      JOIN staff_roles AS actor_role ON actor_role.user_id = actor_user.id
-      WHERE actor_session.token_digest = ?
-        AND actor_session.revoked_at IS NULL
-        AND actor_session.expires_at > ?
-        AND actor_user.status = 'active'
-        AND actor_role.role = 'global_admin'
-        AND actor_role.active = 1
-        AND actor_session.mfa_verified_at BETWEEN ? AND ?
-        AND actor_session.mfa_method IN (${placeholders})
-    )`,
-    values: [
-      tokenDigest,
-      now,
-      now - policy.maxAgeMs,
-      now,
-      ...methods,
-    ],
-  };
 }
 
 async function authorizeMutation(
@@ -198,7 +162,7 @@ async function appointStaffRole(
   const auth = await authorizeMutation(database, tokenDigest, metadata, policy);
   if (!auth.allowed) return auth.result;
 
-  const guard = createAdminGuard(tokenDigest, metadata.now, auth.policy);
+  const guard = globalAdminGuard(tokenDigest, metadata.now, auth.policy);
   const result = await database
     .prepare(
       `INSERT INTO staff_roles (
@@ -300,7 +264,7 @@ export async function revokeStaffRole(
   const auth = await authorizeMutation(database, tokenDigest, metadata, policy);
   if (!auth.allowed) return auth.result;
 
-  const guard = createAdminGuard(tokenDigest, metadata.now, auth.policy);
+  const guard = globalAdminGuard(tokenDigest, metadata.now, auth.policy);
   const result = await database
     .prepare(
       `UPDATE staff_roles
@@ -363,7 +327,7 @@ export async function createCertificationRoot(
   }
   const auth = await authorizeMutation(database, tokenDigest, metadata, policy);
   if (!auth.allowed) return auth.result;
-  const guard = createAdminGuard(tokenDigest, metadata.now, auth.policy);
+  const guard = globalAdminGuard(tokenDigest, metadata.now, auth.policy);
   const result = await database
     .prepare(
       `INSERT INTO certifications (
@@ -405,7 +369,7 @@ export async function assignManagerCertification(
   }
   const auth = await authorizeMutation(database, tokenDigest, metadata, policy);
   if (!auth.allowed) return auth.result;
-  const guard = createAdminGuard(tokenDigest, metadata.now, auth.policy);
+  const guard = globalAdminGuard(tokenDigest, metadata.now, auth.policy);
   const result = await database
     .prepare(
       `INSERT INTO manager_certification_assignments (
@@ -463,7 +427,7 @@ export async function revokeManagerCertification(
   }
   const auth = await authorizeMutation(database, tokenDigest, metadata, policy);
   if (!auth.allowed) return auth.result;
-  const guard = createAdminGuard(tokenDigest, metadata.now, auth.policy);
+  const guard = globalAdminGuard(tokenDigest, metadata.now, auth.policy);
   const result = await database
     .prepare(
       `UPDATE manager_certification_assignments

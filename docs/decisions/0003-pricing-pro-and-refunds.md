@@ -1,6 +1,9 @@
 # ADR 0003: Pricing, Pro, refunds and samples
 
 - Status: Accepted as the launch proposal, with owner approval on 2026-11-14.
+  Amended 2026-11-16 (see "Amendment" at the end) to replace the flat 90-day Pro
+  gate with the coverage predicate, to fix terms as calendar months, and to state
+  that the bundle's Standard leg stacks on live coverage.
 - Scope: Commercial rules only. No payment provider, checkout, tax or currency
   implementation is decided here.
 - Supersedes: nothing. Extends the product contract in `docs/product-design.md`.
@@ -33,13 +36,25 @@ purchases only; no recurring billing at launch.
 
 Pro rules:
 
-1. Pro is **per exam**, valid for **at most 3 months**, and requires Standard with
-   **at least 90 days remaining** at purchase.
+1. Pro is **per exam**, valid for exactly **3 calendar months** measured in UTC
+   from the purchase instant and clamped to the last valid day, and requires
+   Standard coverage that reaches a full Pro term: a non-revoked Standard grant
+   for the same `(account, exam)` with `starts_at <= now < expires_at` **and**
+   `expires_at >= addTerm(now, proTerm)`. Equality is allowed. This is the same
+   predicate as `learner_access_grants_pro_requires_standard` (0013), so a
+   purchase the gate accepts cannot be refused at insert. The gate takes the
+   whole window, start included, so a Standard grant that begins in the future
+   is refused rather than passed to 0013. 90 days survives only as a
+   display-only constant (`proDisplayMinStandardDays`), currently unreferenced;
+   it gates nothing.
 2. Pro is offered only on certifications whose real exam is adaptive. CISSP is
    the only such exam at launch; enablement is a **Global Admin** commercial
-   decision, recorded per certification.
-3. Pro is sold again only when the previous Pro window has ended:
-   `lastProStart + 90 days <= now` **and** `standardRemaining >= 90 days`.
+   decision, recorded per certification in `certification_pro_enablement`.
+3. Pro is sold again only when the previous Pro window has ended: the stored Pro
+   grant's `expires_at <= now` **and** rule 1's coverage predicate holds. The
+   stored expiry is read, never re-derived — calendar addition does not compose
+   (`31 Jan + 1 month + 1 month` is 28 March, `31 Jan + 2 months` is 31 March),
+   so `start + term` is not a stable way to find the end of a window.
 4. Pro is never shortened. When Standard cannot cover it, the only path is the
    bundle or a Standard top-up first.
 5. Pro is always visible and purchasable; a **readiness signal** (ADR 0005) only
@@ -70,8 +85,10 @@ trial.
 - Pro at $49 is **83% of a 3-month Standard**, so the $99 bundle ("+$40 for Pro")
   must be the lead offer. If standalone Pro conversion is weak, adjust the Pro
   price, never the Standard price.
-- The 90-day rule forces a top-up SKU. Hiding standalone Pro when Standard has
-  under 90 days left is a pricing rule enforced server-side, not a UI choice.
+- The coverage rule forces a top-up SKU. Refusing standalone Pro when Standard
+  cannot cover a full Pro term is a pricing rule enforced server-side, not a UI
+  choice; the "≈90 days" figure (`proDisplayMinStandardDays`) is a display-only
+  constant, currently unreferenced, and gates nothing.
 - Chaining Pro ($49 per 3 months) costs more than Standard-12 ($129), so it needs
   no anti-abuse control.
 - **Price points are provisional** until a fake-door test measures click-through
@@ -80,3 +97,59 @@ trial.
   events (ADR 0006).
 - Tax, invoicing, and consumer-law obligations per market remain open and must be
   settled before real money is taken.
+
+## Amendment — 16 November 2026 (owner approved)
+
+Rule 1, rule 3 and the "90-day rule" consequence above are rewritten at the
+owner's direction. The flat 90-day gate was wrong in both directions:
+
+- **Too strict** at a 3-month term: Standard bought 1 February 2026 ends
+  1 May 2026, which is 89 days, so a learner standing inside a full, untouched
+  3-month term was refused Pro. `docs/product-design.md` forbids inferring
+  3 months as 90 days.
+- **Too permissive**, which is worse: with 91 days of Standard left, the gate
+  allowed a Pro window that ran one day past Standard, and the insert aborted at
+  `learner_access_grants_pro_requires_standard` (0013) — money taken, no Pro row.
+
+A gate whose predicate differs from the storage predicate is one guarantee split
+across two definitions. The gate **is** 0013's predicate now: Standard coverage
+reaching `addTerm(now, proTerm)`. `standard-too-short` keeps its identifier and
+its "offer the bundle or a top-up" instruction; it now means "your Standard does
+not cover a full Pro term".
+
+Two related decisions taken at the same time:
+
+1. **Terms are calendar months**, not day counts: 3, 6 and 12 months in UTC,
+   clamped to the last valid day, half-open windows. The single exception is
+   `standard-extension-30d`, because this ADR names the SKU "30 days".
+2. **The bundle's Standard leg stacks on continuous coverage**: a bundle writes
+   Standard `[now, max(addTerm(coverageEnd, 3 months), addTerm(now, 3 months)))`
+   and Pro `[now, addTerm(now, 3 months))`, both from the same `now`.
+   `coverageEnd` is `null`-as-`now` when there is no live coverage. A learner
+   with 11 months of Standard gets 14, a learner with 2 gets 5, a learner with
+   none gets 3 — `docs/product-design.md`: "Early Standard extension begins at
+   the end of continuous current coverage".
+
+   The `max` is load-bearing, not defensive. **Calendar arithmetic is not
+   order-preserving**: adding three months to a later instant can return an
+   earlier one, because a day clamp can map two instants onto one target date and
+   the time of day then decides. With `coverageEnd = 2026-01-31T00:00Z` and
+   `now = 2026-01-30T18:00Z`, both clamp into 30 April:
+   `addTerm(coverageEnd, 3 months)` is 30 Apr 00:00 while
+   `addTerm(now, 3 months)` is 30 Apr 18:00. The uncapped leg would therefore end
+   *before* the Pro leg and 0013 would abort the bundle. With the `max`,
+   `S.starts_at = P.starts_at = now` and
+   `S.expires_at = max(...) >= addTerm(now, 3 months) = P.expires_at` — an
+   invariant that holds **without** any ordering property of month arithmetic.
+   Do not "simplify" the `max` away.
+
+   _Reversed the same day._ This paragraph first recorded a **cap**
+   (`max(coverageEnd, addTerm(now, 3 months))` as the end, i.e. a mid-term buyer
+   getting exactly three extra months). The owner withdrew it on 2026-11-16 after
+   seeing its consequence: a learner with 11 months of Standard would pay $99 and
+   receive 11 months, which contradicts `docs/product-design.md` and makes the
+   bundle a bad buy for exactly the learners most likely to take it.
+
+Carried forward, not decided here: one self-serve refund ever per
+`(account, exam)`, and a refund of a Standard purchase that would orphan a
+separately-bought Pro refunds both checkouts in one refund record.
