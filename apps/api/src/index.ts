@@ -21,10 +21,12 @@ import type { SecurityDatabase } from "./security/database.ts";
 import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
 import { adminLearnersApi } from "./admin-learners.ts";
 import { createAdminCommerceApi } from "./admin-commerce.ts";
+import { createCommerceApi } from "./commerce/http.ts";
 import {
   isStagingLocalTestOrigin,
   stagingTesterGate,
 } from "./security/staging-gate.ts";
+import type { PaymentProvider } from "./commerce/provider.ts";
 
 type ApiBindings = {
   DB: SecurityDatabase;
@@ -64,6 +66,9 @@ type ApiBindings = {
   COGNITO_LEARNER_DOMAIN?: string;
   COGNITO_LEARNER_CALLBACK_URL?: string;
   COGNITO_LEARNER_CLIENT_ID?: string;
+  COMMERCE_ENABLED?: string;
+  PAYMENT_PROVIDER?: string;
+  COMMERCE_WEBHOOK_SECRET?: string;
   COGNITO_LEARNER_TRANSACTION_ENCRYPTION_KEY?: string;
 };
 
@@ -72,6 +77,7 @@ export function createApi(
   now: () => number = Date.now,
   stagingVerifier?: StagingPasswordVerifier,
   staffVerifier?: StaffPasswordVerifier,
+  paymentProvider?: PaymentProvider,
 ) {
   const application = new Hono<{ Bindings: ApiBindings }>().basePath("/api");
   const localTestMail = new LocalTestMailAdapter();
@@ -124,6 +130,9 @@ export function createApi(
   application.route("/admin/commerce", createAdminCommerceApi(now));
   application.route("/admin", adminLearnersApi);
   application.route("/admin/content", protectedContentApi);
+  // Commerce sits outside the admin surface and answers 503 on its own when
+  // `COMMERCE_ENABLED` is not "true" or no provider resolves.
+  application.route("/commerce", createCommerceApi(now, paymentProvider));
   application.route("/practice", learnerPracticeApi);
   return application;
 }

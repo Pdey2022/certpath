@@ -92,9 +92,10 @@ when the current `certification_pro_enablement` row for the exam has
 through `POST /api/admin/commerce/certifications/:id/pro-enablement`, which
 appends to an append-only log and audits every act by trigger.
 
-The gate takes the whole Standard window (`startsAt` and `endsAt`), so a grant
-that begins in the future is refused by the gate itself rather than passed to a
-trigger that would abort the insert.
+The gate is handed the learner's grant rows and accepts iff **one** of them
+spans `now` to `addTerm(now, proTerm)`, so a grant that begins in the future is
+refused by the gate itself rather than passed to a trigger that would abort the
+insert, and a window stitched together from two grants cannot pass either test.
 
 The "≈90 days" figure (`proDisplayMinStandardDays`) is a display-only constant,
 currently unreferenced. It gates nothing.

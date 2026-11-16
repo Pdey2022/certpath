@@ -8,7 +8,6 @@ import {
 import {
   isProOffered,
   standardCoversProWindow,
-  type StandardCoverage,
 } from "../pricing.ts";
 import type { SecurityDatabase } from "./database.ts";
 import { readProEnablement } from "./pro-enablement.ts";
@@ -209,10 +208,6 @@ export async function getLearnerDashboard(
     string,
     LearnerDashboardResponse["groups"][number]
   >();
-  // The Standard window per group, kept beside the response rather than inside
-  // it: the Pro gate needs `startsAt` as well as `endsAt`, and the dashboard
-  // contract carries only `endsAt`.
-  const standardCoverage = new Map<string, StandardCoverage | null>();
   for (const scope of scopes.results) {
     const access = evaluateAccess(
       grantsByCertification.get(scope.certification_id) ?? [],
@@ -238,15 +233,6 @@ export async function getLearnerDashboard(
       resumable: [],
       completed: [],
     });
-    standardCoverage.set(
-      key,
-      access.standard.startsAt !== null && access.standard.endsAt !== null
-        ? {
-            startsAt: access.standard.startsAt,
-            endsAt: access.standard.endsAt,
-          }
-        : null,
-    );
   }
 
   for (const row of [...practice.results, ...timedMocks.results]) {
@@ -289,16 +275,17 @@ export async function getLearnerDashboard(
   //
   // Pro availability is a stored commercial fact plus the same coverage
   // predicate the purchase rule uses, read for every certification on the page
-  // in one query rather than one query per exam. The gate takes the whole
-  // Standard window, so a coverage that only starts later cannot advertise (or
-  // sell) Pro that 0013 would refuse.
+  // in one query rather than one query per exam. The gate is handed the grant
+  // rows themselves, so the row that produces a prompt is a row 0013 would
+  // accept as Pro's covering Standard grant - a starts-at from one grant
+  // combined with an ends-at from another cannot pass either test.
   const entries = [...groups.entries()];
   const enablement = await readProEnablement(
     database,
     entries.map(([, group]) => group.certificationId),
   );
   await Promise.all(
-    entries.map(async ([key, group]) => {
+    entries.map(async ([, group]) => {
       const stored = await loadLatestReadiness(
         database,
         {
@@ -321,7 +308,10 @@ export async function getLearnerDashboard(
           stored.isCurrent &&
           stored.isReady &&
           isProOffered(enablement.get(group.certificationId) ?? null) &&
-          standardCoversProWindow(standardCoverage.get(key) ?? null, now),
+          standardCoversProWindow(
+            grantsByCertification.get(group.certificationId) ?? [],
+            now,
+          ),
       };
     }),
   );
