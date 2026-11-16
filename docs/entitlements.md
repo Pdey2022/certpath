@@ -82,9 +82,17 @@ reach a full Pro term.
 | Condition | Result |
 |---|---|
 | the exam is not Pro-capable | `pro-not-offered` |
+| a non-revoked Pro grant **overlaps** the window a purchase made now would write (`starts_at < addTerm(now, proTerm)` and `expires_at > now`) | `pro-window-active` |
 | Standard coverage does not span `now` to `addTerm(now, proTerm)` (it is absent, starts later, or ends too soon) | `standard-too-short` (offer the bundle or a top-up) |
-| a Pro grant is still live (`expires_at > now`) | `pro-window-active` |
 | otherwise | allowed |
+
+The Pro test is **overlap**, not "live now": it is the same predicate as the
+`learner_access_grants_one_pro_window` trigger (0019), so a Pro grant that starts
+in the future still refuses a second one — 0019 would abort the insert after the
+money had moved. It is also checked **before** `standard-too-short`, because only
+that refusal answers `requiresBundle: true` and the bundle is itself refused while
+a Pro window overlaps: a refusal whose "way through" is another refusal is a dead
+end.
 
 `proOffered` is storage, not a constant: `isProOffered(record)` is `true` only
 when the current `certification_pro_enablement` row for the exam has
@@ -105,7 +113,9 @@ rules around it are not provisional, and no route may hard-code a price.
 
 ## Not in this phase
 
-Settlement, webhooks, receipts and refund execution arrive in the next commerce
-change; the offers projection, checkout creation and the checkout read exist now.
-`docs/commerce.md` states exactly what exists today and what does not. This phase
-defines the model those features write into, plus Pro enablement itself.
+Settlement, the provider webhook, the stored purchase receipt and the one-Pro-window
+guard exist now; they are described in `docs/commerce.md`. **Refund execution** is
+the one item of that group still absent: there is no `commerce_refunds` table, no
+`paid → refunded` edge, no refund receipt and no refund route, so
+`refundWindowEndsAt` is reported and nothing can yet act on it. Receipts are
+stored, never returned by a route and never sent by email.

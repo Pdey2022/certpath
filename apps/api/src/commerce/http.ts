@@ -35,12 +35,26 @@ import {
   type WebhookResult,
 } from "./webhooks.ts";
 
-// Learner-facing commerce routes: the offers projection, checkout creation and
-// the checkout read.
+// The commerce routes: the learner-facing app (offers projection, checkout
+// creation, the checkout read and the local dev seam) and the provider webhook
+// router.
 //
-// Settlement, the webhook, refunds and receipts are not here. Nothing on this
-// router can grant access, and no provider event is accepted: the only
-// unauthenticated write surface in the application arrives with 0019.
+// Two Hono apps live in one module because they are the two halves of the
+// boundary the design turns on. `createCommerceApi` reads a session cookie and,
+// for a mutation, requires the site origin and a CSRF token;
+// `createCommerceWebhookApi` reads none of those and is authenticated by the
+// provider's signature alone. Separate apps are what makes "no session on the
+// webhook" structural rather than a branch inside one middleware.
+//
+// What this file may **not** claim is that nothing here can grant access.
+// `createCommerceWebhookApi` and `POST /dev/fake-pay` both reach
+// `handleProviderWebhook`, which is the one settlement path in the application;
+// the dev seam exists only when the provider is the fake and
+// `LOCAL_COMMERCE_DEV_TOOLS` is the exact string "true", and it signs a body and
+// dispatches it rather than writing anything itself. The narrower, true claim is
+// that no route here grants anything on its own, and that access still exists
+// only because a row in `learner_access_grants` does. Refunds and receipt reads
+// are still absent.
 //
 // The gate order is deliberate and fail-closed: `COMMERCE_ENABLED` must be the
 // exact string "true", the site origin and CSRF secret must be usable, and a
@@ -477,13 +491,21 @@ export function createCommerceWebhookApi(
       return webhookResponse(context, { ok: false, status: 503, code: "commerce_disabled" }, requestId);
     }
 
-    const body = await readRawBody(context.req.raw, maxWebhookBodyBytes);
-    if (body === null) {
-      return webhookResponse(context, { ok: false, status: 413, code: "payload_too_large" }, requestId);
+    const read = await readRawBody(context.req.raw, maxWebhookBodyBytes);
+    if ("failure" in read) {
+      return webhookResponse(
+        context,
+        {
+          ok: false,
+          status: read.failure === "payload_too_large" ? 413 : 400,
+          code: read.failure,
+        },
+        requestId,
+      );
     }
     const result = await handleProviderWebhook(context.env.DB, provider, {
       providerName: context.req.param("provider"),
-      rawBody: body,
+      rawBody: read.body,
       // The signature header is read by the adapter and by nothing else, and it
       // is never logged.
       headers: context.req.raw.headers,
@@ -498,20 +520,26 @@ export function createCommerceWebhookApi(
 /**
  * Read a request body as text with a byte cap, before anything parses it.
  *
- * `null` means the cap was exceeded. `Content-Length` is checked first so an
- * oversized body is refused without reading it, and the stream count is the real
- * bound because a client can lie about the header.
+ * `payload_too_large` means the cap was exceeded. `Content-Length` is checked
+ * first so an oversized body is refused without reading it, and the stream count
+ * is the real bound because a client can lie about the header.
+ *
+ * `malformed_event` means the bytes are not valid UTF-8. These bytes come from an
+ * unauthenticated client and this runs before any signature is checked, so the
+ * decoder's failure has to be an answer rather than a thrown 500: `fatal: true`
+ * throws on the first invalid sequence, and an unhandled throw here would let
+ * anyone produce 5xx responses without knowing the webhook secret.
  */
 async function readRawBody(
   request: Request,
   maxBytes: number,
-): Promise<string | null> {
+): Promise<{ body: string } | { failure: "payload_too_large" | "malformed_event" }> {
   const declared = request.headers.get("Content-Length");
   if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
-    return null;
+    return { failure: "payload_too_large" };
   }
   const body = request.body;
-  if (!body) return "";
+  if (!body) return { body: "" };
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -521,7 +549,7 @@ async function readRawBody(
     size += result.value.byteLength;
     if (size > maxBytes) {
       await reader.cancel();
-      return null;
+      return { failure: "payload_too_large" };
     }
     chunks.push(result.value);
   }
@@ -531,5 +559,9 @@ async function readRawBody(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  try {
+    return { body: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+  } catch {
+    return { failure: "malformed_event" };
+  }
 }

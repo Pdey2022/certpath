@@ -1,6 +1,6 @@
 import { addTerm } from "../calendar.ts";
 import type { AccessGrantRecord } from "../entitlements.ts";
-import { standardCoverageEndMs } from "../pricing.ts";
+import { refundWindowMs, standardCoverageEndMs } from "../pricing.ts";
 import type {
   D1PreparedStatement,
   SecurityDatabase,
@@ -50,6 +50,10 @@ import type { PaymentProvider, ProviderEvent } from "./provider.ts";
 // every effect statement also requires the event id to be unseen, so a duplicate
 // delivery provably writes nothing at all.
 //
+// This is the approved amendment to the design, which specified the event row
+// first. `docs/commerce.md` ("Why the event row is last") records that the
+// event-first ordering is superseded, and why.
+//
 // ## Row witnesses
 //
 // `meta.changes` is never used. `learner_access_grants` carries an `AFTER INSERT`
@@ -84,11 +88,6 @@ export type WebhookResult =
 
 /** How many times a lost compare-and-swap is retried before `needs_support`. */
 export const settlementAttempts = 3;
-
-const dayMs = 86_400_000;
-
-/** The refund window a purchase receipt records: seven days from `paid_at`. */
-export const refundWindowMs = 7 * dayMs;
 
 const checkoutColumns = `id, user_id, certification_id, sku, currency,
                          total_minor, status, paid_at, provider,
@@ -408,6 +407,16 @@ function proGrantStatement(
   // is required to be there first, so the order 0013 demands is the order the
   // batch wrote rather than an ordering the statements happen to have. A Pro
   // add-on has no Standard leg here, and 0013 checks the pre-existing cover.
+  //
+  // The `EXISTS` is load-bearing for a second reason, not only ordering: it is
+  // what stops an **orphan Pro**. When the Standard leg loses the compare-and-swap
+  // and this guard is absent, the Pro row still inserts (0013 is satisfied by the
+  // learner's existing cover), the transition then matches nothing because it
+  // counts both operation ids, and the batch **commits** a live Pro grant with no
+  // paid checkout, no receipt and no event row - a window bought by nobody. The
+  // retry can then never succeed: 0019's one-Pro-window trigger refuses the Pro
+  // insert for pointing at that orphan, and the learner's real payment ends in
+  // `needs_support`. Do not simplify this into "the transition already checks".
   const covering = standardLegOperationId
     ? `
          AND EXISTS (
@@ -677,6 +686,20 @@ export async function eventAlreadyRecorded(
   return row !== null;
 }
 
+/** The outcome a previously recorded event carries, or null when it is unseen. */
+async function recordedOutcome(
+  database: SecurityDatabase,
+  eventId: string,
+): Promise<WebhookOutcome | null> {
+  const row = await database
+    .prepare(
+      "SELECT outcome FROM commerce_provider_events WHERE provider_event_id = ?",
+    )
+    .bind(eventId)
+    .first<{ outcome: WebhookOutcome }>();
+  return row?.outcome ?? null;
+}
+
 /**
  * An authentic event for a checkout we do not know: another environment sharing
  * a secret, or a bug. Recorded, audited and answered `200` - retrying cannot fix
@@ -790,18 +813,33 @@ async function applyFailure(
         now,
       ),
   ]);
-  const recorded = rowCount(results[1]) === 1;
-  return {
-    ok: true,
-    duplicate: !recorded,
-    outcome: "applied",
-  };
+  const written = (results[1]?.results ?? []) as { outcome: WebhookOutcome }[];
+  // The outcome reported is the one the row carries, never an assumption: a
+  // `checkout.failed` for a checkout that was not `pending` writes
+  // `ignored-inconsistent`, and answering `applied` for it would be a claim the
+  // ledger contradicts.
+  const outcome =
+    written[0]?.outcome ?? (await recordedOutcome(database, event.eventId));
+  if (outcome === null) {
+    // Unreachable by construction - the insert either returned its row or the
+    // `NOT EXISTS` / `ON CONFLICT` witness is an earlier row - but an unseen
+    // event is not something to answer with a guess, so it fails closed.
+    return { ok: false, status: 503, code: "provider_unavailable" };
+  }
+  return { ok: true, duplicate: written.length === 0, outcome };
 }
 
 /**
  * Close a settlement that could not be applied: record the event as
  * `ignored-inconsistent` and move the checkout to `needs_support` with the
  * instant we learned money moved.
+ *
+ * Both statuses settlement can arrive at are accepted by the transition trigger
+ * (0019): `pending -> needs_support` and `expired -> needs_support`. The second
+ * one matters - a late payment whose amount disagrees, or whose Pro leg aborts,
+ * is a row our own expiry already closed, and while that edge was illegal this
+ * batch aborted, taking the event row with it, and the provider retried a real
+ * charge forever.
  *
  * Nothing is granted and no receipt is issued. The learner is not granted an
  * entitlement they did not buy, and they are not silently refunded either - the
@@ -1026,24 +1064,50 @@ export async function handleProviderWebhook(
   }
   const event = verified.event;
 
-  // The duplicate fast path, before any write. The constraints below are the
-  // race-safe backstop, not the only check.
-  if (await eventAlreadyRecorded(database, event.eventId)) {
-    return { ok: true, duplicate: true, outcome: "applied" };
-  }
+  // Everything below reads or writes storage. An unexpected error here - D1
+  // unavailable, a missing table, a bug in a plan - is retryable and is answered
+  // `503 provider_unavailable`, never a 5xx: the effect batch is one transaction,
+  // so a failure before it commits wrote nothing, and a provider that retries the
+  // same event is exactly the recovery we want. Nothing is logged or echoed: the
+  // raw body, the signature header and the event id stay inside this call, so a
+  // storage error cannot leak them into a log or a response.
+  //
+  // Every storage call below is `await`ed, and that is load-bearing: `return
+  // somePromise` inside a `try` hands the rejection past the `catch`, because the
+  // block only sees a rejection it awaited.
+  try {
+    // The duplicate fast path, before any write. The constraints below are the
+    // race-safe backstop, not the only check.
+    if (await eventAlreadyRecorded(database, event.eventId)) {
+      return { ok: true, duplicate: true, outcome: "applied" };
+    }
 
-  const checkout = await readCheckoutForSession(
-    database,
-    input.providerName,
-    event.sessionRef,
-  );
-  if (!checkout) {
-    return recordUnknownCheckout(database, event, input.providerName, input.now);
+    const checkout = await readCheckoutForSession(
+      database,
+      input.providerName,
+      event.sessionRef,
+    );
+    if (!checkout) {
+      return await recordUnknownCheckout(
+        database,
+        event,
+        input.providerName,
+        input.now,
+      );
+    }
+    if (event.kind === "checkout.failed") {
+      return await applyFailure(
+        database,
+        checkout,
+        event,
+        input.providerName,
+        input.now,
+      );
+    }
+    return await settleCompletedEvent(database, checkout, event, input.now);
+  } catch {
+    return { ok: false, status: 503, code: "provider_unavailable" };
   }
-  if (event.kind === "checkout.failed") {
-    return applyFailure(database, checkout, event, input.providerName, input.now);
-  }
-  return settleCompletedEvent(database, checkout, event, input.now);
 }
 
 /**

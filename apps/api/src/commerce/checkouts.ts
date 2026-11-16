@@ -14,6 +14,7 @@ import {
   priceList,
   proTerm,
   proWindowActive,
+  refundWindowMs,
   standardCoverageEndMs,
   termFor,
   type ProPurchaseDecision,
@@ -516,9 +517,11 @@ function toResponse(
     redirectUrl: redirectUsable ? row.provider_redirect_url : null,
     expiresAt: row.expires_at,
     paidAt: row.paid_at,
-    // Set when a checkout can be paid and refunded; nothing in this phase can
-    // pay one, so there is no window to report.
-    refundWindowEndsAt: null,
+    // The same number the purchase receipt records (`paid_at + 7 days`, 0019):
+    // one commercial rule, imported from `pricing.ts`, so a paid checkout cannot
+    // contradict its own receipt. Null exactly while nothing has been paid.
+    refundWindowEndsAt:
+      row.paid_at === null ? null : row.paid_at + refundWindowMs,
   };
 }
 

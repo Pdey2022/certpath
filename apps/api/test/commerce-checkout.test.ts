@@ -671,6 +671,70 @@ describe("checkout creation", () => {
     });
   });
 
+  it("does not point at the bundle when the bundle is refused too (G2)", async () => {
+    // Short Standard and an overlapping Pro window is a real state: a learner who
+    // bought the bundle 60 days ago has 30 days of each left, and Pro is short
+    // because the Standard leg does not reach a full Pro term. `standard_too_short`
+    // used to win, answering `requiresBundle: true` - a pointer at an offer
+    // `bundleDecision` refuses for `pro_window_active`. A refusal's way through
+    // has to be a way through.
+    const actor = await learner();
+    const certificationId = await exam({ proEnabled: true });
+    const window = { startsAt: clock - 60 * day, expiresAt: clock + 30 * day };
+    await grantTestFeatureAccess(
+      database,
+      actor.userId,
+      certificationId,
+      "standard",
+      window,
+    );
+    await grantTestFeatureAccess(
+      database,
+      actor.userId,
+      certificationId,
+      "pro",
+      window,
+    );
+
+    const response = await offers(actor, certificationId);
+    expect(offerFor(response, "pro-3m")).toMatchObject({
+      purchasable: false,
+      reason: "pro_window_active",
+    });
+    // The offer the refusal used to point at is refused in the same projection.
+    expect(offerFor(response, "bundle-standard-3m-pro")).toMatchObject({
+      purchasable: false,
+      reason: "pro_window_active",
+    });
+    // A top-up is still a way through, and it is the one the learner needs.
+    expect(offerFor(response, "standard-topup-3m")).toMatchObject({
+      purchasable: true,
+      reason: null,
+    });
+
+    const refused = await createCheckoutRequest(actor, {
+      certificationId,
+      sku: "pro-3m",
+      clientCheckoutKey: crypto.randomUUID(),
+    });
+    expect(refused.status).toBe(409);
+    expect(await errorBody(refused)).toMatchObject({
+      error: {
+        code: "purchase_not_allowed",
+        reason: "pro_window_active",
+        requiresBundle: false,
+      },
+    });
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS rows FROM commerce_checkouts WHERE user_id = ?",
+        )
+        .bind(actor.userId)
+        .first<{ rows: number }>(),
+    ).toEqual({ rows: 0 });
+  });
+
   it("refuses a top-up and an extension that do not apply", async () => {
     const actor = await learner();
     const certificationId = await exam({ proEnabled: true });

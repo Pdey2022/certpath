@@ -31,6 +31,18 @@ export const proTerm: TermSpec = {
  */
 export const proDisplayMinStandardDays = 90;
 
+const dayMs = 86_400_000;
+
+/**
+ * How long a purchase can be refunded after it is paid: seven days from
+ * `paid_at`. ADR 0003's refund rule ("7 calendar days from purchase"), so it
+ * lives here with the rest of the commercial rules rather than in the module that
+ * happens to write the receipt: the value the receipt records and the value the
+ * checkout read reports must be one number, or a paid checkout contradicts its
+ * own receipt.
+ */
+export const refundWindowMs = 7 * dayMs;
+
 export type Sku =
   | "standard-3m"
   | "standard-6m"
@@ -304,6 +316,10 @@ export function proWindowActive(
  * The repurchase gate reads the **stored** Pro window rather than re-deriving it
  * from a start: calendar adds do not compose, so `start + term` is not a stable
  * way to find the end of a window.
+ *
+ * Order matters: `pro-window-active` is decided before `standard-too-short`,
+ * because only the latter carries `requiresBundle: true` and the bundle is
+ * itself refused while a Pro window overlaps.
  */
 export function canPurchasePro(input: ProPurchaseInput): ProPurchaseDecision {
   const standardIsShort = requiresBundle(input.grants, input.now);
@@ -314,18 +330,24 @@ export function canPurchasePro(input: ProPurchaseInput): ProPurchaseDecision {
       requiresBundle: standardIsShort,
     };
   }
-  if (standardIsShort) {
-    return {
-      allowed: false,
-      reason: "standard-too-short",
-      requiresBundle: true,
-    };
-  }
+  // The Pro window is checked **before** the Standard-coverage rule, because
+  // `requiresBundle: true` is a pointer at an offer and this one would be a
+  // pointer at a refusal: `bundleDecision` refuses the bundle for exactly this
+  // reason, so a learner with short Standard and an overlapping Pro window was
+  // told "buy the bundle" and then told the bundle was not for sale. A refusal's
+  // way through must be a way through, or it is not one.
   if (proWindowActive(input.grants, input.now)) {
     return {
       allowed: false,
       reason: "pro-window-active",
       requiresBundle: false,
+    };
+  }
+  if (standardIsShort) {
+    return {
+      allowed: false,
+      reason: "standard-too-short",
+      requiresBundle: true,
     };
   }
   return { allowed: true, requiresBundle: false };

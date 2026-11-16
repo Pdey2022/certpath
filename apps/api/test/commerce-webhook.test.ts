@@ -705,6 +705,65 @@ describe("idempotency", () => {
     ).toBe(before);
   });
 
+  it("answers 400 malformed_event for a body that is not UTF-8, before verifying anything", async () => {
+    // `0xff` cannot begin a UTF-8 sequence, and this body is read before any
+    // signature is checked: an unauthenticated client controls these bytes, so a
+    // thrown decode error would be a 5xx anyone could produce without the secret.
+    const grantsBefore = await count(
+      "SELECT COUNT(*) AS rows FROM learner_access_grants",
+    );
+    const eventsBefore = await count(
+      "SELECT COUNT(*) AS rows FROM commerce_provider_events",
+    );
+    const response = await application.fetch(
+      new Request(`${origin}/api/commerce/webhooks/fake`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: new Uint8Array([0xff]),
+      }),
+      bindings,
+    );
+    expect(response.status).toBe(400);
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe("malformed_event");
+    expect(
+      await count("SELECT COUNT(*) AS rows FROM commerce_provider_events"),
+    ).toBe(eventsBefore);
+    expect(
+      await count("SELECT COUNT(*) AS rows FROM learner_access_grants"),
+    ).toBe(grantsBefore);
+  });
+
+  it("answers 503 provider_unavailable when storage fails during settlement", async () => {
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const checkout = await createCheckout(actor, certificationId, "standard-3m");
+
+    // A failure that is not a constraint: D1 unavailable is the shape this stands
+    // in for. The answer is `503 provider_unavailable`, not a 5xx the provider
+    // cannot act on, because the effect batch is one transaction and nothing was
+    // written - retrying the same event is the recovery.
+    const failing = {
+      prepare: (sql: string) => database.prepare(sql),
+      batch: () => Promise.reject(new Error("D1_ERROR: internal error")),
+    } as unknown as SecurityDatabase;
+
+    const delivery = await deliver(completedEvent(checkout), {
+      bindings: { ...bindings, DB: failing },
+    });
+    expect(delivery.status).toBe(503);
+    expect(delivery.body.error?.code).toBe("provider_unavailable");
+    expect(
+      await count(
+        "SELECT COUNT(*) AS rows FROM commerce_provider_events WHERE checkout_id = ?",
+        checkout.checkoutId,
+      ),
+    ).toBe(0);
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("pending");
+    expect(await grantsFor(actor.userId)).toHaveLength(0);
+    expect(await receiptFor(checkout.checkoutId)).toBeNull();
+  });
+
   it("answers 503 commerce_disabled and writes nothing when the feature is off", async () => {
     const { actor, certificationId } = await purchaserOf("standard-3m");
     const checkout = await createCheckout(actor, certificationId, "standard-3m");
@@ -852,6 +911,115 @@ describe("what settlement refuses to do", () => {
     );
   });
 
+  it("parks a late payment whose amount disagrees on a row our own expiry closed", async () => {
+    // B1: the late-payment path meets our own expiry. `expired -> needs_support`
+    // is the only edge that can record this, and while it was illegal the park
+    // aborted, the event row rolled back with it, and the provider retried a real
+    // charge forever.
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const checkout = await createCheckout(actor, certificationId, "standard-3m");
+    await database
+      .prepare(
+        "UPDATE commerce_checkouts SET status = 'expired', updated_at = ? WHERE id = ?",
+      )
+      .bind(clock, checkout.checkoutId)
+      .run();
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("expired");
+
+    const event = completedEvent(checkout, {
+      amountMinor: checkout.totalMinor + 1,
+    });
+    const delivery = await deliver(event);
+    expect(delivery.status).toBe(200);
+    expect(delivery.body).toEqual({ received: true, duplicate: false });
+
+    const parked = await checkoutRow(checkout.checkoutId);
+    expect(parked?.status).toBe("needs_support");
+    // The money is real, so the instant we learned about it is recorded. The
+    // CHECK forbids `paid_at` on `expired`, which is why the row may not be left
+    // there: the payment would be invisible.
+    expect(parked?.paid_at).toBe(clock);
+    const recorded = await eventRow(event.eventId);
+    expect(recorded?.outcome).toBe("ignored-inconsistent");
+    expect(
+      await count(
+        "SELECT COUNT(*) AS rows FROM commerce_provider_events WHERE checkout_id = ?",
+        checkout.checkoutId,
+      ),
+    ).toBe(1);
+    expect(await grantsFor(actor.userId)).toHaveLength(0);
+    expect(await receiptFor(checkout.checkoutId)).toBeNull();
+
+    // A redelivery is a duplicate, not a second row and not another 500.
+    expect((await deliver(event)).body).toEqual({
+      received: true,
+      duplicate: true,
+    });
+    expect(
+      await count(
+        "SELECT COUNT(*) AS rows FROM commerce_provider_events WHERE checkout_id = ?",
+        checkout.checkoutId,
+      ),
+    ).toBe(1);
+  });
+
+  it("parks a late Pro add-on whose Pro window is taken, on a row our own expiry closed", async () => {
+    // B1's second reachable path: the bundle and the add-on are different
+    // fingerprints, so both may be open; the bundle settles first, our own expiry
+    // then closes the add-on, and the add-on's Pro insert aborts at 0019. The
+    // abort is a constraint failure the settlement catch path handles - but the
+    // park it then writes needs `expired -> needs_support`, or the whole answer
+    // became a 5xx and the event row was never written.
+    const { actor, certificationId } = await purchaserOf(
+      "bundle-standard-3m-pro",
+    );
+    await grantTestFeatureAccess(
+      database,
+      actor.userId,
+      certificationId,
+      "standard",
+      { startsAt: clock, expiresAt: addTerm(clock, proTerm) },
+    );
+    const bundle = await createCheckout(
+      actor,
+      certificationId,
+      "bundle-standard-3m-pro",
+    );
+    const addOn = await createCheckout(actor, certificationId, "pro-3m");
+    expect((await deliver(completedEvent(bundle))).body.duplicate).toBe(false);
+
+    await database
+      .prepare(
+        "UPDATE commerce_checkouts SET status = 'expired', updated_at = ? WHERE id = ?",
+      )
+      .bind(clock, addOn.checkoutId)
+      .run();
+
+    const late = completedEvent(addOn);
+    const delivery = await deliver(late);
+    expect(delivery.status).toBe(200);
+    expect(delivery.body).toEqual({ received: true, duplicate: false });
+
+    const parked = await checkoutRow(addOn.checkoutId);
+    expect(parked?.status).toBe("needs_support");
+    expect(parked?.paid_at).toBe(clock);
+    expect((await eventRow(late.eventId))?.outcome).toBe("ignored-inconsistent");
+    expect(await receiptFor(addOn.checkoutId)).toBeNull();
+
+    // Exactly one Pro grant: the bundle's. The parked add-on bought nothing.
+    const pro = (await grantsFor(actor.userId)).filter(
+      (row) => row.feature === "pro",
+    );
+    expect(pro).toHaveLength(1);
+    expect(pro[0]!.operation_id).toBe(grantOperationId(bundle.checkoutId, "pro"));
+    expect(
+      await count(
+        "SELECT COUNT(*) AS rows FROM commerce_provider_events WHERE checkout_id = ?",
+        addOn.checkoutId,
+      ),
+    ).toBe(1);
+  });
+
   it("does not resurrect a checkout the provider already failed", async () => {
     // `failed -> paid` is not an edge 0018 permits, and settlement must not be a
     // way around the transition guard: a later `checkout.completed` for the same
@@ -924,6 +1092,81 @@ describe("the settlement guards", () => {
       ),
     ).toBe(0);
     expect(settlementAttempts).toBe(3);
+  });
+
+  it("writes neither leg when the Standard leg loses the compare-and-swap and a Pro leg is planned", async () => {
+    // G1: the Pro "Standard leg landed" guard exists for this case and only this
+    // case. A learner whose Standard already covers a full Pro term makes the Pro
+    // insert legal on its own at 0013, so without the guard the Pro row would be
+    // the one row this attempt writes - an **orphan Pro**: a live window with no
+    // paid checkout, no receipt and no event, bought by nobody, which then
+    // permanently refuses the retry at 0019's one-Pro-window trigger.
+    const { actor, certificationId } = await purchaserOf("bundle-standard-3m-pro");
+    await grantTestFeatureAccess(
+      database,
+      actor.userId,
+      certificationId,
+      "standard",
+      { startsAt: clock, expiresAt: addTerm(clock, proTerm) },
+    );
+    const checkout = await createCheckout(
+      actor,
+      certificationId,
+      "bundle-standard-3m-pro",
+    );
+    const event = completedEvent(checkout);
+
+    const row = await readCheckoutForSession(database, "fake", checkout.sessionRef);
+    expect(row).not.toBeNull();
+    const lines = await readSnapshotLines(database, row!.id);
+    const grants = await readAccountGrants(
+      database,
+      row!.user_id,
+      row!.certification_id,
+    );
+    const plan = buildSettlementPlan(row!, lines, grants, event, clock);
+    expect(plan.grants.map((grant) => grant.feature)).toEqual([
+      "standard",
+      "pro",
+    ]);
+
+    const stale = await applySettlement(database, {
+      ...plan,
+      casToken: plan.casToken - 1,
+    });
+    expect(stale.granted).toBe(0);
+    expect(stale.transitioned).toBe(false);
+    expect(stale.receiptIssued).toBe(false);
+    expect(stale.eventRecorded).toBe(false);
+    expect(stale.incomplete).toBe(true);
+
+    // No grant carrying either operation id - in particular no orphan Pro.
+    const written = await database
+      .prepare(
+        `SELECT operation_id FROM learner_access_grants
+         WHERE user_id = ? AND operation_id IS NOT NULL`,
+      )
+      .bind(actor.userId)
+      .all<{ operation_id: string }>();
+    expect(
+      written.results.filter((grant) =>
+        grant.operation_id.startsWith(checkout.checkoutId),
+      ),
+    ).toHaveLength(0);
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("pending");
+    expect(
+      await count(
+        "SELECT COUNT(*) AS rows FROM commerce_provider_events WHERE provider_event_id = ?",
+        event.eventId,
+      ),
+    ).toBe(0);
+
+    // The plan computed from current storage still settles both legs, so the
+    // guard suppressed one attempt rather than the purchase.
+    const settled = await applySettlement(database, plan);
+    expect(settled.granted).toBe(2);
+    expect(settled.transitioned).toBe(true);
+    expect(settled.outcome).toBe("applied");
   });
 
   it("never fails the batch when the same event is applied twice", async () => {
@@ -1042,7 +1285,7 @@ describe("the settlement guards", () => {
           `${crypto.randomUUID()}:pro`,
         )
         .run(),
-    ).rejects.toThrow(/a pro window is already live for this certification/);
+    ).rejects.toThrow(/a pro window already overlaps for this certification/);
   });
 
   it("refuses a future-dated Pro window at the trigger and at the gate (#75)", async () => {
@@ -1082,7 +1325,7 @@ describe("the settlement guards", () => {
           `${crypto.randomUUID()}:pro`,
         )
         .run(),
-    ).rejects.toThrow(/a pro window is already live for this certification/);
+    ).rejects.toThrow(/a pro window already overlaps for this certification/);
 
     // The gate must refuse the same shape before money moves, rather than letting
     // the trigger abort a paid purchase.
@@ -1321,6 +1564,21 @@ describe("the dev seam", () => {
     });
     expect((await checkoutRow(checkout.checkoutId))?.status).toBe("paid");
     expect(await grantsFor(actor.userId)).toHaveLength(1);
+
+    // B2: the checkout read must agree with the receipt the same settlement
+    // wrote. It used to hard-code `refundWindowEndsAt: null`, so a paid checkout
+    // reported an instant for `paidAt` and no refund window at all while its
+    // receipt recorded `paid_at + 7 days`.
+    const read = await call(`/api/commerce/checkouts/${checkout.checkoutId}`, {
+      actor,
+    });
+    expect(read.status).toBe(200);
+    const readBack = commerceCheckoutResponseSchema.parse(await read.json());
+    expect(readBack.paidAt).toBe(clock);
+    expect(readBack.refundWindowEndsAt).toBe(clock + 7 * day);
+    expect((await receiptFor(checkout.checkoutId))?.refund_window_ends_at).toBe(
+      readBack.refundWindowEndsAt,
+    );
 
     // The same event id, so a second press is a duplicate rather than a second
     // settlement.

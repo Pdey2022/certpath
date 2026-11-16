@@ -25,12 +25,19 @@
 --      provider sessions for the same product, which with settlement live would
 --      mean two charges and two grants. The expiry job frees the slot by moving
 --      the row to `expired`, which is not `pending`.
+--   5. `commerce_checkouts_status_transition` replaced (not a second trigger) so
+--      that `expired -> needs_support` is a legal edge. Settlement parks money it
+--      cannot apply in `needs_support`, and a row our own expiry already closed is
+--      one of the shapes it can meet: a late payment whose amount does not match,
+--      or one whose Pro insert aborts at the trigger below. Without the edge the
+--      park itself aborted, the event row was never written with the transition,
+--      and the provider retried a real charge forever.
 --
 -- What this migration deliberately does NOT add: `commerce_refunds`,
--- `commerce_refund_lines`, the `paid -> refunded` status edge (0018's transition
--- trigger is untouched here), `commerce_checkouts_refunded_requires_settled_refund`
--- and any refund receipt. Those are the next change; nothing here may be read as
--- a promise that they exist.
+-- `commerce_refund_lines`, the `paid -> refunded` status edge,
+-- `commerce_checkouts_refunded_requires_settled_refund` and any refund receipt.
+-- Those are the next change; nothing here may be read as a promise that they
+-- exist.
 --
 -- Rules: docs/decisions/0003-pricing-pro-and-refunds.md and docs/commerce.md.
 
@@ -111,7 +118,7 @@ CREATE TRIGGER learner_access_grants_one_pro_window
 BEFORE INSERT ON learner_access_grants
 WHEN NEW.feature = 'pro'
 BEGIN
-  SELECT RAISE(ABORT, 'a pro window is already live for this certification')
+  SELECT RAISE(ABORT, 'a pro window already overlaps for this certification')
   WHERE EXISTS (
     SELECT 1
     FROM learner_access_grants AS pro
@@ -178,3 +185,39 @@ END;
 CREATE UNIQUE INDEX commerce_checkouts_one_open_per_fingerprint
   ON commerce_checkouts(user_id, request_fingerprint)
   WHERE status = 'pending';
+
+-- ---------------------------------------------------------------------------
+-- 5. `expired -> needs_support` is a legal edge
+-- ---------------------------------------------------------------------------
+--
+-- 0018's trigger is **replaced**, not supplemented, for the same reason as the
+-- immutability trigger above: two BEFORE UPDATE triggers on one table are two
+-- places to read.
+--
+-- The edge this adds is the one settlement needs to answer a provider at all. A
+-- `checkout.completed` can arrive after our own expiry closed the row, and the
+-- amount can disagree with the snapshot, or the Pro leg can abort here (0019's
+-- one-Pro-window trigger) because the learner already holds an overlapping Pro
+-- window. Both are "money moved, nothing can be granted", which is exactly what
+-- `needs_support` exists for; while the edge was missing, `markNeedsSupport`
+-- aborted its own batch, the event row it writes in the same transaction rolled
+-- back with it, and the delivery became a 5xx the provider retries forever -
+-- with the learner's money already taken.
+--
+-- `expired -> paid` stays: a late payment that *does* apply settles normally.
+-- `paid -> refunded` is still absent; a refunded checkout needs the refund record
+-- that 0020 adds.
+DROP TRIGGER commerce_checkouts_status_transition;
+
+CREATE TRIGGER commerce_checkouts_status_transition
+BEFORE UPDATE OF status ON commerce_checkouts
+WHEN NOT (
+  OLD.status = NEW.status
+  OR (OLD.status = 'pending'
+      AND NEW.status IN ('paid', 'failed', 'expired', 'needs_support'))
+  OR (OLD.status = 'expired' AND NEW.status IN ('paid', 'needs_support'))
+  OR (OLD.status = 'paid' AND NEW.status = 'needs_support')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'illegal checkout status transition');
+END;

@@ -229,16 +229,24 @@ Storage guards, each a trigger rather than a convention:
 | Trigger | Refuses |
 |---|---|
 | `commerce_checkouts_immutable` | any change to `user_id`, `certification_id`, `sku`, `client_checkout_key`, `request_fingerprint`, `currency`, `total_minor`, `provider`, `created_at`, `expires_at`, and (from 0019) any change to `paid_at` or `provider_session_id` **once they are set** |
-| `commerce_checkouts_status_transition` | any edge outside `pending → {paid, failed, expired, needs_support}`, `expired → paid`, `paid → needs_support` (no-op same-status writes are allowed) |
+| `commerce_checkouts_status_transition` (replaced in 0019) | any edge outside `pending → {paid, failed, expired, needs_support}`, `expired → {paid, needs_support}`, `paid → needs_support` (no-op same-status writes are allowed) |
 | `commerce_checkouts_no_delete` | every delete |
 | `commerce_checkouts_one_open_per_fingerprint` (0019, an index) | a second `pending` row for one `(user_id, request_fingerprint)` |
 
 `expired → paid` is deliberate: money taken after our own deadline is money
-taken, so a late `checkout.completed` still applies. `paid → refunded` is **not**
-permitted yet — the `refunded` value is in the enum because the column must
-accept it when the refund change lands, but its witness (`commerce_refunds`)
-does not exist, and a refunded checkout with no refund record is exactly the
-state the design forbids.
+taken, so a late `checkout.completed` still applies. `expired → needs_support` is
+the same rule's other half and is added by `0019`: a late payment that cannot be
+applied — an amount that disagrees with the snapshot, or a Pro leg that aborts at
+the one-Pro-window trigger — has to be *recorded* as `needs_support`, because that
+record is the work queue for money the learner actually paid. While the edge was
+missing, `markNeedsSupport` aborted its own batch, took the event row down with
+it, and the provider retried a real charge forever. A row our own expiry closed is
+never left `expired` once money has moved: the CHECK forbids `paid_at` on
+`expired`, so leaving it there would make the payment invisible. `paid → refunded`
+is **not** permitted yet — the `refunded` value is in the enum because the column
+must accept it when the refund change lands, but its witness (`commerce_refunds`)
+does not exist, and a refunded checkout with no refund record is exactly the state
+the design forbids.
 
 `paid_at` and `provider_session_id` are write-once as of 0019: the first write is
 allowed (`NULL` → the instant money moved, `NULL` → the provider session), and any
@@ -300,8 +308,21 @@ The provider-attempt ledger: `provider_event_id` (PK), `provider`, `kind`
 `currency`, `occurred_at`, `received_at`, `outcome`
 (`applied | ignored-unknown-checkout | ignored-inconsistent`). Append-only (no
 update, no delete), no retention job: it is not an audit row and it carries no
-personal data beyond opaque ids. **Nothing writes to it in this phase**; `0019`
-does.
+personal data beyond opaque ids. `0019` creates it and settlement writes it — one
+row per delivered provider event, written **last** in the effect batch, with the
+outcome the batch actually produced.
+
+It is also the reconciliation record, and one property follows from that: it
+stores `amount_minor` **per event**, and a redelivered event keeps its original
+row (`ON CONFLICT … DO NOTHING`), but a checkout settled by a later event id has
+more than one row naming it. Reconciliation must therefore join
+`commerce_receipts` — exactly one purchase receipt per checkout — or count
+`DISTINCT checkout_id`, and **must never sum `commerce_provider_events.amount_minor`**:
+a replay asserting `outcome = 'applied'` would be counted twice. "At most one
+`applied` event per checkout" is enforced by the batch (each effect statement
+requires the event id to be unseen and the receipt insert is one per checkout),
+not by a unique index; a constraint for it belongs in a follow-up, not in a
+reconciliation query that trusts it.
 
 ## Checkout creation
 
@@ -319,7 +340,9 @@ does.
    uses, so the offer a learner sees and the decision the write path makes cannot
    disagree. A refusal is `409 purchase_not_allowed` with
    `{ code, reason, requiresBundle }`; `requiresBundle` is `true` for
-   `standard_too_short`, so the bundle is surfaced rather than hidden.
+   `standard_too_short`, so the bundle is surfaced rather than hidden, and `false`
+   for `pro_window_active`, because the bundle is refused for that same reason —
+   a pointer at a refusal is not a way through.
 3. **One batch.** The checkout row (`INSERT … ON CONFLICT (user_id,
    client_checkout_key) DO NOTHING RETURNING id`) and its lines are written
    together. The witness that our row landed is the returned id, never
@@ -352,8 +375,11 @@ expiresAt, paidAt, refundWindowEndsAt }`, where `sku` is the purchased SKU and
 each line is
 `{ sku, label, amountMinor, feature, term, priceSource }` and `term` is the
 `TermSpec` the line grants — never a day count standing in for a month. `paidAt`
-and `refundWindowEndsAt` are `null` because nothing in this phase can pay a
-checkout.
+and `refundWindowEndsAt` are `null` until the checkout is paid, and then hold the
+instant money moved and `paidAt + 7 days` (`refundWindowMs` in `pricing.ts`, the
+same value the purchase receipt records). The same fields are returned by
+`GET /api/commerce/checkouts/:checkoutId`, so a paid checkout and its receipt
+report one refund window rather than two.
 
 Status codes: `201` created, `200` replay, `400 validation_error | unknown_sku |
 invalid_origin | invalid_csrf`, `401 unauthenticated`,
@@ -478,10 +504,11 @@ middleware cannot grow a branch that decides it.
 | `200 { received: true, duplicate: false }` | applied, or recorded as `ignored-unknown-checkout` / `ignored-inconsistent` |
 | `200 { received: true, duplicate: true }` | the event id was already recorded; nothing was written |
 | `401 invalid_signature` | a missing header, a wrong secret, a tampered body, or a timestamp outside the 300-second window |
-| `400 malformed_event` | a valid signature over a body that is not an event |
+| `400 malformed_event` | a valid signature over a body that is not an event, **or** raw bytes that are not valid UTF-8 (the decoder runs on unauthenticated input before any signature is checked, so it answers instead of throwing) |
 | `404 unknown_provider` | the path segment is not `provider.name` |
 | `413 payload_too_large` | the raw body exceeds 16 KiB; refused before the signature is read |
 | `503 commerce_disabled` | `COMMERCE_ENABLED` is not `"true"` or no provider resolves |
+| `503 provider_unavailable` | an unexpected storage error. The effect batch is one transaction, so nothing was written; the provider is asked to retry rather than handed a 5xx it cannot act on. Nothing about the body, the signature or the event is logged |
 
 `stale` is answered `401` rather than `400`: the signature was valid and outside
 the replay window, and inviting a retry of the same body would only repeat it.
@@ -532,6 +559,18 @@ was there to buy — *a duplicate can never fail the batch and pin the provider 
 retry loop* — is kept by `ON CONFLICT (provider_event_id) DO NOTHING`, and is
 strengthened: every effect statement also requires the event id to be unseen, so a
 duplicate delivery provably writes nothing at all.
+
+**Design amendment (2026-11-16), approved by ARC.** §6.2 of the approved commerce
+design specifies the **event-first** ordering: write the provider event row, then
+the effects. That ordering is **superseded** by the event-last ordering above, for
+the reason the design itself names against it — the event row's outcome is
+`NOT NULL` and append-only, so an event-first batch would let a lost
+compare-and-swap write `applied` and commit no grant at all: a **false witness**,
+which is exactly what the ledger exists to prevent. Event-last with a `NOT NULL`
+outcome plus a per-statement "event unseen" guard (`NOT EXISTS … provider_event_id
+= ?`) on every effect keeps the duplicate-delivery property §6.2 was buying and
+adds the one it was missing. The design's §6.2 has been read this way since; no
+implementation may "restore" event-first on the strength of the older text.
 
 ### The compare-and-swap
 
@@ -608,12 +647,12 @@ learner may buy Pro again. This strengthens 0013/0014 and relaxes nothing.
 | Situation | What happens |
 |---|---|
 | Unknown checkout (an authentic event for a session we do not know) | event row `ignored-unknown-checkout` with `checkout_id = NULL`, plus an audit row (`actor_ref = 'commerce-webhook'`, action `commerce_event_unknown_checkout`, subject = event id), answered `200`. Retrying cannot fix it and a retry storm has a cost. |
-| Paid but not applicable (amount or currency mismatch, or every compare-and-swap attempt lost) | nothing granted, no receipt, event row `ignored-inconsistent`, checkout `needs_support` with `paid_at`, answered `200`. The learner is not granted something they did not buy and is not silently refunded; the resolution policy is the owner's, and the two rows are the work queue. |
-| A second overlapping Pro window (a bundle and a Pro add-on paid at the same moment) | the Pro insert aborts at 0019, the whole batch rolls back, and the checkout lands in `needs_support` with the event recorded `ignored-inconsistent`. One Pro grant exists, bought by the checkout that arrived first. |
+| Paid but not applicable (amount or currency mismatch, or every compare-and-swap attempt lost) | nothing granted, no receipt, event row `ignored-inconsistent`, checkout `needs_support` with `paid_at`, answered `200`. The learner is not granted something they did not buy and is not silently refunded; the resolution policy is the owner's, and the two rows are the work queue. Works on a `pending` row and on a row our own expiry already closed (`expired → needs_support`), which is the shape a late mismatch actually arrives in — and the event row commits with the park, so a redelivery is a duplicate rather than a fresh 5xx. |
+| A second overlapping Pro window (a bundle and a Pro add-on paid at the same moment) | the Pro insert aborts at 0019, the whole batch rolls back, and the checkout lands in `needs_support` with the event recorded `ignored-inconsistent`. One Pro grant exists, bought by the checkout that arrived first. The same holds when the second checkout had already expired: `expired → needs_support` is legal, so the park is recorded instead of 5xx-ing. |
 | Late payment on a row our own expiry closed | settles normally: `expired → paid` is a legal edge because money is money. |
 | A provider event for a `failed` checkout | the transition guard refuses `failed → paid`, nothing is granted, and the event is recorded `ignored-inconsistent`. |
 | Provider outage during checkout creation | the `pending` row stays with no session, `503 provider_unavailable`, and the retry with the same client key calls the provider again with the same idempotency key. |
-| Database error during settlement | the batch is one transaction, so nothing was written; the handler answers `503 provider_unavailable` and the provider retries the same event. |
+| Database error during settlement | the batch is one transaction, so nothing was written; `handleProviderWebhook` catches the unexpected error and answers `503 provider_unavailable`, and the provider retries the same event. Nothing about the body, the signature or the event id is logged. |
 
 ## Arrives in the next commerce change (not present today)
 

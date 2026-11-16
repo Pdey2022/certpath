@@ -1,13 +1,15 @@
 import { z } from "zod";
 
-// Contracts for the learner-facing commerce surface that ships in this phase:
-// the offers projection, checkout creation and the checkout read.
+// Contracts for the commerce surface: the offers projection, checkout creation
+// and the checkout read, the provider webhook's acknowledgement, and the local
+// dev seam's request.
 //
-// Nothing here carries a card, a learner identity, a receipt or a refund: those
-// arrive with settlement in the next commerce change. The checkout shapes carry
-// no price of their own either - every `amountMinor` in a response is the value
-// the server copied out of `apps/api/src/pricing.ts`, which is the only place a
-// price constant may live.
+// Nothing here carries a card, a learner identity, a receipt or a refund. The
+// webhook acknowledgement is `{ received, duplicate }` and no more - the stored
+// receipt is a database row that no response in this phase returns - and refunds
+// do not exist yet. The checkout shapes carry no price of their own either -
+// every `amountMinor` in a response is the value the server copied out of
+// `apps/api/src/pricing.ts`, which is the only place a price constant may live.
 //
 // `.strict()` everywhere: an unexpected field is a client bug and must fail
 // loudly rather than be ignored.
@@ -142,7 +144,10 @@ export const commerceCheckoutResponseSchema = z
     redirectUrl: z.string().min(1).max(2_048).nullable(),
     expiresAt: safeInteger,
     paidAt: safeInteger.nullable(),
-    /** Set when settlement ships; null while nothing can pay a checkout. */
+    /**
+     * `paid_at + 7 days`, the ADR 0003 refund window - the same instant the
+     * purchase receipt records. Null exactly while `paidAt` is null.
+     */
     refundWindowEndsAt: safeInteger.nullable(),
   })
   .strict();
