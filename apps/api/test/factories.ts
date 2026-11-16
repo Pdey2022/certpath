@@ -232,6 +232,72 @@ export async function createTestLearnerUser(
   return userId;
 }
 
+/**
+ * One Pro enablement act, inserted directly.
+ *
+ * The route-level tests elsewhere drive this through `recordProEnablement`; the
+ * commerce tests need the stored fact without a staff session, and the audit row
+ * comes from the 0017 trigger either way.
+ */
+export async function createProEnablement(
+  database: SecurityDatabase,
+  certificationId: string,
+  changedByUserId: string,
+  options: { enabled?: boolean; effectiveAt?: number } = {},
+): Promise<string> {
+  const id = crypto.randomUUID();
+  await database
+    .prepare(
+      `INSERT INTO certification_pro_enablement (
+         id, certification_id, enabled, effective_at, changed_by_user_id,
+         operation_id, reason
+       ) VALUES (?, ?, ?, ?, ?, ?, 'Synthetic test fixture')`,
+    )
+    .bind(
+      id,
+      certificationId,
+      options.enabled === false ? 0 : 1,
+      options.effectiveAt ?? testNow,
+      changedByUserId,
+      `fixture-enablement:${id}`,
+    )
+    .run();
+  return id;
+}
+
+/**
+ * One grant of either feature. A Pro grant needs its covering Standard grant to
+ * exist first, exactly as 0013 requires of the platform.
+ */
+export async function grantTestFeatureAccess(
+  database: SecurityDatabase,
+  userId: string,
+  certificationId: string,
+  feature: "standard" | "pro",
+  options: { startsAt?: number; expiresAt?: number } = {},
+): Promise<string> {
+  const id = crypto.randomUUID();
+  await database
+    .prepare(
+      `INSERT INTO learner_access_grants (
+         id, user_id, certification_id, feature, starts_at, expires_at,
+         revoked_at, created_at, sku, source
+       ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'migration')`,
+    )
+    .bind(
+      id,
+      userId,
+      certificationId,
+      feature,
+      options.startsAt ?? testNow - 60_000,
+      options.expiresAt ?? testNow + 60 * 60 * 1000,
+      options.startsAt ?? testNow,
+      feature === "pro" ? "pro-3m" : "standard-3m",
+    )
+    .run();
+  return id;
+}
+
 export async function createTestEmailSignInInvite(
   database: SecurityDatabase,
   userId: string,

@@ -90,10 +90,12 @@ countdown and a renewal prompt, and its attempt history is withheld. An expired
 membership drops off the dashboard entirely.
 
 `proPrompt` is `isCurrent && isReady && isProOffered(enablement) &&
-standardCoversProWindow(Standard coverage window, now)` — the readiness signal,
-the stored per-certification Pro enablement fact and the same coverage predicate
-the purchase rule uses. The window carries `startsAt` as well as `endsAt`, so a
-Standard grant that begins in the future cannot produce a prompt (ADR 0003 rule
-1). `isProOffered()` is `false` until a Global Admin enables Pro
+standardCoversProWindow(grants, now)` — the readiness signal, the stored
+per-certification Pro enablement fact and the same coverage predicate the
+purchase rule uses. The predicate is handed the learner's grant rows, not a
+window assembled from them, so a Standard grant that begins in the future cannot
+produce a prompt and the row that prompts is the row 0013 would accept as Pro's
+covering grant (ADR 0003 rule 1). `isProOffered()` is `false` until a Global
+Admin enables Pro
 for the exam, so nothing is advertised early; the enablement rows for every exam
 on the page are read in one query, never one query per exam.

@@ -12,7 +12,7 @@
 // Rules: docs/decisions/0003-pricing-pro-and-refunds.md.
 
 import { addTerm, type TermSpec } from "./calendar.ts";
-import type { EntitlementFeature } from "./entitlements.ts";
+import type { AccessGrantRecord, EntitlementFeature } from "./entitlements.ts";
 
 export const currency = "USD";
 
@@ -132,8 +132,12 @@ export function isProOffered(record: ProEnablementRecord | null): boolean {
 
 /**
  * A Standard coverage window as storage records it, half-open
- * `[startsAt, endsAt)`. The gate takes the whole window rather than a bare end
- * so that it can test the start itself; see `standardCoversProWindow`.
+ * `[startsAt, endsAt)`.
+ *
+ * The purchase gate below does **not** take this type: a pair can be synthesised
+ * from two different grants, and no pair is a witness of anything. It survives
+ * for the one caller that genuinely has a single window in hand - the bundle
+ * arithmetic - and for its own return type.
  */
 export type StandardCoverage = { startsAt: number; endsAt: number };
 
@@ -141,11 +145,12 @@ export type ProPurchaseInput = {
   /** Pro is only sold where the real exam is adaptive. */
   proOffered: boolean;
   /**
-   * The Standard window that covers `now`, or null when there is none. A window
-   * that starts after `now` is passed as it is and refused by the gate, not
-   * dropped by the caller.
+   * Every grant record for this account and certification, as storage returned
+   * it. The gate is handed the list, not a pre-digested window, so the row it
+   * accepts is a row 0013 will also accept: a window built from one grant's
+   * start and another's end cannot pass either test.
    */
-  standardCoverage: StandardCoverage | null;
+  standardGrants: readonly AccessGrantRecord[];
   /** End of a live non-revoked Pro grant on this certification, or null. */
   activeProEndsAtMs: number | null;
   now: number;
@@ -200,53 +205,80 @@ export function bundleWindows(
 
 /**
  * The Pro gate, identical to the storage predicate
- * `learner_access_grants_pro_requires_standard` (0013): a non-revoked Standard
- * grant must satisfy `starts_at <= now` **and**
+ * `learner_access_grants_pro_requires_standard` (0013): **one** non-revoked
+ * Standard grant must satisfy `starts_at <= now` **and**
  * `expires_at >= addTerm(now, proTerm)`. Equality is allowed.
  *
- * The start is tested here, not by the caller, so the guarantee is structural: a
- * coverage window that begins in the future has an end that can comfortably
- * exceed a full Pro term, and an end-only test would allow a purchase that 0013
- * then refuses.
- *
- * `startsAt <= now` and `endsAt` taken together stay 0013-consistent for the
- * pair `evaluateFeature` returns: the grant supplying `endsAt` is itself active
- * at `now`, so it is a single witness for both conditions.
+ * It takes the grant list rather than a `{startsAt, endsAt}` pair because a pair
+ * can be synthesised from two different grants - `g1 = [now - 90d, now + 10d)`
+ * and `g2 = [now + 1d, proEnd + 30d)` yields a start from g1 and an end from g2,
+ * and neither is a witness 0013 would accept. Handing the gate the rows makes
+ * gate and trigger share one witness by construction, so a decision this
+ * function allows is an insert 0013 accepts.
  */
 export function standardCoversProWindow(
-  standardCoverage: StandardCoverage | null,
+  grants: readonly AccessGrantRecord[],
   now: number,
 ): boolean {
-  if (standardCoverage === null) return false;
-  return (
-    standardCoverage.startsAt <= now &&
-    standardCoverage.endsAt >= proWindow(now).endsAt
+  const proEndsAt = addTerm(now, proTerm);
+  return grants.some(
+    (grant) =>
+      grant.feature === "standard" &&
+      grant.revokedAt === null &&
+      grant.startsAt <= now &&
+      grant.expiresAt >= proEndsAt,
   );
 }
 
 /**
  * True when a Pro purchase must be presented as the bundle rather than an
- * add-on, i.e. exactly when Standard cannot cover a full Pro term.
+ * add-on, i.e. exactly when no single Standard grant can cover a full Pro term.
  */
 export function requiresBundle(
-  standardCoverage: StandardCoverage | null,
+  grants: readonly AccessGrantRecord[],
   now: number,
 ): boolean {
-  return !standardCoversProWindow(standardCoverage, now);
+  return !standardCoversProWindow(grants, now);
 }
 
 /**
- * Pro is refused until Standard covers a full Pro term, and only one Pro window
- * is live at a time. `standard-too-short` keeps its identifier and now means
- * "your Standard does not cover a full Pro term"; the fix is the bundle or a
- * Standard top-up, never a Pro that outlives Standard.
+ * The single definition of "how much Standard coverage does this account have",
+ * as an instant, for the window invariant and for display.
+ *
+ * `null` when there is no non-revoked Standard grant at all; otherwise the
+ * latest expiry across them, floored at `now` so the answer is never a
+ * past instant and `standardRemainingDays` is `0`, never negative. A grant that
+ * has not started yet still counts, because coverage is contiguous by
+ * construction (a top-up appends to the end of the current window) and the
+ * bundle stacks on the end of *future* coverage.
+ *
+ * This is not the purchase gate. The gate needs a grant live at `now`;
+ * `standardCoversProWindow` tests exactly that and shares 0013's witness.
+ */
+export function standardCoverageEndMs(
+  grants: readonly AccessGrantRecord[],
+  now: number,
+): number | null {
+  let end: number | null = null;
+  for (const grant of grants) {
+    if (grant.feature !== "standard" || grant.revokedAt !== null) continue;
+    end = end === null ? grant.expiresAt : Math.max(end, grant.expiresAt);
+  }
+  return end === null ? null : Math.max(end, now);
+}
+
+/**
+ * Pro is refused until one Standard grant covers a full Pro term, and only one
+ * Pro window is live at a time. `standard-too-short` keeps its identifier and
+ * now means "your Standard does not cover a full Pro term"; the fix is the
+ * bundle or a Standard top-up, never a Pro that outlives Standard.
  *
  * The repurchase gate reads the stored Pro expiry rather than re-deriving it
  * from a start: calendar adds do not compose, so `start + term` is not a stable
  * way to find the end of a window.
  */
 export function canPurchasePro(input: ProPurchaseInput): ProPurchaseDecision {
-  const standardIsShort = requiresBundle(input.standardCoverage, input.now);
+  const standardIsShort = requiresBundle(input.standardGrants, input.now);
   if (!input.proOffered) {
     return {
       allowed: false,

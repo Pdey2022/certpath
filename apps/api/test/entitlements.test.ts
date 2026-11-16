@@ -17,6 +17,7 @@ import {
   proTermMonths,
   requiresBundle,
   standardCoversProWindow,
+  standardCoverageEndMs,
   termFor,
 } from "../src/pricing.ts";
 
@@ -137,14 +138,15 @@ describe("pro purchase rules", () => {
   const now = Date.parse("2026-02-01T00:00:00.000Z");
   // The end of a Standard grant that covers a full Pro term bought at `now`.
   const coveringEnd = addTerm(now, proTerm);
-  // A Standard window that is live at `now` and covers a full Pro term.
-  const covering = { startsAt: now - 90 * day, endsAt: coveringEnd };
+  // One Standard grant, live at `now`, that covers a full Pro term. The gate is
+  // handed grants rather than a window, so this is the 0013 witness itself.
+  const covering = [standard(now - 90 * day, coveringEnd)];
 
   it("refuses pro where the exam is not adaptive", () => {
     expect(
       canPurchasePro({
         proOffered: false,
-        standardCoverage: covering,
+        standardGrants: covering,
         activeProEndsAtMs: null,
         now,
       }),
@@ -156,11 +158,11 @@ describe("pro purchase rules", () => {
   });
 
   it("refuses pro when standard cannot cover a full pro term", () => {
-    const short = { startsAt: covering.startsAt, endsAt: coveringEnd - 1 };
+    const short = [standard(now - 90 * day, coveringEnd - 1)];
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: short,
+        standardGrants: short,
         activeProEndsAtMs: null,
         now,
       }),
@@ -177,16 +179,16 @@ describe("pro purchase rules", () => {
     // The gate, not the caller, tests the start. An end-only test would allow
     // this window - it reaches well past a full Pro term - and 0013 would then
     // abort the Pro insert (`standard.starts_at <= pro.starts_at` fails).
-    const futureStart = {
-      startsAt: now + 1,
-      endsAt: addTerm(now + 1, { unit: "calendar_months", months: 3 }),
-    };
-    expect(standardCoversProWindow(futureStart, now)).toBe(false);
-    expect(requiresBundle(futureStart, now)).toBe(true);
+    const futureStart = standard(
+      now + 1,
+      addTerm(now + 1, { unit: "calendar_months", months: 3 }),
+    );
+    expect(standardCoversProWindow([futureStart], now)).toBe(false);
+    expect(requiresBundle([futureStart], now)).toBe(true);
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: futureStart,
+        standardGrants: [futureStart],
         activeProEndsAtMs: null,
         now,
       }),
@@ -198,14 +200,37 @@ describe("pro purchase rules", () => {
     // Exactly at `now` the window is live: the boundary is inclusive, matching
     // `standard.starts_at <= NEW.starts_at` in 0013.
     expect(
-      standardCoversProWindow({ ...futureStart, startsAt: now }, now),
+      standardCoversProWindow([{ ...futureStart, startsAt: now }], now),
     ).toBe(true);
     expect(
-      standardCoversProWindow(
-        { startsAt: now, endsAt: addTerm(now, proTerm) },
-        now,
-      ),
+      standardCoversProWindow([standard(now, addTerm(now, proTerm))], now),
     ).toBe(true);
+  });
+
+  it("refuses a pair assembled from two different grants (#66)", () => {
+    // The failure the grants-typed gate eliminates: g1 is live now but ends
+    // inside the Pro term, g2 covers the Pro term but starts after `now`. Their
+    // `(min starts_at, max expires_at)` pair looks like a full covering window,
+    // yet 0013 accepts no single row for the Pro insert - money taken, grant
+    // refused. The gate must refuse the pair, so it never reaches 0013.
+    const g1 = standard(now - 90 * day, now + 10 * day);
+    const g2 = standard(now + day, addTerm(now, proTerm) + 30 * day);
+    expect(g1.expiresAt).toBeLessThan(addTerm(now, proTerm));
+    expect(g2.startsAt).toBeGreaterThan(now);
+    expect(standardCoversProWindow([g1, g2], now)).toBe(false);
+    expect(requiresBundle([g1, g2], now)).toBe(true);
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        standardGrants: [g1, g2],
+        activeProEndsAtMs: null,
+        now,
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "standard-too-short",
+      requiresBundle: true,
+    });
   });
 
   it("allows pro when standard ends exactly at the end of a full pro term", () => {
@@ -214,7 +239,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: covering,
+        standardGrants: covering,
         activeProEndsAtMs: null,
         now,
       }),
@@ -228,7 +253,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: { startsAt: now, endsAt: addTerm(now, term) },
+        standardGrants: [standard(now, addTerm(now, term))],
         activeProEndsAtMs: null,
         now,
       }),
@@ -239,7 +264,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: null,
+        standardGrants: [],
         activeProEndsAtMs: null,
         now,
       }),
@@ -251,7 +276,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: covering,
+        standardGrants: covering,
         activeProEndsAtMs,
         now,
       }),
@@ -264,7 +289,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: covering,
+        standardGrants: covering,
         activeProEndsAtMs: activeProEndsAtMs - 1,
         now,
       }),
@@ -275,11 +300,53 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardCoverage: covering,
+        standardGrants: covering,
         activeProEndsAtMs: now,
         now,
       }),
     ).toEqual({ allowed: true, requiresBundle: false });
+  });
+});
+
+describe("standard coverage end", () => {
+  const now = Date.parse("2026-02-01T00:00:00.000Z");
+
+  it("is null when there is no standard grant at all", () => {
+    expect(standardCoverageEndMs([], now)).toBeNull();
+    expect(standardCoverageEndMs([pro(now - day, now + day)], now)).toBeNull();
+  });
+
+  it("is the expiry of the one live grant", () => {
+    const endsAt = addTerm(now, termFor("standard-3m"));
+    expect(standardCoverageEndMs([standard(now, endsAt)], now)).toBe(endsAt);
+  });
+
+  it("ignores a revoked grant", () => {
+    const endsAt = addTerm(now, termFor("standard-3m"));
+    const revoked = { ...standard(now, endsAt), revokedAt: now };
+    expect(standardCoverageEndMs([revoked], now)).toBeNull();
+  });
+
+  it("takes the furthest expiry across overlapping grants", () => {
+    const near = now + 30 * day;
+    const far = addTerm(now, termFor("standard-12m"));
+    expect(
+      standardCoverageEndMs([standard(now, near), standard(now + day, far)], now),
+    ).toBe(far);
+  });
+
+  it("counts a grant that has not started yet, and never returns a past instant", () => {
+    // Coverage is contiguous by construction - a top-up appends to the end of the
+    // current window - so the furthest expiry is the answer even when the row
+    // that carries it has not begun. An expired term floors at `now`, which is
+    // what keeps `standardRemainingDays` at `0` rather than negative.
+    const future = addTerm(now, termFor("standard-6m"));
+    expect(standardCoverageEndMs([standard(now + day, future)], now)).toBe(
+      future,
+    );
+    expect(
+      standardCoverageEndMs([standard(now - 90 * day, now - day)], now),
+    ).toBe(now);
   });
 });
 
@@ -344,7 +411,17 @@ describe("bundle purchase windows", () => {
         windows.pro.endsAt,
       );
       // ...and 0013's own predicate agrees, through the gate's own function.
-      expect(standardCoversProWindow(windows.standard, now)).toBe(true);
+      expect(
+        standardCoversProWindow(
+          [
+            standard(
+              windows.standard.startsAt,
+              windows.standard.endsAt,
+            ),
+          ],
+          now,
+        ),
+      ).toBe(true);
     }
   });
 });
@@ -362,6 +439,11 @@ describe("price list", () => {
     const parts =
       priceList["standard-3m"].amountMinor + priceList["pro-3m"].amountMinor;
     expect(bundle).toBeLessThan(parts);
+    // The bundle's Pro line is the residual `bundle - standard-3m`, and a line
+    // amount is CHECKed `> 0`. Without this bound a price edit that dropped the
+    // bundle to (or below) the Standard price would surface as a 500 from that
+    // CHECK instead of as a failed test.
+    expect(bundle).toBeGreaterThan(priceList["standard-3m"].amountMinor);
     expect(priceList["pro-3m"].amountMinor).toBeLessThan(
       priceList["standard-3m"].amountMinor,
     );
@@ -513,7 +595,7 @@ describe("storage layer guarantees", () => {
     });
     // The gate refuses that same window, so gate and trigger agree.
     expect(
-      standardCoversProWindow({ startsAt: now + day, endsAt: proExpires }, now),
+      standardCoversProWindow([standard(now + day, proExpires)], now),
     ).toBe(false);
     await expect(
       insertGrant({

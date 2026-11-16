@@ -10,3 +10,10 @@ STAFF_RATE_LIMIT_HMAC_SECRET=REPLACE_WITH_ANOTHER_RANDOM_LOCAL_VALUE_OF_AT_LEAST
 ADMIN_TESTER_IPS=
 ADMIN_TESTER_ASSURANCE=false
 ADMIN_TESTER_LOCAL=false
+# Commerce is off unless both of these are set deliberately and a webhook secret
+# is supplied with `wrangler secret put`. A placeholder is not a secret: the fake
+# provider is enabled only in local development, never on a preview or the
+# deployed Worker.
+COMMERCE_ENABLED=false
+PAYMENT_PROVIDER=none
+COMMERCE_WEBHOOK_SECRET=REPLACE_WITH_A_LOCAL_ONLY_VALUE_OF_AT_LEAST_32_CHARACTERS

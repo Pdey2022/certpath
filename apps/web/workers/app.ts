@@ -7,6 +7,7 @@ import {
 } from "@certpath/api";
 import { cleanupExpiredQuestionImports } from "@certpath/api/security/question-import-cleanup";
 import { cleanupExpiredAuditEvents } from "@certpath/api/security/audit-retention";
+import { expireStaleCheckouts } from "@certpath/api/commerce/expire";
 import { cloudflareContext } from "../app/lib/cloudflare-context";
 
 const requestHandler = createRequestHandler(
@@ -18,6 +19,7 @@ type AdminAppEnv = Env & {
   ADMIN_TESTER_IPS?: string;
   ADMIN_TESTER_LOCAL?: string;
   AUDIT_RETENTION_ENABLED?: string;
+  COMMERCE_ENABLED?: string;
 };
 
 function staffSignInRedirect(request: Request): Response {
@@ -78,6 +80,19 @@ export default {
           const result = await cleanupExpiredAuditEvents(env.DB, Date.now());
           if (!result.ok) {
             throw new Error(`Audit retention cleanup failed: ${result.reason}`);
+          }
+        })(),
+      );
+    }
+    // Commerce expiry runs in its own waitUntil as well, and only when commerce
+    // is switched on: with the feature off there are no new pending rows, and a
+    // disabled feature must not write at all.
+    if (String(env.COMMERCE_ENABLED ?? "false") === "true") {
+      ctx.waitUntil(
+        (async () => {
+          const result = await expireStaleCheckouts(env.DB, Date.now());
+          if (!result.ok) {
+            throw new Error(`Checkout expiry failed: ${result.reason}`);
           }
         })(),
       );
