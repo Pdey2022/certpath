@@ -652,6 +652,45 @@ describe("checkout creation", () => {
     });
   });
 
+  it("refuses Pro on a non-Pro exam without pointing at the refused bundle (B1)", async () => {
+    // 40 days of Standard is short of a full Pro term, so the old
+    // `requiresBundle: standardIsShort` answered `true` - while
+    // `bundleDecision` refuses the bundle for this same reason. The refusal's
+    // "way through" has to be an offer, not a second refusal, and this is the
+    // state that exposes it: with covering Standard the flag was `false`
+    // anyway, which is why the 200-day test above never caught it.
+    const actor = await learner();
+    const certificationId = await exam();
+    await liveStandard(actor.userId, certificationId, 40);
+
+    const response = await createCheckoutRequest(actor, {
+      certificationId,
+      sku: "pro-3m",
+      clientCheckoutKey: crypto.randomUUID(),
+    });
+    expect(response.status).toBe(409);
+    expect(await errorBody(response)).toMatchObject({
+      error: {
+        code: "purchase_not_allowed",
+        reason: "pro_not_offered",
+        requiresBundle: false,
+      },
+    });
+
+    // The guard that makes it bite: in the same state, the offer the old
+    // `true` would have pointed at is refused, for the same reason.
+    const projection = await offers(actor, certificationId);
+    expect(projection.standardRemainingDays).toBe(40);
+    expect(offerFor(projection, "pro-3m")).toMatchObject({
+      purchasable: false,
+      reason: "pro_not_offered",
+    });
+    expect(offerFor(projection, "bundle-standard-3m-pro")).toMatchObject({
+      purchasable: false,
+      reason: "pro_not_offered",
+    });
+  });
+
   it("refuses a second Pro while one is live", async () => {
     const actor = await learner();
     const certificationId = await exam({ proEnabled: true });
@@ -1228,6 +1267,37 @@ describe("storage invariants", () => {
       .prepare("UPDATE commerce_checkouts SET status = 'needs_support' WHERE id = ?")
       .bind(checkoutId)
       .run();
+
+    // The two park edges 0019 added, asserted here so the invariant has a name.
+    // 0020 replaces this same trigger again to add `paid -> refunded` - the same
+    // DROP+CREATE that dropped these edges once - and a named edge fails in a
+    // test that says which one, not in a route five files away.
+    const live = await checkoutRow();
+    // pending -> needs_support: a mismatch on a live row.
+    await expect(
+      database
+        .prepare(
+          "UPDATE commerce_checkouts SET status = 'needs_support', paid_at = ? WHERE id = ?",
+        )
+        .bind(clock, live.checkoutId)
+        .run(),
+    ).resolves.toBeDefined();
+
+    const lapsed = await checkoutRow();
+    await database
+      .prepare("UPDATE commerce_checkouts SET status = 'expired' WHERE id = ?")
+      .bind(lapsed.checkoutId)
+      .run();
+    // expired -> needs_support: money arrived after our own expiry, so the row
+    // is parked rather than left to 5xx every provider retry.
+    await expect(
+      database
+        .prepare(
+          "UPDATE commerce_checkouts SET status = 'needs_support', paid_at = ? WHERE id = ?",
+        )
+        .bind(clock, lapsed.checkoutId)
+        .run(),
+    ).resolves.toBeDefined();
 
     for (const status of ["pending", "refunded", "expired", "failed"]) {
       await expect(

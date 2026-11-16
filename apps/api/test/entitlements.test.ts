@@ -156,6 +156,26 @@ describe("pro purchase rules", () => {
     });
   });
 
+  it("refuses pro on a non-Pro exam without pointing at the bundle (B1)", () => {
+    // `bundleDecision` refuses the bundle for `pro_not_offered` as well, so
+    // `requiresBundle: true` here would be a pointer at a refusal. Short
+    // Standard is the state that exposed it: with covering Standard the old
+    // `requiresBundle: standardIsShort` happened to be `false` already.
+    const short = [standard(now - 90 * day, coveringEnd - 1)];
+    expect(requiresBundle(short, now)).toBe(true);
+    expect(
+      canPurchasePro({
+        proOffered: false,
+        grants: short,
+        now,
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "pro-not-offered",
+      requiresBundle: false,
+    });
+  });
+
   it("refuses pro when standard cannot cover a full pro term", () => {
     const short = [standard(now - 90 * day, coveringEnd - 1)];
     expect(

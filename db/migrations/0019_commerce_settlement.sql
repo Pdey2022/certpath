@@ -29,15 +29,28 @@
 --      that `expired -> needs_support` is a legal edge. Settlement parks money it
 --      cannot apply in `needs_support`, and a row our own expiry already closed is
 --      one of the shapes it can meet: a late payment whose amount does not match,
---      or one whose Pro insert aborts at the trigger below. Without the edge the
---      park itself aborted, the event row was never written with the transition,
---      and the provider retried a real charge forever.
+--      or one whose Pro insert aborts at the trigger below.
+--
+--      Without the edge the park aborts, and the two shapes fail differently. An
+--      amount mismatch applies nothing, so `applySettlement`'s own batch still
+--      commits: it writes the event row `ignored-inconsistent`, because its
+--      retryable predicate is false when the amount differs, and only then does
+--      `markNeedsSupport` abort its own batch, which the webhook answers as one
+--      `503`. From the next delivery on the event is already recorded, so the
+--      provider gets `200 {duplicate: true}` for ever with the checkout still
+--      `expired`, `paid_at` NULL, and the money visible only in
+--      `commerce_provider_events` - an event row outside the checkout-level work
+--      queue. A Pro-insert abort rolls the **whole** batch back instead, so there
+--      is no event row to answer for the delivery: every retry repeats the abort,
+--      re-parks, and 5xx's, and the provider retries a real charge for ever. Same
+--      missing edge, different failure.
 --
 -- What this migration deliberately does NOT add: `commerce_refunds`,
 -- `commerce_refund_lines`, the `paid -> refunded` status edge,
 -- `commerce_checkouts_refunded_requires_settled_refund` and any refund receipt.
 -- Those are the next change; nothing here may be read as a promise that they
--- exist.
+-- exist. 0018's forward references say those arrive in 0019; they arrive in
+-- **0020**, and 0018 is landed, so the correction lives here.
 --
 -- Rules: docs/decisions/0003-pricing-pro-and-refunds.md and docs/commerce.md.
 
@@ -199,10 +212,13 @@ CREATE UNIQUE INDEX commerce_checkouts_one_open_per_fingerprint
 -- amount can disagree with the snapshot, or the Pro leg can abort here (0019's
 -- one-Pro-window trigger) because the learner already holds an overlapping Pro
 -- window. Both are "money moved, nothing can be granted", which is exactly what
--- `needs_support` exists for; while the edge was missing, `markNeedsSupport`
--- aborted its own batch, the event row it writes in the same transaction rolled
--- back with it, and the delivery became a 5xx the provider retries forever -
--- with the learner's money already taken.
+-- `needs_support` exists for. While the edge was missing, `markNeedsSupport`
+-- aborted its own batch and the delivery became a 5xx with the learner's money
+-- already taken, and what followed depended on whether an event row had already
+-- committed: a Pro-insert abort left none, so the provider looped on the same 5xx
+-- for ever, while an amount mismatch had one, so the next delivery answered
+-- `200 {duplicate: true}` and left the row `expired` with the money recorded only
+-- in `commerce_provider_events`. The header spells both shapes out.
 --
 -- `expired -> paid` stays: a late payment that *does* apply settles normally.
 -- `paid -> refunded` is still absent; a refunded checkout needs the refund record

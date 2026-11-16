@@ -320,16 +320,22 @@ export function proWindowActive(
  * Order matters: `pro-window-active` is decided before `standard-too-short`,
  * because only the latter carries `requiresBundle: true` and the bundle is
  * itself refused while a Pro window overlaps.
+ *
+ * `pro-not-offered` carries `requiresBundle: false` for the same reason, and it
+ * is contract truth rather than a product rule: `bundleDecision` refuses the
+ * bundle for `pro_not_offered` too, so `true` would point at a refusal. Where
+ * Pro is not sold, Standard coverage is irrelevant and the decision must not
+ * read like a shortfall.
  */
 export function canPurchasePro(input: ProPurchaseInput): ProPurchaseDecision {
-  const standardIsShort = requiresBundle(input.grants, input.now);
   if (!input.proOffered) {
     return {
       allowed: false,
       reason: "pro-not-offered",
-      requiresBundle: standardIsShort,
+      requiresBundle: false,
     };
   }
+  const standardIsShort = requiresBundle(input.grants, input.now);
   // The Pro window is checked **before** the Standard-coverage rule, because
   // `requiresBundle: true` is a pointer at an offer and this one would be a
   // pointer at a refusal: `bundleDecision` refuses the bundle for exactly this

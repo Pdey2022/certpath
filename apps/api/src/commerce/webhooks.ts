@@ -837,9 +837,15 @@ async function applyFailure(
  * Both statuses settlement can arrive at are accepted by the transition trigger
  * (0019): `pending -> needs_support` and `expired -> needs_support`. The second
  * one matters - a late payment whose amount disagrees, or whose Pro leg aborts,
- * is a row our own expiry already closed, and while that edge was illegal this
- * batch aborted, taking the event row with it, and the provider retried a real
- * charge forever.
+ * is a row our own expiry already closed. While that edge was illegal this batch
+ * aborted and the webhook answered `503`, with the learner's money already taken;
+ * what the provider saw next depended on the shape. A Pro leg that aborted rolled
+ * the earlier settlement batch back, so no event row existed and every retry
+ * repeated the `503`. An amount mismatch had already committed its event row as
+ * `ignored-inconsistent`, so from the next delivery on the answer was
+ * `200 {duplicate: true}` and the checkout stayed `expired` with `paid_at` NULL -
+ * money recorded only in `commerce_provider_events`, outside the checkout-level
+ * work queue.
  *
  * Nothing is granted and no receipt is issued. The learner is not granted an
  * entitlement they did not buy, and they are not silently refunded either - the

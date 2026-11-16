@@ -69,14 +69,15 @@ and exam satisfies `starts_at <= now < expires_at` **and**
 `learner_access_grants_pro_requires_standard` (0013). Equality is allowed, so a
 Standard term of exactly three months covers a Pro term bought at its start.
 
-`standardCoversProWindow(grants, now)` and
-`canPurchasePro({ standardGrants, … })` take the grant rows rather than a
-pre-computed `{startsAt, endsAt}` pair. A pair can be synthesised from two
-different grants and is not a witness of anything: `g1 = [now − 90d, now + 10d)`
-plus `g2 = [now + 1d, proEnd + 30d)` yields a start from `g1` and an end from
-`g2`, neither of which covers the Pro window, so 0013 would refuse the insert
-after money was taken. Handing the gate the rows makes "the gate allowed it" and
-"0013 accepts it" the same statement.
+`standardCoversProWindow(grants, now)` and `canPurchasePro({ grants, … })` take
+the grant rows rather than a pre-computed `{startsAt, endsAt}` pair; the one
+`grants` parameter carries **both** features, because the Standard side and the
+Pro side of the gate are computed from the same list. A pair can be synthesised
+from two different grants and is not a witness of anything: `g1 = [now − 90d,
+now + 10d)` plus `g2 = [now + 1d, proEnd + 30d)` yields a start from `g1` and an
+end from `g2`, neither of which covers the Pro window, so 0013 would refuse the
+insert after money was taken. Handing the gate the rows makes "the gate allowed
+it" and "0013 accepts it" the same statement.
 
 `canPurchasePro()` returns one of:
 
@@ -340,9 +341,10 @@ reconciliation query that trusts it.
    uses, so the offer a learner sees and the decision the write path makes cannot
    disagree. A refusal is `409 purchase_not_allowed` with
    `{ code, reason, requiresBundle }`; `requiresBundle` is `true` for
-   `standard_too_short`, so the bundle is surfaced rather than hidden, and `false`
-   for `pro_window_active`, because the bundle is refused for that same reason —
-   a pointer at a refusal is not a way through.
+   `standard_too_short` only, so the bundle is surfaced rather than hidden. It is
+   `false` for `pro_window_active` and for `pro_not_offered`, because
+   `bundleDecision` refuses the bundle for exactly those two reasons — a pointer
+   at a refusal is not a way through.
 3. **One batch.** The checkout row (`INSERT … ON CONFLICT (user_id,
    client_checkout_key) DO NOTHING RETURNING id`) and its lines are written
    together. The witness that our row landed is the returned id, never
@@ -375,11 +377,14 @@ expiresAt, paidAt, refundWindowEndsAt }`, where `sku` is the purchased SKU and
 each line is
 `{ sku, label, amountMinor, feature, term, priceSource }` and `term` is the
 `TermSpec` the line grants — never a day count standing in for a month. `paidAt`
-and `refundWindowEndsAt` are `null` until the checkout is paid, and then hold the
-instant money moved and `paidAt + 7 days` (`refundWindowMs` in `pricing.ts`, the
-same value the purchase receipt records). The same fields are returned by
-`GET /api/commerce/checkouts/:checkoutId`, so a paid checkout and its receipt
-report one refund window rather than two.
+is `null` until a settlement records that money moved, so it is set on `paid`
+and also on `needs_support` where money moved and nothing could be granted;
+`refundWindowEndsAt` is `null` until the checkout is paid, and then holds
+`paidAt + 7 days` (`refundWindowMs` in `pricing.ts`, the same value the purchase
+receipt records). A client must branch on **`status`, never on `paidAt`**: a
+parked `needs_support` has a `paidAt` and still grants nothing. The same fields
+are returned by `GET /api/commerce/checkouts/:checkoutId`, so a paid checkout and
+its receipt report one refund window rather than two.
 
 Status codes: `201` created, `200` replay, `400 validation_error | unknown_sku |
 invalid_origin | invalid_csrf`, `401 unauthenticated`,

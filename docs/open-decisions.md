@@ -31,6 +31,10 @@ need an owner or architect decision.
 - Exam launch order beyond CISSP (CISM is prepared but not scheduled).
 - Transactional email provider (Cloudflare Email Workers covers inbound only).
 - Device and session policy (Milestone 5) - required before paid launch.
+- Resolution policy for money parked in `needs_support`: refund it, grant it, or
+  leave it for manual handling. Settlement records the money and the parked
+  checkout; it implements no policy, and `docs/commerce.md` §Failure paths names
+  this as the owner's.
 - Monitoring, alerting and on-call expectations for the pilot.
 
 ## Architect decisions still open
