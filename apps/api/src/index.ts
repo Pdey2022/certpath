@@ -21,7 +21,7 @@ import type { SecurityDatabase } from "./security/database.ts";
 import { createLambdaPasswordVerifier } from "./security/lambda-password-verifier.ts";
 import { adminLearnersApi } from "./admin-learners.ts";
 import { createAdminCommerceApi } from "./admin-commerce.ts";
-import { createCommerceApi } from "./commerce/http.ts";
+import { createCommerceApi, createCommerceWebhookApi } from "./commerce/http.ts";
 import {
   isStagingLocalTestOrigin,
   stagingTesterGate,
@@ -69,6 +69,7 @@ type ApiBindings = {
   COMMERCE_ENABLED?: string;
   PAYMENT_PROVIDER?: string;
   COMMERCE_WEBHOOK_SECRET?: string;
+  LOCAL_COMMERCE_DEV_TOOLS?: string;
   COGNITO_LEARNER_TRANSACTION_ENCRYPTION_KEY?: string;
 };
 
@@ -132,6 +133,16 @@ export function createApi(
   application.route("/admin/content", protectedContentApi);
   // Commerce sits outside the admin surface and answers 503 on its own when
   // `COMMERCE_ENABLED` is not "true" or no provider resolves.
+  //
+  // The webhook is mounted first and as its own app: it is the one commerce path
+  // with no session and no CSRF, and the learner router's middleware must not be
+  // able to grow a branch that decides which. A more specific prefix wins in
+  // Hono's router, so `/commerce/webhooks/:provider` never reaches the learner
+  // app's `*` middleware.
+  application.route(
+    "/commerce/webhooks",
+    createCommerceWebhookApi(now, paymentProvider),
+  );
   application.route("/commerce", createCommerceApi(now, paymentProvider));
   application.route("/practice", learnerPracticeApi);
   return application;

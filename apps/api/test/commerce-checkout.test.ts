@@ -652,6 +652,45 @@ describe("checkout creation", () => {
     });
   });
 
+  it("refuses Pro on a non-Pro exam without pointing at the refused bundle (B1)", async () => {
+    // 40 days of Standard is short of a full Pro term, so the old
+    // `requiresBundle: standardIsShort` answered `true` - while
+    // `bundleDecision` refuses the bundle for this same reason. The refusal's
+    // "way through" has to be an offer, not a second refusal, and this is the
+    // state that exposes it: with covering Standard the flag was `false`
+    // anyway, which is why the 200-day test above never caught it.
+    const actor = await learner();
+    const certificationId = await exam();
+    await liveStandard(actor.userId, certificationId, 40);
+
+    const response = await createCheckoutRequest(actor, {
+      certificationId,
+      sku: "pro-3m",
+      clientCheckoutKey: crypto.randomUUID(),
+    });
+    expect(response.status).toBe(409);
+    expect(await errorBody(response)).toMatchObject({
+      error: {
+        code: "purchase_not_allowed",
+        reason: "pro_not_offered",
+        requiresBundle: false,
+      },
+    });
+
+    // The guard that makes it bite: in the same state, the offer the old
+    // `true` would have pointed at is refused, for the same reason.
+    const projection = await offers(actor, certificationId);
+    expect(projection.standardRemainingDays).toBe(40);
+    expect(offerFor(projection, "pro-3m")).toMatchObject({
+      purchasable: false,
+      reason: "pro_not_offered",
+    });
+    expect(offerFor(projection, "bundle-standard-3m-pro")).toMatchObject({
+      purchasable: false,
+      reason: "pro_not_offered",
+    });
+  });
+
   it("refuses a second Pro while one is live", async () => {
     const actor = await learner();
     const certificationId = await exam({ proEnabled: true });
@@ -669,6 +708,70 @@ describe("checkout creation", () => {
     expect(await errorBody(response)).toMatchObject({
       error: { code: "purchase_not_allowed", reason: "pro_window_active" },
     });
+  });
+
+  it("does not point at the bundle when the bundle is refused too (G2)", async () => {
+    // Short Standard and an overlapping Pro window is a real state: a learner who
+    // bought the bundle 60 days ago has 30 days of each left, and Pro is short
+    // because the Standard leg does not reach a full Pro term. `standard_too_short`
+    // used to win, answering `requiresBundle: true` - a pointer at an offer
+    // `bundleDecision` refuses for `pro_window_active`. A refusal's way through
+    // has to be a way through.
+    const actor = await learner();
+    const certificationId = await exam({ proEnabled: true });
+    const window = { startsAt: clock - 60 * day, expiresAt: clock + 30 * day };
+    await grantTestFeatureAccess(
+      database,
+      actor.userId,
+      certificationId,
+      "standard",
+      window,
+    );
+    await grantTestFeatureAccess(
+      database,
+      actor.userId,
+      certificationId,
+      "pro",
+      window,
+    );
+
+    const response = await offers(actor, certificationId);
+    expect(offerFor(response, "pro-3m")).toMatchObject({
+      purchasable: false,
+      reason: "pro_window_active",
+    });
+    // The offer the refusal used to point at is refused in the same projection.
+    expect(offerFor(response, "bundle-standard-3m-pro")).toMatchObject({
+      purchasable: false,
+      reason: "pro_window_active",
+    });
+    // A top-up is still a way through, and it is the one the learner needs.
+    expect(offerFor(response, "standard-topup-3m")).toMatchObject({
+      purchasable: true,
+      reason: null,
+    });
+
+    const refused = await createCheckoutRequest(actor, {
+      certificationId,
+      sku: "pro-3m",
+      clientCheckoutKey: crypto.randomUUID(),
+    });
+    expect(refused.status).toBe(409);
+    expect(await errorBody(refused)).toMatchObject({
+      error: {
+        code: "purchase_not_allowed",
+        reason: "pro_window_active",
+        requiresBundle: false,
+      },
+    });
+    expect(
+      await database
+        .prepare(
+          "SELECT COUNT(*) AS rows FROM commerce_checkouts WHERE user_id = ?",
+        )
+        .bind(actor.userId)
+        .first<{ rows: number }>(),
+    ).toEqual({ rows: 0 });
   });
 
   it("refuses a top-up and an extension that do not apply", async () => {
@@ -1164,6 +1267,37 @@ describe("storage invariants", () => {
       .prepare("UPDATE commerce_checkouts SET status = 'needs_support' WHERE id = ?")
       .bind(checkoutId)
       .run();
+
+    // The two park edges 0019 added, asserted here so the invariant has a name.
+    // 0020 replaces this same trigger again to add `paid -> refunded` - the same
+    // DROP+CREATE that dropped these edges once - and a named edge fails in a
+    // test that says which one, not in a route five files away.
+    const live = await checkoutRow();
+    // pending -> needs_support: a mismatch on a live row.
+    await expect(
+      database
+        .prepare(
+          "UPDATE commerce_checkouts SET status = 'needs_support', paid_at = ? WHERE id = ?",
+        )
+        .bind(clock, live.checkoutId)
+        .run(),
+    ).resolves.toBeDefined();
+
+    const lapsed = await checkoutRow();
+    await database
+      .prepare("UPDATE commerce_checkouts SET status = 'expired' WHERE id = ?")
+      .bind(lapsed.checkoutId)
+      .run();
+    // expired -> needs_support: money arrived after our own expiry, so the row
+    // is parked rather than left to 5xx every provider retry.
+    await expect(
+      database
+        .prepare(
+          "UPDATE commerce_checkouts SET status = 'needs_support', paid_at = ? WHERE id = ?",
+        )
+        .bind(clock, lapsed.checkoutId)
+        .run(),
+    ).resolves.toBeDefined();
 
     for (const status of ["pending", "refunded", "expired", "failed"]) {
       await expect(

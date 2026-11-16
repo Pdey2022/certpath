@@ -1,13 +1,15 @@
 import { z } from "zod";
 
-// Contracts for the learner-facing commerce surface that ships in this phase:
-// the offers projection, checkout creation and the checkout read.
+// Contracts for the commerce surface: the offers projection, checkout creation
+// and the checkout read, the provider webhook's acknowledgement, and the local
+// dev seam's request.
 //
-// Nothing here carries a card, a learner identity, a receipt or a refund: those
-// arrive with settlement in the next commerce change. The checkout shapes carry
-// no price of their own either - every `amountMinor` in a response is the value
-// the server copied out of `apps/api/src/pricing.ts`, which is the only place a
-// price constant may live.
+// Nothing here carries a card, a learner identity, a receipt or a refund. The
+// webhook acknowledgement is `{ received, duplicate }` and no more - the stored
+// receipt is a database row that no response in this phase returns - and refunds
+// do not exist yet. The checkout shapes carry no price of their own either -
+// every `amountMinor` in a response is the value the server copied out of
+// `apps/api/src/pricing.ts`, which is the only place a price constant may live.
 //
 // `.strict()` everywhere: an unexpected field is a client bug and must fail
 // loudly rather than be ignored.
@@ -142,7 +144,10 @@ export const commerceCheckoutResponseSchema = z
     redirectUrl: z.string().min(1).max(2_048).nullable(),
     expiresAt: safeInteger,
     paidAt: safeInteger.nullable(),
-    /** Set when settlement ships; null while nothing can pay a checkout. */
+    /**
+     * `paid_at + 7 days`, the ADR 0003 refund window - the same instant the
+     * purchase receipt records. Null exactly while `paidAt` is null.
+     */
     refundWindowEndsAt: safeInteger.nullable(),
   })
   .strict();
@@ -164,6 +169,45 @@ export const commercePurchaseNotAllowedErrorSchema = z
   })
   .strict();
 
+/**
+ * A second checkout for a product this learner already has open. The existing id
+ * travels so a second tab can be handed the live provider session
+ * (`GET /api/commerce/checkouts/:checkoutId`) instead of opening a second one.
+ */
+export const commerceCheckoutAlreadyOpenErrorSchema = z
+  .object({
+    error: z
+      .object({
+        code: z.literal("checkout_already_open"),
+        requestId: z.string().min(1).max(128),
+        checkoutId: id,
+      })
+      .strict(),
+  })
+  .strict();
+
+/**
+ * The provider webhook's answer. `duplicate` is true when the event id was
+ * already recorded: the provider should stop retrying either way, so both
+ * answers are `200`.
+ */
+export const commerceWebhookResponseSchema = z
+  .object({
+    received: z.literal(true),
+    duplicate: z.boolean(),
+  })
+  .strict();
+
+/**
+ * The local-only dev seam's request. It names a checkout and nothing else: the
+ * amount, the currency and the provider reference are read from the stored row,
+ * so the seam cannot invent a payment for a price that was never charged.
+ */
+export const commerceFakePayRequestSchema = z
+  .object({ checkoutId: id })
+  .strict();
+
+
 export type CommerceSku = z.infer<typeof commerceSkuSchema>;
 export type CommerceOfferReason = z.infer<typeof commerceOfferReasonSchema>;
 export type CommerceCheckoutStatus = z.infer<
@@ -183,4 +227,13 @@ export type CommerceCheckoutResponse = z.infer<
 >;
 export type CommercePurchaseNotAllowedError = z.infer<
   typeof commercePurchaseNotAllowedErrorSchema
+>;
+export type CommerceCheckoutAlreadyOpenError = z.infer<
+  typeof commerceCheckoutAlreadyOpenErrorSchema
+>;
+export type CommerceWebhookResponse = z.infer<
+  typeof commerceWebhookResponseSchema
+>;
+export type CommerceFakePayRequest = z.infer<
+  typeof commerceFakePayRequestSchema
 >;

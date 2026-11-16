@@ -1,9 +1,12 @@
 import { Hono, type Context } from "hono";
 import {
+  commerceCheckoutAlreadyOpenErrorSchema,
   commerceCheckoutRequestSchema,
   commerceCheckoutResponseSchema,
+  commerceFakePayRequestSchema,
   commerceOffersResponseSchema,
   commercePurchaseNotAllowedErrorSchema,
+  commerceWebhookResponseSchema,
 } from "@certpath/contracts";
 import type { SecurityDatabase } from "../security/database.ts";
 import {
@@ -24,13 +27,34 @@ import {
   resolvePaymentProvider,
   type PaymentProvider,
 } from "./provider.ts";
+import { isFakeProvider } from "./providers/fake.ts";
+import {
+  buildFakeCompletedEvent,
+  handleProviderWebhook,
+  maxWebhookBodyBytes,
+  type WebhookResult,
+} from "./webhooks.ts";
 
-// Learner-facing commerce routes: the offers projection, checkout creation and
-// the checkout read.
+// The commerce routes: the learner-facing app (offers projection, checkout
+// creation, the checkout read and the local dev seam) and the provider webhook
+// router.
 //
-// Settlement, the webhook, refunds and receipts are not here. Nothing on this
-// router can grant access, and no provider event is accepted: the only
-// unauthenticated write surface in the application arrives with 0019.
+// Two Hono apps live in one module because they are the two halves of the
+// boundary the design turns on. `createCommerceApi` reads a session cookie and,
+// for a mutation, requires the site origin and a CSRF token;
+// `createCommerceWebhookApi` reads none of those and is authenticated by the
+// provider's signature alone. Separate apps are what makes "no session on the
+// webhook" structural rather than a branch inside one middleware.
+//
+// What this file may **not** claim is that nothing here can grant access.
+// `createCommerceWebhookApi` and `POST /dev/fake-pay` both reach
+// `handleProviderWebhook`, which is the one settlement path in the application;
+// the dev seam exists only when the provider is the fake and
+// `LOCAL_COMMERCE_DEV_TOOLS` is the exact string "true", and it signs a body and
+// dispatches it rather than writing anything itself. The narrower, true claim is
+// that no route here grants anything on its own, and that access still exists
+// only because a row in `learner_access_grants` does. Refunds and receipt reads
+// are still absent.
 //
 // The gate order is deliberate and fail-closed: `COMMERCE_ENABLED` must be the
 // exact string "true", the site origin and CSRF secret must be usable, and a
@@ -46,6 +70,12 @@ type Bindings = {
   COMMERCE_ENABLED?: string;
   PAYMENT_PROVIDER?: string;
   COMMERCE_WEBHOOK_SECRET?: string;
+  /**
+   * The dev seam's switch. Absent means off: only the exact string "true" with
+   * `PAYMENT_PROVIDER=fake` makes `POST /dev/fake-pay` exist at all, and every
+   * other value answers `404` as if the route had never been written.
+   */
+  LOCAL_COMMERCE_DEV_TOOLS?: string;
 };
 
 interface Principal {
@@ -260,6 +290,19 @@ export function createCommerceApi(
         return response(context, 404, "checkout_not_found");
       case "idempotency-conflict":
         return response(context, 409, "idempotency_conflict");
+      case "checkout-already-open":
+        // The existing id travels, so the second tab can be handed the live
+        // provider session instead of opening a second one.
+        return context.json(
+          commerceCheckoutAlreadyOpenErrorSchema.parse({
+            error: {
+              code: "checkout_already_open",
+              requestId: context.get("requestId"),
+              checkoutId: failure.checkoutId,
+            },
+          }),
+          409,
+        );
       case "provider-unavailable":
         return response(context, 503, "provider_unavailable");
       case "purchase-not-allowed":
@@ -342,5 +385,183 @@ export function createCommerceApi(
     return context.json(commerceCheckoutResponseSchema.parse(result.value));
   });
 
+  // The dev seam. It exists only when the provider is the fake **and** the local
+  // switch is the exact string "true"; every other combination answers 404
+  // `not_found`, exactly as an unwritten route would, so a deployed Worker can
+  // never be probed for it. It takes a learner session and a CSRF token because
+  // it is a learner route, and it grants nothing on its own: it signs a body and
+  // dispatches it through `handleProviderWebhook`, the same function the webhook
+  // route calls. One write path, no second door.
+  api.post("/dev/fake-pay", async (context) => {
+    const provider = context.get("provider");
+    if (
+      context.env.LOCAL_COMMERCE_DEV_TOOLS !== "true" ||
+      !isFakeProvider(provider)
+    ) {
+      return response(context, 404, "not_found");
+    }
+    const denied = await protectMutation(context);
+    if (denied) return denied;
+    const parsed = await readJson(context, commerceFakePayRequestSchema);
+    if ("response" in parsed) return parsed.response;
+    const principal = context.get("principal");
+    const built = await buildFakeCompletedEvent(context.env.DB, provider, {
+      userId: principal.userId,
+      checkoutId: parsed.value.checkoutId,
+      now: now(),
+    });
+    // Another learner's checkout, a nonexistent one, or one whose provider
+    // session was never bound: the same answer in every case.
+    if (!built) return response(context, 404, "checkout_not_found");
+    const result = await handleProviderWebhook(context.env.DB, provider, {
+      providerName: provider.name,
+      rawBody: built.rawBody,
+      headers: built.headers,
+      now: now(),
+    });
+    return webhookResponse(context, result, context.get("requestId"));
+  });
+
   return api;
+}
+
+function webhookResponse(
+  context: {
+    json: (body: unknown, status?: 400 | 401 | 404 | 413 | 503) => Response;
+  },
+  result: WebhookResult,
+  requestId: string,
+): Response {
+  if (!result.ok) {
+    return context.json({ error: { code: result.code, requestId } }, result.status);
+  }
+  return context.json(
+    commerceWebhookResponseSchema.parse({
+      received: true,
+      duplicate: result.duplicate,
+    }),
+  );
+}
+
+/**
+ * The webhook router.
+ *
+ * Mounted at `/api/commerce/webhooks`, ahead of the learner router, and
+ * deliberately a separate Hono app: the learner router's middleware reads a
+ * session cookie on every path it owns, and the webhook must not. Keeping them in
+ * separate apps is what makes "no session, no CSRF, no IP allowlist" structural
+ * rather than a promise about a conditional inside a middleware.
+ *
+ * What is left as the door: `provider.verifyEvent` (HMAC + replay window), the
+ * event id's primary key, and the deterministic grant operation id.
+ */
+export function createCommerceWebhookApi(
+  now: () => number = Date.now,
+  injectedProvider?: PaymentProvider,
+) {
+  const api = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+  api.post("/:provider", async (context) => {
+    const requestId = crypto.randomUUID();
+    context.header("Cache-Control", "private, no-store, max-age=0");
+    context.header("Pragma", "no-cache");
+    context.header("X-Request-Id", requestId);
+    context.set("requestId", requestId);
+    // A provider's own URL is not indexable content, but the header costs
+    // nothing and stops an accidental crawl answer from being cached.
+    context.header("X-Robots-Tag", "noindex, nofollow");
+
+    if (context.env.COMMERCE_ENABLED !== "true") {
+      return webhookResponse(context, { ok: false, status: 503, code: "commerce_disabled" }, requestId);
+    }
+    if (!context.env.PUBLIC_SITE_ORIGIN) {
+      return webhookResponse(context, { ok: false, status: 503, code: "commerce_disabled" }, requestId);
+    }
+    const provider =
+      injectedProvider ??
+      resolvePaymentProvider(
+        {
+          PAYMENT_PROVIDER: context.env.PAYMENT_PROVIDER,
+          COMMERCE_WEBHOOK_SECRET: context.env.COMMERCE_WEBHOOK_SECRET,
+          PUBLIC_SITE_ORIGIN: context.env.PUBLIC_SITE_ORIGIN,
+        },
+        now,
+      );
+    if (!provider) {
+      return webhookResponse(context, { ok: false, status: 503, code: "commerce_disabled" }, requestId);
+    }
+
+    const read = await readRawBody(context.req.raw, maxWebhookBodyBytes);
+    if ("failure" in read) {
+      return webhookResponse(
+        context,
+        {
+          ok: false,
+          status: read.failure === "payload_too_large" ? 413 : 400,
+          code: read.failure,
+        },
+        requestId,
+      );
+    }
+    const result = await handleProviderWebhook(context.env.DB, provider, {
+      providerName: context.req.param("provider"),
+      rawBody: read.body,
+      // The signature header is read by the adapter and by nothing else, and it
+      // is never logged.
+      headers: context.req.raw.headers,
+      now: now(),
+    });
+    return webhookResponse(context, result, requestId);
+  });
+
+  return api;
+}
+
+/**
+ * Read a request body as text with a byte cap, before anything parses it.
+ *
+ * `payload_too_large` means the cap was exceeded. `Content-Length` is checked
+ * first so an oversized body is refused without reading it, and the stream count
+ * is the real bound because a client can lie about the header.
+ *
+ * `malformed_event` means the bytes are not valid UTF-8. These bytes come from an
+ * unauthenticated client and this runs before any signature is checked, so the
+ * decoder's failure has to be an answer rather than a thrown 500: `fatal: true`
+ * throws on the first invalid sequence, and an unhandled throw here would let
+ * anyone produce 5xx responses without knowing the webhook secret.
+ */
+async function readRawBody(
+  request: Request,
+  maxBytes: number,
+): Promise<{ body: string } | { failure: "payload_too_large" | "malformed_event" }> {
+  const declared = request.headers.get("Content-Length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+    return { failure: "payload_too_large" };
+  }
+  const body = request.body;
+  if (!body) return { body: "" };
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    size += result.value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      return { failure: "payload_too_large" };
+    }
+    chunks.push(result.value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return { body: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+  } catch {
+    return { failure: "malformed_event" };
+  }
 }

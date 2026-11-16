@@ -146,8 +146,27 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: false,
-        standardGrants: covering,
-        activeProEndsAtMs: null,
+        grants: covering,
+        now,
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "pro-not-offered",
+      requiresBundle: false,
+    });
+  });
+
+  it("refuses pro on a non-Pro exam without pointing at the bundle (B1)", () => {
+    // `bundleDecision` refuses the bundle for `pro_not_offered` as well, so
+    // `requiresBundle: true` here would be a pointer at a refusal. Short
+    // Standard is the state that exposed it: with covering Standard the old
+    // `requiresBundle: standardIsShort` happened to be `false` already.
+    const short = [standard(now - 90 * day, coveringEnd - 1)];
+    expect(requiresBundle(short, now)).toBe(true);
+    expect(
+      canPurchasePro({
+        proOffered: false,
+        grants: short,
         now,
       }),
     ).toEqual({
@@ -162,8 +181,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: short,
-        activeProEndsAtMs: null,
+        grants: short,
         now,
       }),
     ).toEqual({
@@ -188,8 +206,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: [futureStart],
-        activeProEndsAtMs: null,
+        grants: [futureStart],
         now,
       }),
     ).toEqual({
@@ -222,8 +239,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: [g1, g2],
-        activeProEndsAtMs: null,
+        grants: [g1, g2],
         now,
       }),
     ).toEqual({
@@ -239,8 +255,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: covering,
-        activeProEndsAtMs: null,
+        grants: covering,
         now,
       }),
     ).toEqual({ allowed: true, requiresBundle: false });
@@ -253,8 +268,7 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: [standard(now, addTerm(now, term))],
-        activeProEndsAtMs: null,
+        grants: [standard(now, addTerm(now, term))],
         now,
       }),
     ).toEqual({ allowed: true, requiresBundle: false });
@@ -264,20 +278,18 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: [],
-        activeProEndsAtMs: null,
+        grants: [],
         now,
       }),
     ).toMatchObject({ allowed: false, reason: "standard-too-short" });
   });
 
   it("refuses a second pro while the stored pro window is live", () => {
-    const activeProEndsAtMs = addTerm(now, proTerm);
+    const live = [...covering, pro(now, addTerm(now, proTerm))];
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: covering,
-        activeProEndsAtMs,
+        grants: live,
         now,
       }),
     ).toEqual({
@@ -289,19 +301,54 @@ describe("pro purchase rules", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: covering,
-        activeProEndsAtMs: activeProEndsAtMs - 1,
+        grants: [...covering, pro(now, addTerm(now, proTerm) - 1)],
         now,
       }),
     ).toMatchObject({ allowed: false, reason: "pro-window-active" });
+  });
+
+  it("refuses a pro grant that starts in the future (#75)", () => {
+    // The predicate is 0019's overlap test, not "live at now". A future-dated
+    // Pro grant overlaps the window a purchase made now would write, so the gate
+    // must refuse it: allowing it would take money and abort at the trigger.
+    const futurePro = pro(now + day, addTerm(now + day, proTerm));
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        grants: [...covering, futurePro],
+        now,
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "pro-window-active",
+      requiresBundle: false,
+    });
+    // A Pro window that ended before `now` and one that starts after the whole
+    // Pro term do not overlap it, and must not refuse the purchase.
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        grants: [...covering, pro(now - 200 * day, now - day)],
+        now,
+      }),
+    ).toEqual({ allowed: true, requiresBundle: false });
+    expect(
+      canPurchasePro({
+        proOffered: true,
+        grants: [
+          ...covering,
+          pro(addTerm(now, proTerm), addTerm(addTerm(now, proTerm), proTerm)),
+        ],
+        now,
+      }),
+    ).toEqual({ allowed: true, requiresBundle: false });
   });
 
   it("allows pro once the stored window has ended", () => {
     expect(
       canPurchasePro({
         proOffered: true,
-        standardGrants: covering,
-        activeProEndsAtMs: now,
+        grants: [...covering, pro(now - 200 * day, now)],
         now,
       }),
     ).toEqual({ allowed: true, requiresBundle: false });

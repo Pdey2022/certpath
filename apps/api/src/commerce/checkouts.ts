@@ -13,13 +13,19 @@ import {
   isProOffered,
   priceList,
   proTerm,
+  proWindowActive,
+  refundWindowMs,
   standardCoverageEndMs,
   termFor,
   type ProPurchaseDecision,
   type Sku,
 } from "../pricing.ts";
 import { addTerm } from "../calendar.ts";
-import type { D1PreparedStatement, SecurityDatabase } from "../security/database.ts";
+import type {
+  D1PreparedStatement,
+  D1Result,
+  SecurityDatabase,
+} from "../security/database.ts";
 import { readProEnablement } from "../security/pro-enablement.ts";
 import type { PaymentProvider } from "./provider.ts";
 
@@ -119,19 +125,6 @@ function hasLiveStandard(
   );
 }
 
-function activeProEndsAtMs(
-  grants: readonly AccessGrantRecord[],
-  now: number,
-): number | null {
-  let end: number | null = null;
-  for (const grant of grants) {
-    if (grant.feature !== "pro" || grant.revokedAt !== null) continue;
-    if (!isLive(grant, now)) continue;
-    end = end === null ? grant.expiresAt : Math.max(end, grant.expiresAt);
-  }
-  return end;
-}
-
 /**
  * The purchase rule for one SKU, as the offers projection and the checkout route
  * both need it. One function, so the offer a client is shown and the decision
@@ -165,8 +158,7 @@ const offerReasonForProRejection: Record<
 function proDecision(context: PurchaseContext): OfferDecision {
   const decision = canPurchasePro({
     proOffered: context.proOffered,
-    standardGrants: context.grants,
-    activeProEndsAtMs: activeProEndsAtMs(context.grants, context.now),
+    grants: context.grants,
     now: context.now,
   });
   if (decision.allowed) {
@@ -190,7 +182,7 @@ function bundleDecision(context: PurchaseContext): OfferDecision {
       requiresBundle: false,
     };
   }
-  if (activeProEndsAtMs(context.grants, context.now) !== null) {
+  if (proWindowActive(context.grants, context.now)) {
     return {
       purchasable: false,
       reason: "pro_window_active",
@@ -445,6 +437,37 @@ async function findCheckout(
     .first<CheckoutRow>();
 }
 
+/**
+ * The live checkout for one (learner, certification, SKU), if any.
+ *
+ * `request_fingerprint` is `sha256(certificationId + "\n" + sku)`, so this is the
+ * same key as `commerce_checkouts_one_open_per_fingerprint` (0019) and the same
+ * answer the index would give - the read exists so the refusal can name the
+ * checkout instead of surfacing a constraint error.
+ */
+async function findOpenCheckout(
+  database: SecurityDatabase,
+  userId: string,
+  fingerprint: string,
+): Promise<CheckoutRow | null> {
+  return findCheckout(
+    database,
+    "user_id = ? AND request_fingerprint = ? AND status = 'pending'",
+    userId,
+    fingerprint,
+  );
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  return message.includes("UNIQUE constraint failed");
+}
+
 async function readLines(
   database: SecurityDatabase,
   checkoutId: string,
@@ -494,9 +517,11 @@ function toResponse(
     redirectUrl: redirectUsable ? row.provider_redirect_url : null,
     expiresAt: row.expires_at,
     paidAt: row.paid_at,
-    // Set when a checkout can be paid and refunded; nothing in this phase can
-    // pay one, so there is no window to report.
-    refundWindowEndsAt: null,
+    // The same number the purchase receipt records (`paid_at + 7 days`, 0019):
+    // one commercial rule, imported from `pricing.ts`, so a paid checkout cannot
+    // contradict its own receipt. Null exactly while nothing has been paid.
+    refundWindowEndsAt:
+      row.paid_at === null ? null : row.paid_at + refundWindowMs,
   };
 }
 
@@ -508,6 +533,13 @@ export type CheckoutFailure =
       requiresBundle: boolean;
     }
   | { code: "idempotency-conflict" }
+  /**
+   * A different `clientCheckoutKey` for a product this learner already has an
+   * open checkout for. The existing id travels so a second tab is handed the
+   * live session (`GET /api/commerce/checkouts/:id` returns the redirect) rather
+   * than opening a second provider session and risking a second charge.
+   */
+  | { code: "checkout-already-open"; checkoutId: string }
   | { code: "provider-unavailable" }
   | { code: "checkout-not-found" };
 
@@ -588,6 +620,19 @@ export async function createCheckout(
 
   let created = false;
   if (!row) {
+    // One open checkout per (learner, certification, SKU). Two tabs with two
+    // client keys would otherwise open two provider sessions for one product,
+    // and once settlement exists both could be paid and both would grant. The
+    // existing id is returned so the second tab can be handed the live session.
+    // The partial unique index in 0019 is the race-safe backstop below.
+    const open = await findOpenCheckout(database, input.userId, fingerprint);
+    if (open) {
+      return {
+        ok: false,
+        failure: { code: "checkout-already-open", checkoutId: open.id },
+      };
+    }
+
     const context = await purchaseContext(database, input);
     if (!context) {
       return { ok: false, failure: { code: "certification-not-found" } };
@@ -608,54 +653,89 @@ export async function createCheckout(
     const totalMinor = lines.reduce((sum, line) => sum + line.amountMinor, 0);
     const expiresAt = input.now + checkoutSessionTtlMs;
     const checkoutId = mintCheckoutId();
-    const results = await database.batch([
-      database
-        .prepare(
-          `INSERT INTO commerce_checkouts (
-             id, user_id, certification_id, sku, client_checkout_key,
-             request_fingerprint, currency, total_minor, status, provider,
-             provider_session_id, provider_redirect_url, created_at, updated_at,
-             expires_at, paid_at
-           )
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, ?, ?, ?, NULL)
-           ON CONFLICT (user_id, client_checkout_key) DO NOTHING
-           RETURNING id`,
-        )
-        .bind(
-          checkoutId,
-          input.userId,
-          input.certificationId,
-          input.sku,
-          input.clientCheckoutKey,
-          fingerprint,
-          currency,
-          totalMinor,
-          provider.name,
-          input.now,
-          input.now,
-          expiresAt,
+    let results: D1Result[] = [];
+    try {
+      results = await database.batch([
+        database
+          .prepare(
+            `INSERT INTO commerce_checkouts (
+               id, user_id, certification_id, sku, client_checkout_key,
+               request_fingerprint, currency, total_minor, status, provider,
+               provider_session_id, provider_redirect_url, created_at, updated_at,
+               expires_at, paid_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, ?, ?, ?, NULL)
+             ON CONFLICT (user_id, client_checkout_key) DO NOTHING
+             RETURNING id`,
+          )
+          .bind(
+            checkoutId,
+            input.userId,
+            input.certificationId,
+            input.sku,
+            input.clientCheckoutKey,
+            fingerprint,
+            currency,
+            totalMinor,
+            provider.name,
+            input.now,
+            input.now,
+            expiresAt,
+          ),
+        ...lines.map((line, position) =>
+          lineInsert(database, checkoutId, position, line),
         ),
-      ...lines.map((line, position) =>
-        lineInsert(database, checkoutId, position, line),
-      ),
-    ]);
-
-    created = (results[0]?.results ?? []).length === 1;
-    row = created
-      ? await findCheckout(database, "id = ?", checkoutId)
-      : await findCheckout(
-          database,
-          "user_id = ? AND client_checkout_key = ?",
-          input.userId,
-          input.clientCheckoutKey,
-        );
-    if (!row) {
-      // The insert reported no row and the key still finds nothing: unresolvable
-      // here, and answering 503 is the fail-closed direction.
-      return { ok: false, failure: { code: "provider-unavailable" } };
+      ]);
+    } catch (error) {
+      // The two unique witnesses on this table can both fail here: the client
+      // key (a concurrent double-click on the same key) and the one-open-per-
+      // product index (a second tab with a different key). Both are answered,
+      // never surfaced as a 500. The batch is one transaction, so nothing was
+      // written - including the lines.
+      if (!isUniqueConstraintError(error)) throw error;
+      const replay = await findCheckout(
+        database,
+        "user_id = ? AND client_checkout_key = ?",
+        input.userId,
+        input.clientCheckoutKey,
+      );
+      if (replay) {
+        row = replay;
+        if (row.request_fingerprint !== fingerprint) {
+          return { ok: false, failure: { code: "idempotency-conflict" } };
+        }
+      } else {
+        const live = await findOpenCheckout(database, input.userId, fingerprint);
+        if (live) {
+          return {
+            ok: false,
+            failure: { code: "checkout-already-open", checkoutId: live.id },
+          };
+        }
+        // A unique failure with neither witness present is unresolvable here;
+        // fail closed rather than claim a checkout we cannot see.
+        return { ok: false, failure: { code: "provider-unavailable" } };
+      }
     }
-    if (!created && row.request_fingerprint !== fingerprint) {
-      return { ok: false, failure: { code: "idempotency-conflict" } };
+
+    if (!row) {
+      created = (results[0]?.results ?? []).length === 1;
+      row = created
+        ? await findCheckout(database, "id = ?", checkoutId)
+        : await findCheckout(
+            database,
+            "user_id = ? AND client_checkout_key = ?",
+            input.userId,
+            input.clientCheckoutKey,
+          );
+      if (!row) {
+        // The insert reported no row and the key still finds nothing: unresolvable
+        // here, and answering 503 is the fail-closed direction.
+        return { ok: false, failure: { code: "provider-unavailable" } };
+      }
+      if (!created && row.request_fingerprint !== fingerprint) {
+        return { ok: false, failure: { code: "idempotency-conflict" } };
+      }
     }
   }
 
