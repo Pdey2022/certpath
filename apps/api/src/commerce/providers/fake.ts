@@ -121,6 +121,21 @@ function parseEvent(rawBody: string): ProviderEvent | null {
   };
 }
 
+/**
+ * The fake adapter is the only one that can *sign* an event, which is what the
+ * local dev seam needs and what no other provider may be handed. A type guard
+ * rather than a cast: a provider that is not the fake keeps its three-method
+ * port and the seam stays a 404.
+ */
+export function isFakeProvider(
+  provider: PaymentProvider,
+): provider is FakePaymentProvider {
+  return (
+    provider.name === "fake" &&
+    typeof (provider as FakePaymentProvider).signEvent === "function"
+  );
+}
+
 export function createFakeProvider(
   options: FakeProviderOptions,
 ): FakePaymentProvider {

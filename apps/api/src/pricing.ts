@@ -146,13 +146,12 @@ export type ProPurchaseInput = {
   proOffered: boolean;
   /**
    * Every grant record for this account and certification, as storage returned
-   * it. The gate is handed the list, not a pre-digested window, so the row it
-   * accepts is a row 0013 will also accept: a window built from one grant's
-   * start and another's end cannot pass either test.
+   * it. **Both** sides of the gate are computed from this one list: the Standard
+   * side must be a row 0013 will accept, and the Pro side must be an overlap test
+   * 0019 will accept, so a window built from one grant's start and another's end
+   * cannot pass either check.
    */
-  standardGrants: readonly AccessGrantRecord[];
-  /** End of a live non-revoked Pro grant on this certification, or null. */
-  activeProEndsAtMs: number | null;
+  grants: readonly AccessGrantRecord[];
   now: number;
 };
 
@@ -268,17 +267,46 @@ export function standardCoverageEndMs(
 }
 
 /**
- * Pro is refused until one Standard grant covers a full Pro term, and only one
- * Pro window is live at a time. `standard-too-short` keeps its identifier and
- * now means "your Standard does not cover a full Pro term"; the fix is the
- * bundle or a Standard top-up, never a Pro that outlives Standard.
+ * True when a non-revoked Pro grant would **overlap** the window a purchase made
+ * at `now` would write.
  *
- * The repurchase gate reads the stored Pro expiry rather than re-deriving it
+ * The predicate is `learner_access_grants_one_pro_window` (0019), not a
+ * "live now" test: 0019 refuses any overlapping window, and a future-dated Pro
+ * grant overlaps one. A gate that asked `startsAt <= now < expiresAt` would allow
+ * a purchase that storage then aborts - money taken, no Pro, `needs_support` -
+ * which is the same defect class the coverage predicate fixed on the Standard
+ * axis, one axis over.
+ *
+ * Half-open windows `[a, b)` and `[c, d)` overlap iff `a < d AND c < b`. With the
+ * purchase window `[now, addTerm(now, proTerm))` that is
+ * `grant.startsAt < proEndsAt AND grant.expiresAt > now`.
+ */
+export function proWindowActive(
+  grants: readonly AccessGrantRecord[],
+  now: number,
+): boolean {
+  const proEndsAt = addTerm(now, proTerm);
+  return grants.some(
+    (grant) =>
+      grant.feature === "pro" &&
+      grant.revokedAt === null &&
+      grant.startsAt < proEndsAt &&
+      grant.expiresAt > now,
+  );
+}
+
+/**
+ * Pro is refused until one Standard grant covers a full Pro term, and only one
+ * Pro window may overlap the one being bought. `standard-too-short` keeps its
+ * identifier and now means "your Standard does not cover a full Pro term"; the
+ * fix is the bundle or a Standard top-up, never a Pro that outlives Standard.
+ *
+ * The repurchase gate reads the **stored** Pro window rather than re-deriving it
  * from a start: calendar adds do not compose, so `start + term` is not a stable
  * way to find the end of a window.
  */
 export function canPurchasePro(input: ProPurchaseInput): ProPurchaseDecision {
-  const standardIsShort = requiresBundle(input.standardGrants, input.now);
+  const standardIsShort = requiresBundle(input.grants, input.now);
   if (!input.proOffered) {
     return {
       allowed: false,
@@ -293,10 +321,7 @@ export function canPurchasePro(input: ProPurchaseInput): ProPurchaseDecision {
       requiresBundle: true,
     };
   }
-  if (
-    input.activeProEndsAtMs !== null &&
-    input.activeProEndsAtMs > input.now
-  ) {
+  if (proWindowActive(input.grants, input.now)) {
     return {
       allowed: false,
       reason: "pro-window-active",

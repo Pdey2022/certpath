@@ -17,3 +17,7 @@ ADMIN_TESTER_LOCAL=false
 COMMERCE_ENABLED=false
 PAYMENT_PROVIDER=none
 COMMERCE_WEBHOOK_SECRET=REPLACE_WITH_A_LOCAL_ONLY_VALUE_OF_AT_LEAST_32_CHARACTERS
+# The dev seam (`POST /api/commerce/dev/fake-pay`) exists only when this is the
+# exact string "true" AND PAYMENT_PROVIDER=fake. It is absent from
+# wrangler.jsonc, which means off everywhere but a local .dev.vars.
+LOCAL_COMMERCE_DEV_TOOLS=false

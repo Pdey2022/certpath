@@ -164,6 +164,45 @@ export const commercePurchaseNotAllowedErrorSchema = z
   })
   .strict();
 
+/**
+ * A second checkout for a product this learner already has open. The existing id
+ * travels so a second tab can be handed the live provider session
+ * (`GET /api/commerce/checkouts/:checkoutId`) instead of opening a second one.
+ */
+export const commerceCheckoutAlreadyOpenErrorSchema = z
+  .object({
+    error: z
+      .object({
+        code: z.literal("checkout_already_open"),
+        requestId: z.string().min(1).max(128),
+        checkoutId: id,
+      })
+      .strict(),
+  })
+  .strict();
+
+/**
+ * The provider webhook's answer. `duplicate` is true when the event id was
+ * already recorded: the provider should stop retrying either way, so both
+ * answers are `200`.
+ */
+export const commerceWebhookResponseSchema = z
+  .object({
+    received: z.literal(true),
+    duplicate: z.boolean(),
+  })
+  .strict();
+
+/**
+ * The local-only dev seam's request. It names a checkout and nothing else: the
+ * amount, the currency and the provider reference are read from the stored row,
+ * so the seam cannot invent a payment for a price that was never charged.
+ */
+export const commerceFakePayRequestSchema = z
+  .object({ checkoutId: id })
+  .strict();
+
+
 export type CommerceSku = z.infer<typeof commerceSkuSchema>;
 export type CommerceOfferReason = z.infer<typeof commerceOfferReasonSchema>;
 export type CommerceCheckoutStatus = z.infer<
@@ -183,4 +222,13 @@ export type CommerceCheckoutResponse = z.infer<
 >;
 export type CommercePurchaseNotAllowedError = z.infer<
   typeof commercePurchaseNotAllowedErrorSchema
+>;
+export type CommerceCheckoutAlreadyOpenError = z.infer<
+  typeof commerceCheckoutAlreadyOpenErrorSchema
+>;
+export type CommerceWebhookResponse = z.infer<
+  typeof commerceWebhookResponseSchema
+>;
+export type CommerceFakePayRequest = z.infer<
+  typeof commerceFakePayRequestSchema
 >;
