@@ -29,6 +29,11 @@
 --   5. `commerce_checkouts_refunded_requires_settled_refund` - a separately named
 --      rule (not a second copy of the edge list): a checkout may only become
 --      `refunded` while a settled refund names it.
+--   6. `commerce_checkouts_refunded_requires_paid_checkout` - the second, equally
+--      separate rule about the same status: only a checkout that was once paid may
+--      be refunded. Without it a writer that forces the transition can mark a
+--      `pending` or `needs_support` row `refunded`, which is money we do not have
+--      or cannot give back.
 --
 -- Why `failed -> paid` and `failed -> needs_support` exist: a `checkout.completed`
 -- can arrive after a `checkout.failed`. Before this change the transition was
@@ -320,4 +325,26 @@ BEGIN
     WHERE line.checkout_id = NEW.id
       AND refund.status = 'settled'
   );
+END;
+
+-- A refunded checkout was paid, once. This is the **third** distinct rule about
+-- `refunded`, and the second witness: the trigger above asks "is there a settled
+-- refund naming this row?", this one asks "could money ever have moved on this
+-- row?". Neither implies the other - a forced `refunded` on a `pending` row has no
+-- settled refund *and* no payment, and a `needs_support` row is money we hold that
+-- no policy lets us give back yet (#83).
+--
+-- Created last on purpose. Of the BEFORE UPDATE triggers on this table SQLite
+-- fires the newest first, and this is the rule that should answer a writer that
+-- forces the transition; `commerce_checkouts_refunded_requires_settled_refund`
+-- still answers every `paid` row that has no settled refund, so nothing it used
+-- to catch is now missed. The settle batch itself never reaches this trigger:
+-- its checkout statement filters `status = 'paid'`, so a row it cannot move is
+-- caught by the checkout-transition count `applyRefundSettlement` returns, not
+-- here. This trigger exists for the writer that forgets that filter.
+CREATE TRIGGER commerce_checkouts_refunded_requires_paid_checkout
+BEFORE UPDATE OF status ON commerce_checkouts
+WHEN NEW.status = 'refunded' AND OLD.status NOT IN ('paid', 'refunded')
+BEGIN
+  SELECT RAISE(ABORT, 'only a paid checkout can be refunded');
 END;

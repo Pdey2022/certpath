@@ -32,6 +32,13 @@ import { readSnapshotLines, termOf } from "./webhooks.ts";
 // `paid_at`; the runtime re-checks the arithmetic and refuses `409` if it ever
 // breaks.
 //
+// That check runs **again** at settle time, and there it can only refuse. A
+// purchase that lands while the provider is being called cannot be added to the
+// refund - the lines are immutable and the provider has already been told the
+// amount - so a set that no longer passes the guard leaves the refund `requested`,
+// every grant intact and the answer `503`. Money returned with access retained is
+// the fail-closed direction; the operator resolves the ledger.
+//
 // A refund revokes rather than expires, so `evaluateAccess` filters the grant out
 // and the learner is locked with no grace - ADR 0005's grace is defined for the
 // expiry of a grant that is still there.
@@ -238,6 +245,17 @@ async function readRefundLines(
   return rows.results;
 }
 
+/**
+ * Any non-`failed` refund for this (account, exam), whoever requested it.
+ *
+ * `requested_by_user_id` is deliberately **not** filtered, unlike the partial
+ * index: a staff-requested row is still a refund of this exam, and two payouts
+ * for one entitlement is the error we cannot undo, so a Phase 5 staff refund
+ * blocking the learner's self-serve one is the fail-closed direction. When the
+ * staff route lands this predicate needs the same `requested_by_user_id`
+ * narrowing the index already has, or the learner must be told support is
+ * handling it. Phase 5 follow-up, recorded so it is not discovered by surprise.
+ */
 async function anotherRefundForExam(
   database: SecurityDatabase,
   userId: string,
@@ -730,6 +748,19 @@ async function settleWithProvider(
     now,
   );
   if (!settled) {
+    // A second request can settle this refund while ours loses every
+    // compare-and-swap: a double submit, two tabs, a retried request. The batch
+    // then cannot match a `requested` row, because the refund is already
+    // `settled`. Answering `503 provider_unavailable` for a refund that succeeded
+    // is a lie, so the re-read decides: a settled refund is projected exactly as
+    // a replay would be, and only an unsettled one is an outage.
+    const raced = await readRefundById(database, identity.refundId);
+    if (raced?.status === "settled") {
+      const value = await projectSettledRefund(database, raced);
+      return value === null
+        ? { ok: false, failure: { code: "provider-unavailable" } }
+        : { ok: true, status: 200, value };
+    }
     return { ok: false, failure: { code: "provider-unavailable" } };
   }
   const refund = await readRefundById(database, identity.refundId);
@@ -781,11 +812,24 @@ export interface RefundSettlementPlan {
  * Every statement returns its row and the caller counts rows, never
  * `meta.changes`: `learner_access_grants` has an AFTER INSERT audit trigger, so
  * `changes` counts the audit row too.
+ *
+ * All four witnesses (settled, revoked, checkouts, receipts) are returned, and
+ * `settleRefund` compares each to the plan it executed. A count that is short is
+ * not cosmetic: statement 4 filters `status = 'paid'`, so a checkout that is
+ * `pending` or `needs_support` when the batch runs matches **zero** rows and
+ * fires no trigger at all - revocations and a settled refund would commit with the
+ * checkout left exactly as it was. Neither the settle statement's compare-and-swap
+ * nor any trigger can see that row; the returned count can.
  */
 export async function applyRefundSettlement(
   database: SecurityDatabase,
   plan: RefundSettlementPlan,
-): Promise<{ settled: boolean; revoked: number; receipts: number }> {
+): Promise<{
+  settled: boolean;
+  revoked: number;
+  checkouts: number;
+  receipts: number;
+}> {
   const statements: D1PreparedStatement[] = [];
   const labels: string[] = [];
 
@@ -916,20 +960,24 @@ export async function applyRefundSettlement(
   const settled =
     (results[labels.indexOf("settle")]?.results ?? []).length === 1;
   let revoked = 0;
+  let checkouts = 0;
   let receipts = 0;
   labels.forEach((label, index) => {
     const rows = (results[index]?.results ?? []).length;
     if (label.startsWith("revoke:")) revoked += rows;
+    if (label === "checkout") checkouts += rows;
     if (label === "receipt") receipts += rows;
   });
-  return { settled, revoked, receipts };
+  return { settled, revoked, checkouts, receipts };
 }
 
 /**
  * Settle a refund the provider has confirmed, retrying a lost compare-and-swap
  * with a fresh read. The revoke set is recomputed from storage each attempt but
  * never changes membership: the lines are immutable and the provider has already
- * refunded those payments, so the refund revokes exactly what it was decided for.
+ * refunded those payments, so the refund revokes exactly what it was decided for
+ * - and if that decision no longer survives the guard, the attempt is refused
+ * rather than quietly expanded.
  */
 async function settleRefund(
   database: SecurityDatabase,
@@ -949,13 +997,41 @@ async function settleRefund(
     if (!plan) continue;
     try {
       const witness = await applyRefundSettlement(database, plan);
-      if (witness.settled) return true;
-    } catch {
-      // The batch is one transaction, so nothing was written; re-read and retry.
+      if (settledExactlyAsPlanned(witness, plan)) return true;
+    } catch (error) {
+      // The batch is one transaction, so a constraint abort wrote nothing and the
+      // next attempt re-reads. Anything that is **not** a constraint failure is
+      // not a lost race: it is a bug or an outage we have not diagnosed, and
+      // reporting it as `503 provider_unavailable` would both hide it and invite
+      // a retry that cannot help.
+      if (!isConstraintFailure(error)) throw error;
       continue;
     }
   }
   return false;
+}
+
+/**
+ * Every witness the batch returns must match the plan it executed. `settled` on
+ * its own is not enough: the settle statement's compare-and-swap cannot see a
+ * checkout that statement 4 refused to move, because that statement filters
+ * `status = 'paid'` and a row it never touches fires no trigger.
+ */
+function settledExactlyAsPlanned(
+  witness: {
+    settled: boolean;
+    revoked: number;
+    checkouts: number;
+    receipts: number;
+  },
+  plan: RefundSettlementPlan,
+): boolean {
+  return (
+    witness.settled &&
+    witness.revoked === plan.revocations.length &&
+    witness.checkouts === plan.checkouts.length &&
+    witness.receipts === plan.receipts.length
+  );
 }
 
 async function buildRefundSettlementPlan(
@@ -975,12 +1051,32 @@ async function buildRefundSettlementPlan(
   const revokedIds = new Set(
     [...split.pro, ...split.standard].map((grant) => grant.id),
   );
-  const remainingStandardCount = grants.filter(
+  const remainingStandard = grants.filter(
     (grant) =>
       grant.feature === "standard" &&
       grant.revoked_at === null &&
       !revokedIds.has(grant.id),
-  ).length;
+  );
+  // The coverage-gap guard (owner decision 1, docs/commerce-refunds.md §15), re-run
+  // against storage rather than trusted from the request-time plan. Between the
+  // decision and this batch a second purchase can be settled (a second tab, a
+  // webhook that arrived late), and every Standard purchase appends to the latest
+  // end - so revoking this purchase would leave the learner with coverage that
+  // starts later and nothing live now: locked out with no purchasable route back,
+  // which is exactly the shape §4.2 refuses.
+  //
+  // A retry cannot repair that by adding the new checkout to the refund: the lines
+  // are immutable and the provider has already been told the amount. So this
+  // attempt is refused, every retry is refused, and `settleRefund` answers `503`
+  // with the refund `requested`, access live and money returned.
+  const liveAtNow = remainingStandard.some(
+    (grant) => grant.starts_at <= now && now < grant.expires_at,
+  );
+  const startsInFuture = remainingStandard.some(
+    (grant) => grant.starts_at > now,
+  );
+  if (!liveAtNow && startsInFuture) return null;
+  const remainingStandardCount = remainingStandard.length;
 
   const revocations: PlannedRevocation[] = [];
   for (const grant of split.pro) {

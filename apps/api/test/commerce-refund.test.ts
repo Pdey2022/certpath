@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   commerceCheckoutResponseSchema,
   commerceRefundResponseSchema,
+  learnerDashboardResponseSchema,
 } from "@certpath/contracts";
 import { createApi } from "../src/index.ts";
 import { addTerm } from "../src/calendar.ts";
@@ -41,6 +42,13 @@ const baseClock = Date.parse("2026-02-01T00:00:00.000Z");
 let now = baseClock;
 let refundCalls = 0;
 let refundBehaviour: "succeed" | "throw" | RefundResult = "succeed";
+/**
+ * A seam that runs *while* the provider call is in flight, which is the only
+ * place a race with another request or another tab can be reproduced: a second
+ * settlement, or a second submit that settles this refund first. Cleared before
+ * it runs, so a hook that calls the refund route cannot recurse.
+ */
+let refundHook: (() => Promise<void>) | null = null;
 
 const fake = createFakeProvider({
   secret: webhookSecret,
@@ -50,13 +58,17 @@ const fake = createFakeProvider({
 
 /**
  * The fake adapter with a refund seam: a test can make the provider decline or
- * time out, and count how many times money was asked for. `signEvent` is kept, so
- * the dev seam still recognises the adapter.
+ * time out, count how many times money was asked for, and run a callback between
+ * the request and the answer. `signEvent` is kept, so the dev seam still
+ * recognises the adapter.
  */
 const provider: FakePaymentProvider = {
   ...fake,
   async refund(input) {
     refundCalls += 1;
+    const hook = refundHook;
+    refundHook = null;
+    if (hook) await hook();
     if (refundBehaviour === "throw") throw new Error("provider timeout");
     if (refundBehaviour !== "succeed") return refundBehaviour;
     return { status: "succeeded", refundRef: `fake_refund_${input.refundId}` };
@@ -113,6 +125,38 @@ async function exam(options: { proEnabled?: boolean } = {}): Promise<string> {
     await createProEnablement(database, certificationId, ownerUserId);
   }
   return certificationId;
+}
+
+/**
+ * One exam version row, written directly.
+ *
+ * The practice routes resolve a version before they look at content, and the
+ * dashboard joins one, so an exam with no version asserts nothing: a missing group
+ * or a refused attempt would be true before the refund as well. This file tests
+ * commerce, not content, so the version is a fixture rather than a published one.
+ */
+async function examVersion(certificationId: string): Promise<string> {
+  const id = crypto.randomUUID();
+  const createdByUserId = await createTestLearnerUser(database);
+  await database
+    .prepare(
+      `INSERT INTO exam_versions (
+         id, certification_id, version_key, title, syllabus_reference,
+         effective_from, effective_until, created_by_user_id,
+         created_operation_id, creation_reason, created_at)
+       VALUES (?, ?, ?, 'Synthetic exam version', 'Synthetic syllabus', NULL,
+               NULL, ?, ?, 'Synthetic test fixture', ?)`,
+    )
+    .bind(
+      id,
+      certificationId,
+      `version-${id}`,
+      createdByUserId,
+      `fixture-exam-version:${id}`,
+      now,
+    )
+    .run();
+  return id;
 }
 
 interface CallOptions {
@@ -213,6 +257,26 @@ async function refund(
   });
 }
 
+/**
+ * A practice attempt start. Its body is §8.4's business, not this PR's: the point
+ * here is that after a refund the route refuses for want of access.
+ */
+function startPractice(
+  actor: Learner,
+  certificationId: string,
+  examVersionId: string,
+): Promise<Response> {
+  return call("/api/practice/attempts", {
+    actor,
+    body: {
+      certificationId,
+      examVersionId,
+      questionCount: 5,
+      requestId: crypto.randomUUID(),
+    },
+  });
+}
+
 async function checkoutRow(checkoutId: string) {
   return database
     .prepare(
@@ -260,13 +324,38 @@ describe("refunds", () => {
     now = baseClock;
     refundCalls = 0;
     refundBehaviour = "succeed";
+    refundHook = null;
   });
 
   it("settles a Standard-only refund and ends access with no grace", async () => {
+    // Real time, not the synthetic clock: the practice routes read the session and
+    // the grants at `Date.now()`, so a fixture bought in February 2026 would look
+    // expired to them before any refund ran, and §11 #12's two assertions would
+    // pass for the wrong reason.
+    now = Date.now();
     const actor = await learner();
     const certificationId = await exam();
+    const examVersionId = await examVersion(certificationId);
     const checkoutId = await buy(actor, certificationId, "standard-3m", now);
     const paidAt = (await checkoutRow(checkoutId))!.paid_at!;
+
+    // Before the refund: the exam is on the dashboard and an attempt is refused
+    // only for want of content, which is what makes the "after" pair below about
+    // the revocation rather than about an empty fixture.
+    const dashboardBefore = await call("/api/practice/dashboard", { actor });
+    expect(dashboardBefore.status).toBe(200);
+    expect(
+      learnerDashboardResponseSchema
+        .parse(await dashboardBefore.json())
+        .groups.map((group) => group.certificationId),
+    ).toContain(certificationId);
+    const attemptBefore = await startPractice(
+      actor,
+      certificationId,
+      examVersionId,
+    );
+    expect(attemptBefore.status).toBe(409);
+
     refundCalls = 0;
 
     const response = await refund(actor, checkoutId);
@@ -336,6 +425,27 @@ describe("refunds", () => {
     expect(can(access, "results")).toBe(false);
     expect(can(access, "practice")).toBe(false);
     expect(can(access, "mock")).toBe(false);
+
+    // §11 #12's second half, at the routes the learner actually calls: the exam is
+    // gone from the dashboard and a fresh attempt is refused. Neither is a
+    // client-side decision - the dashboard query already selects `revoked_at IS
+    // NULL`, so the refunded grant never reaches it.
+    const dashboardAfter = await call("/api/practice/dashboard", { actor });
+    expect(dashboardAfter.status).toBe(200);
+    expect(
+      learnerDashboardResponseSchema
+        .parse(await dashboardAfter.json())
+        .groups.filter((group) => group.certificationId === certificationId),
+    ).toHaveLength(0);
+    const attemptAfter = await startPractice(
+      actor,
+      certificationId,
+      examVersionId,
+    );
+    expect(attemptAfter.status).toBe(403);
+    expect(
+      ((await attemptAfter.json()) as { error: { code: string } }).error.code,
+    ).toBe("access_required");
 
     // The checkout read stops advertising a window once it has been used.
     const read = await call(`/api/commerce/checkouts/${checkoutId}`, { actor });
@@ -607,6 +717,97 @@ describe("refunds", () => {
     if (settledBody.status !== "settled") throw new Error("expected settled");
     expect(settledBody.refundId).toBe(pendingBody.refundId);
     expect(refundCalls).toBe(2);
+    expect(await refundCount(actor.userId)).toBe(1);
+  });
+
+  it("answers 503 and keeps access when a purchase lands during the provider call", async () => {
+    // The coverage-gap guard's race (owner decision 1, §15 of the design), and the
+    // one §4.3 originally got wrong. The learner owns live Standard `A` and asks to
+    // refund it; the gap guard passes because `A` is the only grant. While the
+    // provider is being called a second tab settles chained Standard `B`, whose
+    // window starts where `A`'s ends. Revoking `A` now would leave *future but not
+    // present* coverage - a locked-out learner with no purchasable route back - so
+    // the settle must refuse.
+    //
+    // A retry cannot repair it by adding `B`: the lines are immutable and the
+    // provider has already been told the amount. So the answer is 503 with the
+    // refund `requested`: money returned, access retained, an operator resolves.
+    now = baseClock;
+    const actor = await learner();
+    const certificationId = await exam();
+    const live = await buy(actor, certificationId, "standard-3m", now);
+    const chained = await openCheckout(actor, certificationId, "standard-3m");
+
+    refundHook = async () => {
+      const paid = await call("/api/commerce/dev/fake-pay", {
+        actor,
+        body: { checkoutId: chained },
+      });
+      expect(paid.status).toBe(200);
+    };
+
+    const response = await refund(actor, live);
+    expect(response.status).toBe(503);
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe("provider_unavailable");
+
+    // The race really happened: two Standard grants exist, so the guard was
+    // exercised rather than skipped.
+    const rows = await grants(actor.userId, certificationId);
+    expect(rows.results).toHaveLength(2);
+    expect(rows.results.every((grant) => grant.revoked_at === null)).toBe(true);
+    expect((await checkoutRow(live))!.status).toBe("paid");
+
+    // The ledger keeps the decision: `requested` is the work queue, and writing
+    // `failed` for a refund the provider has already paid would be a lie.
+    const refunds = await database
+      .prepare(
+        "SELECT status, settled_at FROM commerce_refunds WHERE user_id = ?",
+      )
+      .bind(actor.userId)
+      .all<{ status: string; settled_at: number | null }>();
+    expect(refunds.results).toHaveLength(1);
+    expect(refunds.results[0]!.status).toBe("requested");
+    expect(refunds.results[0]!.settled_at).toBeNull();
+
+    const access = evaluateAccess(
+      await readAccountGrants(database, actor.userId, certificationId),
+      now,
+    );
+    expect(access.standard.state).toBe("active");
+    expect(can(access, "practice")).toBe(true);
+  });
+
+  it("answers 200 for a refund a concurrent request settled first", async () => {
+    // A double submit: both calls reach the provider, the *other* request wins the
+    // settle, and ours then loses every compare-and-swap because the refund is
+    // already `settled` - statement 3 cannot match a `requested` row. Answering
+    // `503 provider_unavailable` there would report an outage for a refund that
+    // succeeded, so the re-read decides.
+    now = baseClock;
+    const actor = await learner();
+    const certificationId = await exam();
+    const checkoutId = await buy(actor, certificationId, "standard-3m", now);
+
+    let settledElsewhere: unknown = null;
+    refundHook = async () => {
+      const other = await refund(actor, checkoutId);
+      expect(other.status).toBe(200);
+      settledElsewhere = await other.json();
+    };
+
+    const response = await refund(actor, checkoutId);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(commerceRefundResponseSchema.parse(body).status).toBe("settled");
+
+    // Identical to a plain replay, because the body is a projection of storage and
+    // not of whichever request happened to do the writing.
+    expect(body).toEqual(settledElsewhere);
+    const replay = await refund(actor, checkoutId);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(body);
     expect(await refundCount(actor.userId)).toBe(1);
   });
 

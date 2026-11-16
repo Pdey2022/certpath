@@ -17,11 +17,13 @@ import {
 
 // The guards, proven at storage.
 //
-// Every case here is **direct SQL**, not a route call, because the point is that
-// storage refuses what the route would have prevented: a future writer that
-// forgets the rule still cannot break the invariant. Each case names the exact
-// SQLite message it expects, so a replacement trigger that renames or re-narrows
-// a rule fails here.
+// Almost every case here is **direct SQL**, not a route call, because the point
+// is that storage refuses what the route would have prevented: a future writer
+// that forgets the rule still cannot break the invariant. The exceptions say so
+// where they happen - case 10 drives the route to reach a genuinely refunded
+// row, and case 12 calls the settle module so it can hand in a count that no
+// route would produce. Each case names the exact SQLite message it expects, so a
+// replacement trigger that renames or re-narrows a rule fails here.
 
 const database: SecurityDatabase = env.DB;
 const origin = "https://localhost";
@@ -293,7 +295,60 @@ describe("refund guards", () => {
     expect((await checkoutRow(checkoutId))!.status).toBe("paid");
   });
 
-  it("3. refuses a refund receipt for a requested refund or a mismatched total", async () => {
+  it("3. refuses `refunded` on a checkout that could never have been paid", async () => {
+    // The hole this closes: the settle batch's checkout statement filters
+    // `status = 'paid'`, so a checkout that is `pending` or `needs_support` when
+    // the batch runs matches 0 rows and fires no trigger - revocations and a
+    // settled refund would commit with the checkout left exactly as it was.
+    // Neither the settle compare-and-swap nor a trigger can see that row. Two
+    // rules close it: this trigger for a writer that forces the transition, and
+    // the checkout count `applyRefundSettlement` returns for the statement that
+    // matched nothing.
+    const pendingCheckoutId = await openCheckout(
+      actor,
+      certificationId,
+      "standard-3m",
+    );
+    await abortWith(
+      database
+        .prepare(
+          `UPDATE commerce_checkouts SET status = 'refunded', updated_at = ?
+           WHERE id = ?`,
+        )
+        .bind(clock, pendingCheckoutId)
+        .run(),
+      "only a paid checkout can be refunded",
+    );
+    expect((await checkoutRow(pendingCheckoutId))!.status).toBe("pending");
+
+    // `needs_support` is money we hold that could not be granted; refunding it is
+    // #83's open policy, so a direct write must abort here as well.
+    const parkedCheckoutId = await openCheckout(
+      actor,
+      certificationId,
+      "standard-6m",
+    );
+    await database
+      .prepare(
+        `UPDATE commerce_checkouts SET status = 'needs_support', paid_at = ?,
+                updated_at = ? WHERE id = ?`,
+      )
+      .bind(clock, clock, parkedCheckoutId)
+      .run();
+    await abortWith(
+      database
+        .prepare(
+          `UPDATE commerce_checkouts SET status = 'refunded', updated_at = ?
+           WHERE id = ?`,
+        )
+        .bind(clock, parkedCheckoutId)
+        .run(),
+      "only a paid checkout can be refunded",
+    );
+    expect((await checkoutRow(parkedCheckoutId))!.status).toBe("needs_support");
+  });
+
+  it("4. refuses a refund receipt for a requested refund or a mismatched total", async () => {
     const checkoutId = await buy(actor, certificationId, "standard-3m");
     const refundId = await insertRefund({
       userId: actor.userId,
@@ -341,7 +396,7 @@ describe("refund guards", () => {
     await insertReceipt(5900);
   });
 
-  it("4. enforces one self-serve refund per (account, exam) and exempts a staff requester", async () => {
+  it("5. enforces one self-serve refund per (account, exam) and exempts a staff requester", async () => {
     const capped = await learner();
     const cappedExam = await exam();
     const first = await insertRefund({
@@ -374,7 +429,7 @@ describe("refund guards", () => {
     expect(checkoutId.length).toBeGreaterThan(0);
   });
 
-  it("5. refuses a refund line for a pending checkout, a wrong amount or a closed window", async () => {
+  it("6. refuses a refund line for a pending checkout, a wrong amount or a closed window", async () => {
     const checkoutId = await buy(actor, certificationId, "standard-3m");
     const pendingCheckoutId = await (async () => {
       const created = await call("/api/commerce/checkouts", {
@@ -425,7 +480,7 @@ describe("refund guards", () => {
     );
   });
 
-  it("6. refuses a second line for a checkout already refunded", async () => {
+  it("7. refuses a second line for a checkout already refunded", async () => {
     const checkoutId = await buy(actor, certificationId, "standard-3m");
     const first = await insertRefund({
       userId: actor.userId,
@@ -447,7 +502,7 @@ describe("refund guards", () => {
     );
   });
 
-  it("7. keeps a refund's terminal states terminal", async () => {
+  it("8. keeps a refund's terminal states terminal", async () => {
     const refundId = await insertRefund({ userId: actor.userId, certificationId });
     await database
       .prepare("UPDATE commerce_refunds SET status = 'failed' WHERE id = ?")
@@ -469,7 +524,49 @@ describe("refund guards", () => {
     );
   });
 
-  it("8. refuses to resurrect a refunded checkout", async () => {
+  it("9. keeps the refund ledger append-only", async () => {
+    // §11 #18: the set of checkouts a settled refund covered is not editable after
+    // the money moved, and the decision record is frozen except for the provider's
+    // answer. Direct SQL, because the point is that storage refuses what no route
+    // would even try.
+    const checkoutId = await buy(actor, certificationId, "standard-3m");
+    const refundId = await insertRefund({
+      userId: actor.userId,
+      certificationId,
+    });
+    await insertLine({ refundId, checkoutId });
+
+    await abortWith(
+      database
+        .prepare(
+          "UPDATE commerce_refund_lines SET amount_minor = 5900 WHERE refund_id = ?",
+        )
+        .bind(refundId)
+        .run(),
+      "refund lines cannot change once recorded",
+    );
+    await abortWith(
+      database
+        .prepare("DELETE FROM commerce_refund_lines WHERE refund_id = ?")
+        .bind(refundId)
+        .run(),
+      "refund lines cannot be deleted",
+    );
+    // The amount is the field a "helpful" retry would most like to edit: the
+    // provider was told a number, and the ledger must not be re-priced under it.
+    await abortWith(
+      database
+        .prepare("UPDATE commerce_refunds SET amount_minor = 1 WHERE id = ?")
+        .bind(refundId)
+        .run(),
+      "refunds are immutable except the provider answer",
+    );
+  });
+
+  it("10. refuses to resurrect a refunded checkout", async () => {
+    // The only case here that drives the route: a genuinely refunded row can only
+    // be produced by the settlement that the other cases test at storage, and the
+    // assertion below is still direct SQL.
     const checkoutId = await buy(actor, certificationId, "standard-3m");
     const response = await call(
       `/api/commerce/checkouts/${checkoutId}/refund`,
@@ -487,7 +584,7 @@ describe("refund guards", () => {
     );
   });
 
-  it("9. re-asserts 0019's edges after the replacement", async () => {
+  it("11. re-asserts 0019's edges after the replacement", async () => {
     // The bug class this catches: a replacement trigger that silently drops an
     // edge 0019 added. `expired -> needs_support` is the one that would turn a
     // parked late payment back into a permanent 5xx with the money taken.
@@ -549,9 +646,36 @@ describe("refund guards", () => {
         .run(),
     ).resolves.toBeDefined();
     expect((await checkoutRow(paidToPark))!.status).toBe("needs_support");
+
+    // The two pre-payment edges, so the re-assertion is exhaustive rather than
+    // only covering the edges the refund path happens to use: a replacement that
+    // dropped `pending -> failed` would strand a `checkout.failed` event, and one
+    // that dropped `pending -> expired` would leave `expireStaleCheckouts` unable
+    // to record an expiry at all.
+    const toFailed = await openCheckout(actor, certificationId, "standard-3m");
+    await expect(
+      database
+        .prepare(
+          "UPDATE commerce_checkouts SET status = 'failed', updated_at = ? WHERE id = ?",
+        )
+        .bind(clock, toFailed)
+        .run(),
+    ).resolves.toBeDefined();
+    expect((await checkoutRow(toFailed))!.status).toBe("failed");
+
+    const toExpired = await openCheckout(actor, certificationId, "standard-6m");
+    await expect(
+      database
+        .prepare(
+          "UPDATE commerce_checkouts SET status = 'expired', updated_at = ? WHERE id = ?",
+        )
+        .bind(clock, toExpired)
+        .run(),
+    ).resolves.toBeDefined();
+    expect((await checkoutRow(toExpired))!.status).toBe("expired");
   });
 
-  it("10. aborts the whole settle batch when the compare-and-swap is stale", async () => {
+  it("12. aborts the whole settle batch when the compare-and-swap is stale", async () => {
     const checkoutId = await buy(actor, certificationId, "standard-3m");
     const grantId = await grantIdFor(checkoutId, "standard");
     const checkout = (await checkoutRow(checkoutId))!;

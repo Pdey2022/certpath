@@ -239,6 +239,7 @@ Storage guards, each a trigger rather than a convention:
 | `commerce_checkouts_immutable` | any change to `user_id`, `certification_id`, `sku`, `client_checkout_key`, `request_fingerprint`, `currency`, `total_minor`, `provider`, `created_at`, `expires_at`, and (from 0019) any change to `paid_at` or `provider_session_id` **once they are set** |
 | `commerce_checkouts_status_transition` (replaced in 0019 and again in 0020) | any edge outside `pending → {paid, failed, expired, needs_support}`, `expired → {paid, needs_support}`, `failed → {paid, needs_support}`, `paid → {refunded, needs_support}` (no-op same-status writes are allowed) |
 | `commerce_checkouts_refunded_requires_settled_refund` (0020) | a `refunded` transition with no settled refund naming the checkout |
+| `commerce_checkouts_refunded_requires_paid_checkout` (0020) | a forced `refunded` on a row that was never `paid` — `pending` or `needs_support` |
 | `commerce_checkouts_no_delete` | every delete |
 | `commerce_checkouts_one_open_per_fingerprint` (0019, an index) | a second `pending` row for one `(user_id, request_fingerprint)` |
 
@@ -262,11 +263,13 @@ invisible.
 
 `paid → refunded` arrived in `0020`, guarded by
 `commerce_checkouts_refunded_requires_settled_refund`: a checkout may only become
-`refunded` while a settled refund names it. The edge list is **replaced**, not
+`refunded` while a settled refund names it, and by
+`commerce_checkouts_refunded_requires_paid_checkout`: only a row that was `paid` may
+become `refunded` at all. The edge list is **replaced**, not
 supplemented — `0020` drops and recreates the trigger, restating every edge
 `0018` and `0019` added, and
 `test/commerce-checkout.test.ts` ("allows only the documented status edges") plus
-`test/commerce-refund-guards.test.ts` (case 9) re-assert `expired → needs_support`
+`test/commerce-refund-guards.test.ts` (case 11) re-assert `expired → needs_support`
 so a future replacement cannot silently re-narrow it.
 
 `paid_at` and `provider_session_id` are write-once as of 0019: the first write is
@@ -463,7 +466,11 @@ so that refusal is the reason it exists.
 checkout_not_found` for anyone else's, indistinguishable from a nonexistent id —
 the owner is in the `WHERE`, not in an `if` above it. `redirectUrl` is the stored
 provider URL while the checkout is pending (or before its own expiry), and `null`
-once it can no longer be used.
+once it can no longer be used — which includes a `refunded` checkout: there is
+nothing left to pay, and no session to send the learner back to. The same read
+returns `refundWindowEndsAt` while a window exists and `null` once the checkout is
+`refunded`, because the window has been used and `paid_at` is preserved by 0018's
+money/status CHECK.
 
 `expireStaleCheckouts(database, now)` marks pending checkouts whose `expires_at`
 has passed as `expired` and returns how many (`RETURNING id`, never
@@ -695,7 +702,7 @@ learner may buy Pro again. This strengthens 0013/0014 and relaxes nothing.
 
 ## Refunds — `0020_refunds.sql`
 
-Two tables, five rules of their own, one replacement and one new trigger on
+Two tables, five rules of their own, one replacement and two new triggers on
 `commerce_checkouts`. Full design: [`docs/commerce-refunds.md`](commerce-refunds.md).
 
 ### `commerce_refunds` and `commerce_refund_lines`
@@ -719,6 +726,7 @@ copy of the seven-day constant.
 | no second payout | `commerce_refund_lines_not_already_settled` | a line for a checkout that already appears in a settled refund — the guard that survives a future staff route, which the one-per-exam index does not cover |
 | append-only | `commerce_refund_lines_no_update/_no_delete`, `commerce_refunds_no_delete` | every edit and delete of a money record |
 | a refunded checkout has a witness | `commerce_checkouts_refunded_requires_settled_refund` | `paid → refunded` with no settled refund naming that checkout |
+| a refunded checkout was paid | `commerce_checkouts_refunded_requires_paid_checkout` | `refunded` from any status other than `paid` (or a same-status no-op) — a `pending` or `needs_support` row whose money we do not hold, or may not return yet (#83) |
 
 ### The refund protocol, in one paragraph
 
@@ -729,7 +737,15 @@ other order), settles the refund under a compare-and-swap that counts the
 revocations it just wrote, moves each checkout to `refunded`, and writes one
 refund receipt per checkout. Every witness is a statement in the same
 transaction, so a lost compare-and-swap fails the whole batch instead of
-committing a refunded checkout with live access. A refund **revokes** rather than
+committing a refunded checkout with live access — and every witness is *counted*
+against the plan, because the checkout statement filters `status = 'paid'`, so a
+row it cannot move would otherwise match nothing and fire no trigger. If a
+purchase settles while the provider call is in flight, the batch cannot add it (the
+lines are immutable and the provider has the amount) and the coverage-gap guard
+refuses at settle time: the answer is `503 provider_unavailable` with the refund
+left `requested`, every grant intact, the checkout still `paid` and access live.
+Money returned with access retained, and an operator resolves the ledger — nothing
+is silently expanded and nothing is silently revoked. A refund **revokes** rather than
 expires, so `evaluateAccess` filters the grant out and the learner is locked with
 no grace — ADR 0005's grace is defined for expiry of a grant that still exists.
 
