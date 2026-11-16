@@ -240,10 +240,17 @@ the same rule's other half and is added by `0019`: a late payment that cannot be
 applied — an amount that disagrees with the snapshot, or a Pro leg that aborts at
 the one-Pro-window trigger — has to be *recorded* as `needs_support`, because that
 record is the work queue for money the learner actually paid. While the edge was
-missing, `markNeedsSupport` aborted its own batch, took the event row down with
-it, and the provider retried a real charge forever. A row our own expiry closed is
-never left `expired` once money has moved: the CHECK forbids `paid_at` on
-`expired`, so leaving it there would make the payment invisible. `paid → refunded`
+missing, `markNeedsSupport` aborted its own batch and the delivery became a `503`
+with the learner's money already taken; what the provider saw next depended on
+the shape. A Pro leg that aborted rolled the settlement batch back, so no event
+row existed and every retry repeated the `503`. An amount mismatch applied
+nothing but had already committed the event row as `ignored-inconsistent`, so the
+next delivery answered `200 {duplicate: true}` and left the row `expired` with
+`paid_at` NULL and the money visible only in `commerce_provider_events` —
+recorded, unqueued, and still invisible to anything that reads checkouts. A row
+our own expiry closed is never left `expired` once money has moved: the CHECK
+forbids `paid_at` on `expired`, so leaving it there would make the payment
+invisible. `paid → refunded`
 is **not** permitted yet — the `refunded` value is in the enum because the column
 must accept it when the refund change lands, but its witness (`commerce_refunds`)
 does not exist, and a refunded checkout with no refund record is exactly the state

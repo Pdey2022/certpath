@@ -914,8 +914,11 @@ describe("what settlement refuses to do", () => {
   it("parks a late payment whose amount disagrees on a row our own expiry closed", async () => {
     // B1: the late-payment path meets our own expiry. `expired -> needs_support`
     // is the only edge that can record this, and while it was illegal the park
-    // aborted, the event row rolled back with it, and the provider retried a real
-    // charge forever.
+    // aborted and the delivery became a `503`. This shape had already committed
+    // its event row as `ignored-inconsistent`, so the next delivery answered
+    // `200 {duplicate: true}` and left the row `expired` with `paid_at` NULL and
+    // the money visible only in `commerce_provider_events`. The Pro-abort shape
+    // failed differently: no event row, so every retry repeated the `503`.
     const { actor, certificationId } = await purchaserOf("standard-3m");
     const checkout = await createCheckout(actor, certificationId, "standard-3m");
     await database

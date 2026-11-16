@@ -35,6 +35,9 @@ need an owner or architect decision.
   leave it for manual handling. Settlement records the money and the parked
   checkout; it implements no policy, and `docs/commerce.md` §Failure paths names
   this as the owner's.
+- Which clock starts the refund window for money parked in `needs_support` — the
+  charge instant or the `paid_at` we recorded when we learned of it; `0019`
+  records only the latter.
 - Monitoring, alerting and on-call expectations for the pilot.
 
 ## Architect decisions still open
