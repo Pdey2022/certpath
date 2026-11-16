@@ -1,15 +1,16 @@
 import { z } from "zod";
 
 // Contracts for the commerce surface: the offers projection, checkout creation
-// and the checkout read, the provider webhook's acknowledgement, and the local
-// dev seam's request.
+// and the checkout read, the refund, the receipts read, the provider webhook's
+// acknowledgement, and the local dev seam's request.
 //
-// Nothing here carries a card, a learner identity, a receipt or a refund. The
-// webhook acknowledgement is `{ received, duplicate }` and no more - the stored
-// receipt is a database row that no response in this phase returns - and refunds
-// do not exist yet. The checkout shapes carry no price of their own either -
-// every `amountMinor` in a response is the value the server copied out of
-// `apps/api/src/pricing.ts`, which is the only place a price constant may live.
+// Nothing here carries a card, a learner identity or a credential. A receipt
+// appears here as a stored record - `delivery` has one legal value, `stored`, and
+// there is no transport - and it carries no tax statement, because no tax is
+// computed and no column exists for one. The webhook acknowledgement is
+// `{ received, duplicate }` and no more. Every `amountMinor` in a response is the
+// value the server copied out of `apps/api/src/pricing.ts` or out of a stored
+// snapshot of it, which is the only place a price constant may live.
 //
 // `.strict()` everywhere: an unexpected field is a client bug and must fail
 // loudly rather than be ignored.
@@ -199,6 +200,178 @@ export const commerceWebhookResponseSchema = z
   .strict();
 
 /**
+ * A self-serve refund request. `reason` is learner free text, capped at the
+ * storage limit (200) and refused if it looks like an address: a free-text field
+ * must not become an unlogged email channel. The text is stored once, on the
+ * learner's own refund row; it never reaches `audit_events`.
+ */
+export const commerceRefundRequestSchema = z
+  .object({
+    reason: z
+      .string()
+      .min(1)
+      .max(200)
+      .refine((value) => !value.includes("@"), {
+        message: "reason must not contain an email address",
+      }),
+  })
+  .strict();
+
+/**
+ * Why a checkout is inside one refund. `requested` is the checkout the learner
+ * named; `dependent-pro` is the Pro purchase that revoking the named Standard
+ * grant would have left uncovered, refunded in the same record. It is the
+ * machine-readable half of the owner-approved sentence "Your refund also
+ * cancelled Pro, which was refunded in full" - the API never renders the
+ * sentence.
+ */
+export const commerceRefundInclusionSchema = z.enum([
+  "requested",
+  "dependent-pro",
+]);
+
+export const commerceRefundCheckoutSchema = z
+  .object({
+    checkoutId: id,
+    sku: commerceSkuSchema,
+    amountMinor: safeInteger.positive(),
+    includedBecause: commerceRefundInclusionSchema,
+  })
+  .strict();
+
+/**
+ * One grant a settled refund revoked. Ordered Pro before Standard, then by
+ * `startsAt`, which is the order the batch revoked them in.
+ */
+export const commerceRefundRevokedGrantSchema = z
+  .object({
+    feature: z.enum(["standard", "pro"]),
+    grantId: id,
+    checkoutId: id,
+    startsAt: safeInteger,
+    expiresAt: safeInteger,
+  })
+  .strict();
+
+/** The refund receipt written for one refunded checkout. */
+export const commerceRefundReceiptRefSchema = z
+  .object({
+    receiptId: id,
+    receiptNumber: z.string().regex(/^CP\d{8}-[0-9A-F]{12}$/),
+    checkoutId: id,
+  })
+  .strict();
+
+/**
+ * The provider has not confirmed the refund, so nothing has been revoked and no
+ * receipt exists. There is deliberately no `revoked`, no `receipts` and no
+ * `access` field: nothing has happened to access yet, and saying otherwise would
+ * be a lie. A client that retries gets the same `refundId` and the same body
+ * until the provider answers.
+ */
+export const commerceRefundPendingResponseSchema = z
+  .object({
+    refundId: id,
+    status: z.literal("requested"),
+    currency: currencyCode,
+    amountMinor: safeInteger.positive(),
+    requestedAt: safeInteger,
+    checkouts: z.array(commerceRefundCheckoutSchema).min(1).max(2),
+  })
+  .strict();
+
+/**
+ * The settled refund, projected from storage. `access` has exactly one value
+ * because the grace question is part of the API, not the presentation: a refund
+ * revokes, and ADR 0005's grace is defined for expiry of a grant that still
+ * exists.
+ */
+export const commerceRefundSettledResponseSchema = z
+  .object({
+    refundId: id,
+    status: z.literal("settled"),
+    currency: currencyCode,
+    amountMinor: safeInteger.positive(),
+    requestedAt: safeInteger,
+    settledAt: safeInteger,
+    checkouts: z.array(commerceRefundCheckoutSchema).min(1).max(2),
+    revoked: z.array(commerceRefundRevokedGrantSchema).min(1).max(4),
+    receipts: z.array(commerceRefundReceiptRefSchema).min(1).max(2),
+    access: z.literal("ended"),
+  })
+  .strict();
+
+export const commerceRefundResponseSchema = z.discriminatedUnion("status", [
+  commerceRefundPendingResponseSchema,
+  commerceRefundSettledResponseSchema,
+]);
+
+/** One line of a stored receipt, as the price snapshot recorded it. */
+export const commerceReceiptLineSchema = z
+  .object({
+    sku: commerceSkuSchema,
+    label: z.string().min(1).max(160),
+    amountMinor: safeInteger.positive(),
+    feature: z.enum(["standard", "pro"]),
+    term: commerceTermSchema,
+  })
+  .strict();
+
+/**
+ * One grant a receipt witnesses. `grantId` is null on a purchase receipt: the
+ * grant row id is minted inside the settlement insert and the shipped writer
+ * records only the deterministic operation id, so the read model normalises the
+ * two shapes into one strict contract rather than widening it per `kind`.
+ */
+export const commerceReceiptGrantSchema = z
+  .object({
+    feature: z.enum(["standard", "pro"]),
+    startsAt: safeInteger,
+    expiresAt: safeInteger,
+    operationId: id.nullable(),
+    grantId: id.nullable(),
+  })
+  .strict();
+
+/**
+ * A stored receipt. `refundId` is null exactly for a purchase, and
+ * `refundWindowEndsAt` is null exactly for a refund - the two CHECKs 0019 put on
+ * the row, surfaced as one contract so a client cannot meet a third shape.
+ */
+export const commerceReceiptSchema = z
+  .object({
+    receiptId: id,
+    receiptNumber: z.string().regex(/^CP\d{8}-[0-9A-F]{12}$/),
+    kind: z.enum(["purchase", "refund"]),
+    checkoutId: id,
+    refundId: id.nullable(),
+    certificationId: id,
+    currency: currencyCode,
+    totalMinor: safeInteger.positive(),
+    lines: z.array(commerceReceiptLineSchema).min(1).max(4),
+    grants: z.array(commerceReceiptGrantSchema).max(4),
+    provider: z.string().min(1).max(32),
+    providerRef: z.string().min(1).max(256).nullable(),
+    delivery: z.literal("stored"),
+    refundWindowEndsAt: safeInteger.nullable(),
+    issuedAt: safeInteger,
+  })
+  .strict();
+
+/**
+ * One exam's receipts for the caller. 50 is the ceiling and there is no cursor:
+ * a learner's receipts for one exam are bounded by their purchases, and
+ * `GET /receipts/:receiptId` serves any single one.
+ */
+export const commerceReceiptListResponseSchema = z
+  .object({
+    certificationId: id,
+    currency: currencyCode,
+    receipts: z.array(commerceReceiptSchema).max(50),
+  })
+  .strict();
+
+/**
  * The local-only dev seam's request. It names a checkout and nothing else: the
  * amount, the currency and the provider reference are read from the stored row,
  * so the seam cannot invent a payment for a price that was never charged.
@@ -236,4 +409,34 @@ export type CommerceWebhookResponse = z.infer<
 >;
 export type CommerceFakePayRequest = z.infer<
   typeof commerceFakePayRequestSchema
+>;
+export type CommerceRefundRequest = z.infer<
+  typeof commerceRefundRequestSchema
+>;
+export type CommerceRefundInclusion = z.infer<
+  typeof commerceRefundInclusionSchema
+>;
+export type CommerceRefundCheckout = z.infer<
+  typeof commerceRefundCheckoutSchema
+>;
+export type CommerceRefundRevokedGrant = z.infer<
+  typeof commerceRefundRevokedGrantSchema
+>;
+export type CommerceRefundReceiptRef = z.infer<
+  typeof commerceRefundReceiptRefSchema
+>;
+export type CommerceRefundPendingResponse = z.infer<
+  typeof commerceRefundPendingResponseSchema
+>;
+export type CommerceRefundSettledResponse = z.infer<
+  typeof commerceRefundSettledResponseSchema
+>;
+export type CommerceRefundResponse = z.infer<
+  typeof commerceRefundResponseSchema
+>;
+export type CommerceReceiptLine = z.infer<typeof commerceReceiptLineSchema>;
+export type CommerceReceiptGrant = z.infer<typeof commerceReceiptGrantSchema>;
+export type CommerceReceipt = z.infer<typeof commerceReceiptSchema>;
+export type CommerceReceiptListResponse = z.infer<
+  typeof commerceReceiptListResponseSchema
 >;

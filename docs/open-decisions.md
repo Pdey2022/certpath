@@ -24,6 +24,15 @@ need an owner or architect decision.
 | Staging | Previews share production D1 today; isolated D1 required | ADR 0006 |
 | Price points validated? | **No** - provisional until a fake-door test | ADR 0003 |
 
+## Resolved (16 November 2026, PR B3)
+
+| Decision | Outcome | Record |
+|---|---|---|
+| A refund that would leave future-but-not-present Standard coverage | **Refused** `409 refund_requires_support`; nothing moves and support resolves it. Every Standard purchase appends to the latest end, so a gap cannot be bought back and granting the refund would lock a paying learner out. | Owner decision, `docs/commerce-refunds.md` §15.1 |
+| A provider decline and the one-per-exam cap | The partial unique index excludes `failed`, so a decline that moved no money does not consume the learner's one self-serve refund. A settled refund can never be bypassed. | Owner decision, `0020_refunds.sql` |
+| A definitive provider decline | Answers `409 refund_rejected`, not `503 provider_unavailable`: it is a decision, not an outage, and retrying cannot change it. | Owner decision, `docs/commerce-refunds.md` §15.3 |
+| Money arriving after a `checkout.failed` | `failed → paid` and `failed → needs_support` are legal. A late `checkout.completed` either grants (grant, receipt, one `paid_at`) or parks in `needs_support`; it never vanishes into an event row no checkout-level queue shows. The five settlement predicates widened with the edge. | `0020_refunds.sql`, `docs/commerce.md` §Failure paths |
+
 ## Owner decisions still open
 
 - Launch market's tax, consumer, refund and invoicing obligations (currency is USD).
@@ -38,6 +47,24 @@ need an owner or architect decision.
 - Which clock starts the refund window for money parked in `needs_support` — the
   charge instant or the `paid_at` we recorded when we learned of it; `0019`
   records only the latter.
+
+  B3 deliberately does not refund parked money: `POST …/refund` answers
+  `409 refund_not_allowed` for a `needs_support` checkout, while the checkout read
+  still reports a `refundWindowEndsAt` for it. That gap closes when the two
+  decisions above are settled, not before.
+
+- An unresolved refund (`commerce_refunds.status = 'requested'`) holds the
+  one-per-exam slot until an operator resolves it. There is no route and no job
+  for that in B3; the row is the work queue, and the alternative — treating an
+  unanswered refund as a free retry — risks paying a learner back twice.
+  `requested → failed` is **not** a universal resolution: it may be written only
+  when the provider did not pay. It asserts "no money moved" and it frees the
+  one-per-exam cap, so where the provider *did* confirm and our settle refused
+  (a purchase landed during the provider call, or 0014 aborted every retry) the
+  row must stay `requested` — `failed` there would both misstate the ledger and
+  permit a second refund of the same checkout. Support resolves that shape
+  against the provider's own record. `docs/commerce.md` §Failure paths states
+  both shapes.
 - Monitoring, alerting and on-call expectations for the pilot.
 
 ## Architect decisions still open

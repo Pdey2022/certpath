@@ -113,9 +113,15 @@ rules around it are not provisional, and no route may hard-code a price.
 
 ## Not in this phase
 
-Settlement, the provider webhook, the stored purchase receipt and the one-Pro-window
-guard exist now; they are described in `docs/commerce.md`. **Refund execution** is
-the one item of that group still absent: there is no `commerce_refunds` table, no
-`paid → refunded` edge, no refund receipt and no refund route, so
-`refundWindowEndsAt` is reported and nothing can yet act on it. Receipts are
-stored, never returned by a route and never sent by email.
+Settlement, the provider webhook, the stored purchase receipt, the one-Pro-window
+guard and **refund execution** exist now; they are described in
+`docs/commerce.md` and `docs/commerce-refunds.md`. A refund inside seven days
+settles against the provider, writes a refund receipt, and revokes the grants the
+refunded checkouts wrote — Pro before Standard, because 0014 refuses the other
+order — so `refundWindowEndsAt` can be acted on and access ends when the refund
+settles. A refund is a **revocation**, not an expiry: `evaluateAccess` filters a
+revoked grant out, so the learner gets no grace window (ADR 0005 defines grace for
+the expiry of a grant that is still there), and a revocation is terminal —
+`learner_access_grants_immutable_update` refuses any further change to a revoked
+row. Receipts are stored, returned only to their owner by the receipts routes, and
+never sent by email.

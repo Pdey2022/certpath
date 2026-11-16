@@ -1299,7 +1299,7 @@ describe("storage invariants", () => {
         .run(),
     ).resolves.toBeDefined();
 
-    for (const status of ["pending", "refunded", "expired", "failed"]) {
+    for (const status of ["pending", "expired", "failed"]) {
       await expect(
         database
           .prepare("UPDATE commerce_checkouts SET status = ? WHERE id = ?")
@@ -1308,6 +1308,21 @@ describe("storage invariants", () => {
         status,
       ).rejects.toThrow(/illegal checkout status/);
     }
+    // `needs_support -> refunded` is refused twice over: the edge is illegal, and
+    // the row was never `paid`. The settled-refund witness cannot speak here - its
+    // `WHEN` is limited to `OLD.status = 'paid'`, which is what keeps it disjoint
+    // from the paid-checkout rule - so the two alternatives below are the whole
+    // set, and which of the two firing triggers reports first is not defined by
+    // SQLite. The message each rule emits is pinned exactly in
+    // `commerce-refund-guards.test.ts`, case 2.
+    await expect(
+      database
+        .prepare("UPDATE commerce_checkouts SET status = 'refunded' WHERE id = ?")
+        .bind(checkoutId)
+        .run(),
+    ).rejects.toThrow(
+      /illegal checkout status transition|only a paid checkout can be refunded/,
+    );
   });
 
   it("accepts expired -> paid, because money is money", async () => {
@@ -1326,7 +1341,10 @@ describe("storage invariants", () => {
     ).resolves.toBeDefined();
   });
 
-  it("refuses a failed checkout that later reports money", async () => {
+  it("accepts failed -> paid and failed -> needs_support, and still refuses failed -> expired", async () => {
+    // 0020 makes both edges legal: money arriving after a `checkout.failed` must
+    // either grant or park, never vanish. The edge that stays illegal is the one
+    // with no money story behind it.
     const { checkoutId } = await checkoutRow();
     await database
       .prepare("UPDATE commerce_checkouts SET status = 'failed' WHERE id = ?")
@@ -1338,6 +1356,32 @@ describe("storage invariants", () => {
           "UPDATE commerce_checkouts SET status = 'paid', paid_at = ? WHERE id = ?",
         )
         .bind(clock, checkoutId)
+        .run(),
+    ).resolves.toBeDefined();
+
+    const parked = await checkoutRow();
+    await database
+      .prepare("UPDATE commerce_checkouts SET status = 'failed' WHERE id = ?")
+      .bind(parked.checkoutId)
+      .run();
+    await expect(
+      database
+        .prepare(
+          "UPDATE commerce_checkouts SET status = 'needs_support', paid_at = ? WHERE id = ?",
+        )
+        .bind(clock, parked.checkoutId)
+        .run(),
+    ).resolves.toBeDefined();
+
+    const lapsed = await checkoutRow();
+    await database
+      .prepare("UPDATE commerce_checkouts SET status = 'failed' WHERE id = ?")
+      .bind(lapsed.checkoutId)
+      .run();
+    await expect(
+      database
+        .prepare("UPDATE commerce_checkouts SET status = 'expired' WHERE id = ?")
+        .bind(lapsed.checkoutId)
         .run(),
     ).rejects.toThrow(/illegal checkout status/);
   });
@@ -1473,6 +1517,89 @@ describe("storage invariants", () => {
         .bind(event!.provider_event_id)
         .run(),
     ).rejects.toThrow(/cannot be deleted/);
+  });
+
+  it("reports no refund window once a checkout has been refunded", async () => {
+    // The read model's one change in 0020. The refund itself is driven through the
+    // real route in `commerce-refund.test.ts`; here the refunded state is built
+    // directly, because what is under test is only what the checkout read reports.
+    const { actor, checkoutId } = await checkoutRow();
+    const paidAt = clock;
+    await database
+      .prepare(
+        "UPDATE commerce_checkouts SET status = 'paid', paid_at = ? WHERE id = ?",
+      )
+      .bind(paidAt, checkoutId)
+      .run();
+
+    const beforeRefund = commerceCheckoutResponseSchema.parse(
+      await (await call(`/api/commerce/checkouts/${checkoutId}`, { actor })).json(),
+    );
+    expect(beforeRefund.status).toBe("paid");
+    expect(beforeRefund.refundWindowEndsAt).toBe(paidAt + 7 * day);
+
+    const row = (await database
+      .prepare(
+        `SELECT user_id, certification_id, currency, total_minor
+         FROM commerce_checkouts WHERE id = ?`,
+      )
+      .bind(checkoutId)
+      .first<{
+        user_id: string;
+        certification_id: string;
+        currency: string;
+        total_minor: number;
+      }>())!;
+    const refundId = `rfd_${crypto.randomUUID()}`;
+    await database
+      .prepare(
+        `INSERT INTO commerce_refunds (
+           id, user_id, certification_id, requested_by_user_id, status, currency,
+           amount_minor, reason, operation_id, provider, provider_refund_id,
+           requested_at, settled_at)
+         VALUES (?, ?, ?, ?, 'requested', ?, ?, 'Synthetic read fixture', ?, 'fake',
+                 NULL, ?, NULL)`,
+      )
+      .bind(
+        refundId,
+        row.user_id,
+        row.certification_id,
+        row.user_id,
+        row.currency,
+        row.total_minor,
+        `refund:${refundId}`,
+        clock,
+      )
+      .run();
+    await database
+      .prepare(
+        `INSERT INTO commerce_refund_lines (
+           refund_id, position, checkout_id, amount_minor, window_ends_at)
+         VALUES (?, 0, ?, ?, ?)`,
+      )
+      .bind(refundId, checkoutId, row.total_minor, paidAt + 7 * day)
+      .run();
+    await database
+      .prepare(
+        `UPDATE commerce_refunds SET status = 'settled', settled_at = ?,
+                provider_refund_id = ?
+         WHERE id = ? AND status = 'requested'`,
+      )
+      .bind(clock, `fake_refund_${refundId}`, refundId)
+      .run();
+    await database
+      .prepare(
+        "UPDATE commerce_checkouts SET status = 'refunded', updated_at = ? WHERE id = ?",
+      )
+      .bind(clock, checkoutId)
+      .run();
+
+    const after = commerceCheckoutResponseSchema.parse(
+      await (await call(`/api/commerce/checkouts/${checkoutId}`, { actor })).json(),
+    );
+    expect(after.status).toBe("refunded");
+    expect(after.paidAt).toBe(paidAt);
+    expect(after.refundWindowEndsAt).toBeNull();
   });
 });
 
