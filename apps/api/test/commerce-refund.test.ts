@@ -779,6 +779,82 @@ describe("refunds", () => {
     expect(can(access, "practice")).toBe(true);
   });
 
+  it("answers 503 when a Pro settlement lands during the provider call", async () => {
+    // §10 and §4.3 state, as settled behaviour, that a concurrent Pro settlement
+    // our Standard revocation would uncover "aborts at 0014 on every retry, so the
+    // answer is the same 503 requested". That is only true if
+    // `isConstraintFailure` - a substring match on D1's message - matches the text
+    // of 0014's `RAISE(ABORT, 'revoking this standard grant would leave a pro grant
+    // uncovered')`. This test decides the claim: if the classifier is wrong, the
+    // error is rethrown as an undiagnosed failure and the route answers 500.
+    now = baseClock;
+    const actor = await learner();
+    const certificationId = await exam({ proEnabled: true });
+    const live = await buy(actor, certificationId, "standard-3m", now);
+    const standard = await database
+      .prepare(
+        `SELECT starts_at, expires_at FROM learner_access_grants
+         WHERE operation_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(`${live}:standard`)
+      .first<{ starts_at: number; expires_at: number }>();
+    expect(standard).not.toBeNull();
+
+    // A Pro grant written straight into storage, in the window the Standard grant
+    // covers and under a purchase operation id that names a checkout outside this
+    // refund's immutable line set - the shape a second checkout settling during our
+    // provider call produces. Written directly because the refund has already been
+    // planned and the provider already called by the time a hook can run.
+    refundHook = async () => {
+      await database
+        .prepare(
+          `INSERT INTO learner_access_grants (
+             id, user_id, certification_id, feature, starts_at, expires_at,
+             created_at, sku, source, operation_id)
+           VALUES (?, ?, ?, 'pro', ?, ?, ?, 'pro-3m', 'purchase', ?)`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          actor.userId,
+          certificationId,
+          standard!.starts_at,
+          standard!.expires_at,
+          now,
+          `chk_${crypto.randomUUID()}:pro`,
+        )
+        .run();
+    };
+
+    const response = await refund(actor, live);
+    expect(response.status).toBe(503);
+    expect(
+      ((await response.json()) as { error: { code: string } }).error.code,
+    ).toBe("provider_unavailable");
+
+    // Money returned by the provider, nothing revoked, nothing settled: the same
+    // fail-closed shape as the coverage-gap race, and for the same reason - the
+    // lines are immutable, so the set cannot be expanded to swallow the Pro row.
+    const rows = await grants(actor.userId, certificationId);
+    expect(rows.results).toHaveLength(2);
+    expect(rows.results.every((grant) => grant.revoked_at === null)).toBe(true);
+    expect((await checkoutRow(live))!.status).toBe("paid");
+    const refunds = await database
+      .prepare(
+        "SELECT status, settled_at FROM commerce_refunds WHERE user_id = ?",
+      )
+      .bind(actor.userId)
+      .all<{ status: string; settled_at: number | null }>();
+    expect(refunds.results).toHaveLength(1);
+    expect(refunds.results[0]!.status).toBe("requested");
+    expect(refunds.results[0]!.settled_at).toBeNull();
+
+    const access = evaluateAccess(
+      await readAccountGrants(database, actor.userId, certificationId),
+      now,
+    );
+    expect(can(access, "practice")).toBe(true);
+  });
+
   it("answers 200 for a refund a concurrent request settled first", async () => {
     // A double submit: both calls reach the provider, the *other* request wins the
     // settle, and ours then loses every compare-and-swap because the refund is
@@ -853,6 +929,52 @@ describe("refunds", () => {
       certificationId,
     );
     expect(evaluateAccess(records, now).standard.state).toBe("active");
+  });
+
+  it("answers 500 with the house envelope when a settle fails for a non-constraint reason", async () => {
+    // The seam the route previously had none for: a provider that says `succeeded`
+    // with no `refundRef`. That value is bound into the settle statement, so the
+    // failure is a D1 type error whose message does not match `/constraint/i` - a
+    // bug or an outage we have not diagnosed, not a lost race. It must reach the
+    // client as the house envelope with a correlation id, not as a bare
+    // `500 Internal Server Error` with the request id lost.
+    now = baseClock;
+    const actor = await learner();
+    const certificationId = await exam();
+    const checkoutId = await buy(actor, certificationId, "standard-3m", now);
+
+    refundBehaviour = {
+      status: "succeeded",
+      refundRef: undefined,
+    } as unknown as RefundResult;
+
+    const response = await refund(actor, checkoutId);
+    expect(response.status).toBe(500);
+    const requestId = response.headers.get("X-Request-Id");
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(await response.json()).toEqual({
+      error: { code: "internal_error", requestId },
+    });
+    expect(response.headers.get("Cache-Control")).toBe(
+      "private, no-store, max-age=0",
+    );
+    expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
+
+    // Fail-closed: the bind threw before the batch ran, so nothing was written and
+    // access is untouched.
+    const refunds = await database
+      .prepare("SELECT status, settled_at FROM commerce_refunds WHERE user_id = ?")
+      .bind(actor.userId)
+      .all<{ status: string; settled_at: number | null }>();
+    expect(refunds.results).toHaveLength(1);
+    expect(refunds.results[0]!.status).toBe("requested");
+    expect(refunds.results[0]!.settled_at).toBeNull();
+    expect((await checkoutRow(checkoutId))!.status).toBe("paid");
+    const access = evaluateAccess(
+      await readAccountGrants(database, actor.userId, certificationId),
+      now,
+    );
+    expect(can(access, "practice")).toBe(true);
   });
 
   it("refuses a checkout that is not paid", async () => {

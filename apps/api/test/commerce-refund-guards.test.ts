@@ -21,9 +21,10 @@ import {
 // is that storage refuses what the route would have prevented: a future writer
 // that forgets the rule still cannot break the invariant. The exceptions say so
 // where they happen - case 10 drives the route to reach a genuinely refunded
-// row, and case 12 calls the settle module so it can hand in a count that no
-// route would produce. Each case names the exact SQLite message it expects, so a
-// replacement trigger that renames or re-narrows a rule fails here.
+// row, and cases 12 and 14 call the settle module because the shapes they prove
+// are inside one transaction. Each case names the SQLite message it expects, or
+// the set of messages where more than one rule can speak, so a replacement
+// trigger that renames or re-narrows a rule fails here.
 
 const database: SecurityDatabase = env.DB;
 const origin = "https://localhost";
@@ -247,7 +248,7 @@ async function settleRefundRow(refundId: string): Promise<void> {
 /** Assert the statement aborts, and that the message names the rule. */
 async function abortWith(
   statement: Promise<unknown>,
-  message: string,
+  message: string | RegExp,
 ): Promise<void> {
   await expect(statement).rejects.toThrow(message);
 }
@@ -298,12 +299,15 @@ describe("refund guards", () => {
   it("3. refuses `refunded` on a checkout that could never have been paid", async () => {
     // The hole this closes: the settle batch's checkout statement filters
     // `status = 'paid'`, so a checkout that is `pending` or `needs_support` when
-    // the batch runs matches 0 rows and fires no trigger - revocations and a
-    // settled refund would commit with the checkout left exactly as it was.
-    // Neither the settle compare-and-swap nor a trigger can see that row. Two
-    // rules close it: this trigger for a writer that forces the transition, and
-    // the checkout count `applyRefundSettlement` returns for the statement that
-    // matched nothing.
+    // the batch runs matches 0 rows and fires no trigger there. Two writers reach
+    // that shape and two rules answer them: a writer that *forces* the transition
+    // is refused by the trigger below, and the batch itself is aborted at the
+    // settle by `commerce_refunds_settle_requires_paid_checkouts` (case 14).
+    //
+    // The message is a set rather than one string on purpose: for a row that was
+    // never `paid` the transition trigger also speaks (the edge is illegal), and
+    // which of two firing triggers aborts first is not defined by SQLite. Case 2
+    // keeps the exact message because on a `paid` row only one rule can speak.
     const pendingCheckoutId = await openCheckout(
       actor,
       certificationId,
@@ -317,7 +321,7 @@ describe("refund guards", () => {
         )
         .bind(clock, pendingCheckoutId)
         .run(),
-      "only a paid checkout can be refunded",
+      /only a paid checkout can be refunded|illegal checkout status transition/,
     );
     expect((await checkoutRow(pendingCheckoutId))!.status).toBe("pending");
 
@@ -343,7 +347,7 @@ describe("refund guards", () => {
         )
         .bind(clock, parkedCheckoutId)
         .run(),
-      "only a paid checkout can be refunded",
+      /only a paid checkout can be refunded|illegal checkout status transition/,
     );
     expect((await checkoutRow(parkedCheckoutId))!.status).toBe("needs_support");
   });
@@ -741,5 +745,142 @@ describe("refund guards", () => {
       .bind(refundId)
       .first<{ status: string }>();
     expect(refund?.status).toBe("requested");
+  });
+
+  it("13. keeps all four witness rules installed under their own names", async () => {
+    // The guard for the assumption this suite no longer makes. Nothing above
+    // depends on which of two BEFORE UPDATE triggers SQLite fires first (the
+    // witnesses are disjoint, and where the transition trigger also speaks the
+    // message is asserted as a set), but everything above depends on each rule
+    // *existing*. A future migration that rebuilds these triggers and loses one
+    // can still refuse the writes asserted above - the surviving rule covers the
+    // same rows, which is exactly how a rename hides - so the names are asserted
+    // directly rather than inferred from behaviour.
+    const expected = [
+      "commerce_checkouts_refunded_requires_paid_checkout",
+      "commerce_checkouts_refunded_requires_settled_refund",
+      "commerce_checkouts_status_transition",
+      "commerce_refunds_settle_requires_paid_checkouts",
+    ];
+    const names = await database
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'trigger' AND name IN (?, ?, ?, ?)
+         ORDER BY name`,
+      )
+      .bind(...expected)
+      .all<{ name: string }>();
+    expect(names.results.map((row) => row.name)).toEqual(expected);
+  });
+
+  it("14. aborts the settle when a checkout it covers is no longer paid", async () => {
+    // The sub-case the checkout count cannot fix, and the reason
+    // `commerce_refunds_settle_requires_paid_checkouts` exists. The count in
+    // `settledExactlyAsPlanned` is compared *after* the batch has committed, so a
+    // short count can refuse a `200` but cannot roll anything back. Statement 4
+    // filters `status = 'paid'`, so a checkout that left `paid` between the
+    // decision and batch 2 matches zero rows and fires no trigger - without the
+    // rule below the batch commits a settled refund and revoked grants, leaves the
+    // checkout parked, and the next attempt projects `200 access: "ended"`.
+    //
+    // A bundle, so the batch has two revocations to roll back rather than none.
+    const checkoutId = await buy(
+      actor,
+      certificationId,
+      "bundle-standard-3m-pro",
+    );
+    const standardGrantId = await grantIdFor(checkoutId, "standard");
+    const proGrantId = await grantIdFor(checkoutId, "pro");
+    const checkout = (await checkoutRow(checkoutId))!;
+    const refundId = await insertRefund({
+      userId: actor.userId,
+      certificationId,
+      amountMinor: checkout.total_minor,
+    });
+    await insertLine({
+      refundId,
+      checkoutId,
+      amountMinor: checkout.total_minor,
+    });
+
+    // `paid -> needs_support` is a legal edge 0019 added; no shipped statement
+    // moves a `paid` row there, so this is written directly - the state is one
+    // the database will hold, and that is what storage rules are for.
+    await database
+      .prepare(
+        "UPDATE commerce_checkouts SET status = 'needs_support', updated_at = ? WHERE id = ?",
+      )
+      .bind(clock, checkoutId)
+      .run();
+    expect((await checkoutRow(checkoutId))!.status).toBe("needs_support");
+
+    await abortWith(
+      applyRefundSettlement(database, {
+        refundId,
+        userId: actor.userId,
+        certificationId,
+        settledAt: clock,
+        providerRefundId: `fake_refund_${refundId}`,
+        revocations: [
+          {
+            grantId: proGrantId,
+            feature: "pro",
+            checkoutId,
+            startsAt: clock,
+            expiresAt: clock + 90 * day,
+          },
+          {
+            grantId: standardGrantId,
+            feature: "standard",
+            checkoutId,
+            startsAt: clock,
+            expiresAt: clock + 90 * day,
+          },
+        ],
+        remainingStandardCount: 0,
+        checkouts: [checkoutId],
+        receipts: [
+          {
+            checkout: {
+              id: checkoutId,
+              user_id: checkout.user_id,
+              certification_id: checkout.certification_id,
+              sku: "bundle-standard-3m-pro",
+              currency: checkout.currency,
+              total_minor: checkout.total_minor,
+              status: "needs_support",
+              paid_at: checkout.paid_at,
+              provider: "fake",
+              provider_session_id: `fake_${checkoutId}`,
+            },
+            totalMinor: checkout.total_minor,
+            linesJson: "[]",
+            grantsJson: "[]",
+          },
+        ],
+      }),
+      "a refund may only settle while every checkout it covers is paid",
+    );
+
+    // The whole transaction rolled back, revocations included: this is the
+    // property the count could not provide.
+    const revoked = await database
+      .prepare(
+        `SELECT id, revoked_at FROM learner_access_grants
+         WHERE id IN (?, ?) ORDER BY feature DESC`,
+      )
+      .bind(standardGrantId, proGrantId)
+      .all<{ id: string; revoked_at: number | null }>();
+    expect(revoked.results).toHaveLength(2);
+    expect(revoked.results.every((grant) => grant.revoked_at === null)).toBe(
+      true,
+    );
+    expect((await checkoutRow(checkoutId))!.status).toBe("needs_support");
+    const refund = await database
+      .prepare("SELECT status, settled_at FROM commerce_refunds WHERE id = ?")
+      .bind(refundId)
+      .first<{ status: string; settled_at: number | null }>();
+    expect(refund?.status).toBe("requested");
+    expect(refund?.settled_at).toBeNull();
   });
 });

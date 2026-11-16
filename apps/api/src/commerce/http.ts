@@ -113,7 +113,7 @@ function response(
 ): Response {
   return context.json(
     { error: { code, requestId: context.get("requestId") } },
-    status as 400 | 401 | 404 | 409 | 413 | 415 | 503,
+    status as 400 | 401 | 404 | 409 | 413 | 415 | 500 | 503,
   );
 }
 
@@ -545,6 +545,28 @@ export function createCommerceApi(
       now: now(),
     });
     return webhookResponse(context, result, context.get("requestId"));
+  });
+
+  // The one path that is an undiagnosed bug or an outage, given the same shape as
+  // every other refusal. Without this, Hono's default handler answers a bare
+  // `500 Internal Server Error` with no body and no request id - so the refund
+  // route, the only commerce path that deliberately throws for a non-constraint
+  // error, would be the one path on which an operator has no correlation id.
+  //
+  // What is logged is `{requestId, route, error.name, error.message}` and nothing
+  // else: never the request body, never the learner's `reason` text, never a
+  // token or a signature. The learner gets the code, not the diagnosis.
+  api.onError((error, context) => {
+    const requestId = context.get("requestId") || crypto.randomUUID();
+    context.set("requestId", requestId);
+    setPrivateHeaders(context);
+    console.error("Commerce request failed", {
+      requestId,
+      route: `${context.req.method} ${new URL(context.req.url).pathname}`,
+      name: error instanceof Error ? error.name : "UnknownError",
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return response(context, 500, "internal_error");
   });
 
   return api;

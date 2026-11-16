@@ -1308,18 +1308,20 @@ describe("storage invariants", () => {
         status,
       ).rejects.toThrow(/illegal checkout status/);
     }
-    // `needs_support -> refunded` is refused three times over: the edge is
-    // illegal, no settled refund names the row, and the row was never `paid`.
-    // Which BEFORE UPDATE trigger reports first is SQLite's business - every one
-    // of them says no and the batch rolls back either way. The message each rule
-    // emits is pinned exactly in `commerce-refund-guards.test.ts`.
+    // `needs_support -> refunded` is refused twice over: the edge is illegal, and
+    // the row was never `paid`. The settled-refund witness cannot speak here - its
+    // `WHEN` is limited to `OLD.status = 'paid'`, which is what keeps it disjoint
+    // from the paid-checkout rule - so the two alternatives below are the whole
+    // set, and which of the two firing triggers reports first is not defined by
+    // SQLite. The message each rule emits is pinned exactly in
+    // `commerce-refund-guards.test.ts`, case 2.
     await expect(
       database
         .prepare("UPDATE commerce_checkouts SET status = 'refunded' WHERE id = ?")
         .bind(checkoutId)
         .run(),
     ).rejects.toThrow(
-      /illegal checkout status|a refunded checkout requires a settled refund|only a paid checkout can be refunded/,
+      /illegal checkout status transition|only a paid checkout can be refunded/,
     );
   });
 

@@ -28,12 +28,20 @@
 --      added that edge for exactly that reason; the test re-asserts it.
 --   5. `commerce_checkouts_refunded_requires_settled_refund` - a separately named
 --      rule (not a second copy of the edge list): a checkout may only become
---      `refunded` while a settled refund names it.
+--      `refunded` from `paid` while a settled refund names it. The `OLD.status =
+--      'paid'` half is what makes it disjoint from 6, so no assumption about
+--      which trigger SQLite fires first is needed.
 --   6. `commerce_checkouts_refunded_requires_paid_checkout` - the second, equally
 --      separate rule about the same status: only a checkout that was once paid may
 --      be refunded. Without it a writer that forces the transition can mark a
 --      `pending` or `needs_support` row `refunded`, which is money we do not have
 --      or cannot give back.
+--   7. `commerce_refunds_settle_requires_paid_checkouts` - a refund may only
+--      settle while every checkout it covers is `paid`. The settle batch's
+--      checkout statement filters `status = 'paid'`, so a checkout that is not
+--      `paid` when batch 2 runs matches zero rows and fires no trigger while the
+--      refund itself settles; this rule aborts the batch instead of letting it
+--      commit a settled refund for a checkout it did not move.
 --
 -- Why `failed -> paid` and `failed -> needs_support` exist: a `checkout.completed`
 -- can arrive after a `checkout.failed`. Before this change the transition was
@@ -241,6 +249,32 @@ BEGIN
   SELECT RAISE(ABORT, 'refunds cannot be deleted');
 END;
 
+-- A refund may only settle while every checkout it covers is `paid`.
+--
+-- This is the storage rule for the hole the settle batch's own ordering leaves
+-- open. Statement 3 settles the refund and statement 4 moves each checkout
+-- `paid -> refunded`, and statement 4 filters `status = 'paid'`: a checkout that
+-- is `needs_support` (or anything else) when the batch runs matches zero rows
+-- and fires no trigger, so without this rule the transaction would commit a
+-- settled refund, revoked grants and a receipt, and leave the checkout parked -
+-- and the next call would project that settled refund as `200 access: "ended"`
+-- for a checkout no writer moved. Statement 3 runs before statement 4, so every
+-- legal settle still passes (the checkout is `paid` at that instant); a batch
+-- where the refund has already settled by another request sees `OLD.status =
+-- 'settled'` and stays silent.
+CREATE TRIGGER commerce_refunds_settle_requires_paid_checkouts
+BEFORE UPDATE OF status ON commerce_refunds
+WHEN NEW.status = 'settled' AND OLD.status = 'requested'
+BEGIN
+  SELECT RAISE(ABORT, 'a refund may only settle while every checkout it covers is paid')
+  WHERE EXISTS (
+    SELECT 1
+    FROM commerce_refund_lines AS line
+    JOIN commerce_checkouts AS checkout ON checkout.id = line.checkout_id
+    WHERE line.refund_id = NEW.id AND checkout.status <> 'paid'
+  );
+END;
+
 -- ---------------------------------------------------------------------------
 -- 3. #79 - a refund receipt references a settled refund for that checkout
 -- ---------------------------------------------------------------------------
@@ -309,13 +343,18 @@ BEGIN
   SELECT RAISE(ABORT, 'illegal checkout status transition');
 END;
 
--- A checkout may only become `refunded` while a settled refund names it. This is
--- the witness rule, not an edge rule: it is what makes "refunded with money still
--- with us" and "refunded with access still live" unrepresentable from any code
--- path, including one written next year.
+-- A checkout may only become `refunded` from `paid` while a settled refund names
+-- it. This is the witness rule, not an edge rule: it is what makes "refunded with
+-- money still with us" and "refunded with access still live" unrepresentable from
+-- any code path, including one written next year.
+--
+-- `AND OLD.status = 'paid'` keeps this rule and the paid-checkout rule below
+-- disjoint: this one speaks only for a row that could have been paid, that one
+-- only for a row that could not. Disjoint `WHEN` clauses are the reason no test
+-- here needs to know which of two BEFORE UPDATE triggers SQLite fires first.
 CREATE TRIGGER commerce_checkouts_refunded_requires_settled_refund
 BEFORE UPDATE OF status ON commerce_checkouts
-WHEN NEW.status = 'refunded'
+WHEN NEW.status = 'refunded' AND OLD.status = 'paid'
 BEGIN
   SELECT RAISE(ABORT, 'a refunded checkout requires a settled refund')
   WHERE NOT EXISTS (
@@ -334,14 +373,18 @@ END;
 -- settled refund *and* no payment, and a `needs_support` row is money we hold that
 -- no policy lets us give back yet (#83).
 --
--- Created last on purpose. Of the BEFORE UPDATE triggers on this table SQLite
--- fires the newest first, and this is the rule that should answer a writer that
--- forces the transition; `commerce_checkouts_refunded_requires_settled_refund`
--- still answers every `paid` row that has no settled refund, so nothing it used
--- to catch is now missed. The settle batch itself never reaches this trigger:
--- its checkout statement filters `status = 'paid'`, so a row it cannot move is
--- caught by the checkout-transition count `applyRefundSettlement` returns, not
--- here. This trigger exists for the writer that forgets that filter.
+-- The two rules are disjoint by construction (the trigger above is limited to
+-- `OLD.status = 'paid'`). Which of two firing triggers aborts first is not
+-- defined by SQLite, so nothing here relies on an order: where both could speak
+-- they cannot, and where the transition trigger also refuses the write the tests
+-- accept either message.
+--
+-- The settle batch never reaches this trigger: its checkout statement filters
+-- `status = 'paid'`, so a row it cannot move matches no rows here at all. That
+-- shape is refused one statement earlier, by
+-- `commerce_refunds_settle_requires_paid_checkouts`, which aborts the whole batch
+-- rather than letting it commit. This trigger exists for the writer that forces
+-- the transition directly.
 CREATE TRIGGER commerce_checkouts_refunded_requires_paid_checkout
 BEFORE UPDATE OF status ON commerce_checkouts
 WHEN NEW.status = 'refunded' AND OLD.status NOT IN ('paid', 'refunded')

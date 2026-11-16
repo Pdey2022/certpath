@@ -696,13 +696,13 @@ learner may buy Pro again. This strengthens 0013/0014 and relaxes nothing.
 | A refund the provider declines | refund row `failed`, nothing revoked, nothing settled, no receipt, checkout still `paid`; answered `409 refund_rejected`. The one-per-exam cap is **not** consumed — the partial index excludes `failed` — so a retry is a new refund row. |
 | A refund the provider has not answered | refund row `requested`, nothing revoked, access stays live; answered `202 refund_pending` with the same `refundId`. A retry re-calls the provider with the same idempotency key. "Maybe moved" is not "did not move", and losing access without getting money back is the worse error. |
 | A refund that would orphan a separately-bought Pro | both checkouts are refunded in one refund record, Pro revoked before Standard. A **staff-granted** Pro, a dependent checkout outside its own window, or a refund that would leave future-but-not-present Standard coverage is refused `409 refund_requires_support` and nothing moves. |
-| A refund stuck in `requested` | the row holds the one-per-exam slot until an operator resolves it with `requested → failed`. That is deliberate: an unresolved refund is not a free retry. |
+| A refund stuck in `requested` | the row holds the one-per-exam slot until an operator resolves it. **Two shapes, and only one of them may be written `failed`.** (a) The provider never confirmed — a timeout, no answer — so no money moved: `requested → failed` is correct and frees the slot, and the cap is not consumed. (b) The provider **did** confirm and our settle refused — a purchase landed during the provider call, or 0014 aborted every retry (`docs/commerce-refunds.md` §4.3). Money has moved, so `failed` would assert the opposite; it would also drop the row out of `commerce_refunds_one_per_exam` and out of the `anotherRefundForExam` check, freeing the cap while the checkout is still `paid` with its window open, which lets the same checkout be paid back a **second** time. Shape (b) therefore stays `requested`, holding the slot, and is resolved by support against the provider's own record. |
 | Provider outage during checkout creation | the `pending` row stays with no session, `503 provider_unavailable`, and the retry with the same client key calls the provider again with the same idempotency key. |
 | Database error during settlement | the batch is one transaction, so nothing was written; `handleProviderWebhook` catches the unexpected error and answers `503 provider_unavailable`, and the provider retries the same event. Nothing about the body, the signature or the event id is logged. |
 
 ## Refunds — `0020_refunds.sql`
 
-Two tables, five rules of their own, one replacement and two new triggers on
+Two tables, eight rules of their own, one replacement and two new triggers on
 `commerce_checkouts`. Full design: [`docs/commerce-refunds.md`](commerce-refunds.md).
 
 ### `commerce_refunds` and `commerce_refund_lines`
@@ -727,6 +727,7 @@ copy of the seven-day constant.
 | append-only | `commerce_refund_lines_no_update/_no_delete`, `commerce_refunds_no_delete` | every edit and delete of a money record |
 | a refunded checkout has a witness | `commerce_checkouts_refunded_requires_settled_refund` | `paid → refunded` with no settled refund naming that checkout |
 | a refunded checkout was paid | `commerce_checkouts_refunded_requires_paid_checkout` | `refunded` from any status other than `paid` (or a same-status no-op) — a `pending` or `needs_support` row whose money we do not hold, or may not return yet (#83) |
+| a refund settles only over paid checkouts | `commerce_refunds_settle_requires_paid_checkouts` | `requested → settled` while any checkout a line covers is not `paid` — the shape where the batch's own `WHERE status = 'paid'` would match nothing, commit the settle and leave the checkout parked |
 
 ### The refund protocol, in one paragraph
 
@@ -738,8 +739,11 @@ revocations it just wrote, moves each checkout to `refunded`, and writes one
 refund receipt per checkout. Every witness is a statement in the same
 transaction, so a lost compare-and-swap fails the whole batch instead of
 committing a refunded checkout with live access — and every witness is *counted*
-against the plan, because the checkout statement filters `status = 'paid'`, so a
-row it cannot move would otherwise match nothing and fire no trigger. If a
+against the plan. The count is a tripwire, not a rollback: the batch has already
+committed when it is compared, so it can only refuse a `200`. The storage rule for
+the shape it cannot fix is `commerce_refunds_settle_requires_paid_checkouts`: a
+refund may not settle while any checkout a line covers is not `paid`, which is
+exactly the row the checkout statement's `status = 'paid'` filter would skip. If a
 purchase settles while the provider call is in flight, the batch cannot add it (the
 lines are immutable and the provider has the amount) and the coverage-gap guard
 refuses at settle time: the answer is `503 provider_unavailable` with the refund
@@ -765,7 +769,11 @@ buy→refund loops is the one-per-exam cap, not a purchase ban.
   `WHERE`.
 
 Every response is `private, no-store`, `X-Robots-Tag: noindex, nofollow` and
-carries `X-Request-Id`; the `POST` also requires `Origin` and `X-CSRF-Token`.
+carries `X-Request-Id`; the `POST` also requires `Origin` and `X-CSRF-Token`. An
+undiagnosed failure on any commerce route answers `500 internal_error` in the same
+envelope with the same correlation id and private headers, and logs
+`{requestId, route, name, message}` — never the body and never the learner's
+`reason`.
 
 ### #79 — the receipt's `refund_id`
 

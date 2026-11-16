@@ -815,11 +815,14 @@ export interface RefundSettlementPlan {
  *
  * All four witnesses (settled, revoked, checkouts, receipts) are returned, and
  * `settleRefund` compares each to the plan it executed. A count that is short is
- * not cosmetic: statement 4 filters `status = 'paid'`, so a checkout that is
- * `pending` or `needs_support` when the batch runs matches **zero** rows and
- * fires no trigger at all - revocations and a settled refund would commit with the
- * checkout left exactly as it was. Neither the settle statement's compare-and-swap
- * nor any trigger can see that row; the returned count can.
+ * not cosmetic - and it is a tripwire rather than a rollback: this batch has
+ * already committed by the time the caller compares counts, so a short count can
+ * only make the caller refuse to answer `200`. The shape that used to rely on the
+ * count alone is now unreachable: statement 4 filters `status = 'paid'`, so a
+ * checkout that is `pending` or `needs_support` when the batch runs matches zero
+ * rows and fires no trigger there, and
+ * `commerce_refunds_settle_requires_paid_checkouts` (0020) aborts the batch one
+ * statement earlier, at the settle, for exactly that reason.
  */
 export async function applyRefundSettlement(
   database: SecurityDatabase,
@@ -1015,7 +1018,11 @@ async function settleRefund(
  * Every witness the batch returns must match the plan it executed. `settled` on
  * its own is not enough: the settle statement's compare-and-swap cannot see a
  * checkout that statement 4 refused to move, because that statement filters
- * `status = 'paid'` and a row it never touches fires no trigger.
+ * `status = 'paid'` and a row it never touches fires no trigger. The batch has
+ * committed by this point, so a short count is a reason to refuse a `200`, not a
+ * rollback - the abort for the non-`paid` checkout case is
+ * `commerce_refunds_settle_requires_paid_checkouts`, and this comparison is what
+ * would catch any other divergence between plan and storage.
  */
 function settledExactlyAsPlanned(
   witness: {
@@ -1057,7 +1064,7 @@ async function buildRefundSettlementPlan(
       grant.revoked_at === null &&
       !revokedIds.has(grant.id),
   );
-  // The coverage-gap guard (owner decision 1, docs/commerce-refunds.md §15), re-run
+  // The coverage-gap guard (owner decision 1, docs/commerce-refunds.md §15.1), re-run
   // against storage rather than trusted from the request-time plan. Between the
   // decision and this batch a second purchase can be settled (a second tab, a
   // webhook that arrived late), and every Standard purchase appends to the latest

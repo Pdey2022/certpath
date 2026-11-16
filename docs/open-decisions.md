@@ -54,10 +54,17 @@ need an owner or architect decision.
   decisions above are settled, not before.
 
 - An unresolved refund (`commerce_refunds.status = 'requested'`) holds the
-  one-per-exam slot until an operator resolves it with `requested → failed`. There
-  is no route and no job for that in B3; the row is the work queue, and the
-  alternative — treating an unanswered refund as a free retry — risks paying a
-  learner back twice.
+  one-per-exam slot until an operator resolves it. There is no route and no job
+  for that in B3; the row is the work queue, and the alternative — treating an
+  unanswered refund as a free retry — risks paying a learner back twice.
+  `requested → failed` is **not** a universal resolution: it may be written only
+  when the provider did not pay. It asserts "no money moved" and it frees the
+  one-per-exam cap, so where the provider *did* confirm and our settle refused
+  (a purchase landed during the provider call, or 0014 aborted every retry) the
+  row must stay `requested` — `failed` there would both misstate the ledger and
+  permit a second refund of the same checkout. Support resolves that shape
+  against the provider's own record. `docs/commerce.md` §Failure paths states
+  both shapes.
 - Monitoring, alerting and on-call expectations for the pilot.
 
 ## Architect decisions still open
