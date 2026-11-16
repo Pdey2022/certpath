@@ -65,7 +65,10 @@ export function isValidProEnablementMutation(
     typeof mutation.enabled === "boolean" &&
     operationPattern.test(mutation.operationId) &&
     mutation.reason.trim().length > 0 &&
-    mutation.reason.length <= 500 &&
+    // The same 200-character bound as `proEnablementRequestSchema` and the
+    // storage CHECK in 0017: one bound, so a value accepted anywhere is
+    // accepted everywhere.
+    mutation.reason.length <= 200 &&
     Number.isSafeInteger(mutation.now)
   );
 }
@@ -281,8 +284,8 @@ export async function recordProEnablement(
     throw error;
   }
 
-  // The witness is the returned row, not `meta.changes`: the audit trigger
-  // writes a second row, so `changes` is 2 for a single act.
+  // The witness is the returned row, not `meta.changes`: `changes` counts rows
+  // the audit trigger also inserts, so it is not a row witness.
   if ((results[0]?.results ?? []).length !== 1) {
     // No row: either the actor lost the role, or the certification is gone, or
     // the requested state already holds. All three fail closed; the probes use

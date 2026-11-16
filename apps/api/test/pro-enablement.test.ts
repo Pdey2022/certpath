@@ -486,6 +486,56 @@ describe("pro enablement storage guarantees", () => {
     ).rejects.toThrow(/UNIQUE constraint failed/);
   });
 
+  it("bounds the reason at 200 characters in the module and in storage", async () => {
+    // One bound everywhere: the HTTP request schema, this module and the CHECK in
+    // 0017. 200 is what a caller can hit; 201 is refused by all three.
+    const scope = await createContentScope(database);
+    const admin = await staffActor("global_admin");
+    const actor = {
+      tokenDigest: await digestFor(admin),
+      userId: admin.userId,
+    };
+    const write = (reason: string) =>
+      recordProEnablement(database, {
+        actor,
+        certificationId: scope.certificationId,
+        mutation: {
+          enabled: true,
+          reason,
+          operationId: `fixture-enablement:${crypto.randomUUID()}`,
+          now: clock,
+        },
+        policy: staffPolicy,
+      });
+
+    expect((await write("x".repeat(200))).ok).toBe(true);
+    expect(await write("x".repeat(201))).toEqual({
+      ok: false,
+      reason: "invalid-input",
+    });
+    expect(await actCount(scope.certificationId)).toBe(1);
+
+    // The route is not the only way in: the table refuses the same value.
+    await expect(
+      database
+        .prepare(
+          `INSERT INTO certification_pro_enablement (
+             id, certification_id, enabled, effective_at,
+             changed_by_user_id, operation_id, reason
+           ) VALUES (?, ?, 1, ?, ?, ?, ?)`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          scope.certificationId,
+          clock + 1,
+          admin.userId,
+          `fixture-enablement:${crypto.randomUUID()}`,
+          "x".repeat(201),
+        )
+        .run(),
+    ).rejects.toThrow(/CHECK constraint failed/);
+  });
+
   it("leaves certifications immutable", async () => {
     const scope = await createContentScope(database);
     await expect(

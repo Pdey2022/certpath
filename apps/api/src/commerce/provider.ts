@@ -117,6 +117,10 @@ export function resolvePaymentProvider(
   return createFakeProvider({
     secret,
     now,
+    // An unset PUBLIC_SITE_ORIGIN yields a relative redirect URL from the fake
+    // adapter. That fallback stays for local use, but PR B must treat an unset
+    // origin as a `503` on every commerce route rather than serve a relative
+    // checkout URL: a provider redirect is an absolute URL by definition.
     origin: bindings.PUBLIC_SITE_ORIGIN ?? "",
   });
 }

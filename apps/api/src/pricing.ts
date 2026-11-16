@@ -25,9 +25,9 @@ export const proTerm: TermSpec = {
 };
 
 /**
- * DISPLAY ONLY: the "≈90 days" number shown next to the Pro requirement. Never a
- * gate - the gate compares the stored coverage end against `addTerm(now,
- * proTerm)`.
+ * Display-only constant, currently unreferenced; it gates nothing. ADR 0003 names
+ * it, so it is kept, but no code reads it: the gate compares the Standard
+ * coverage window against `addTerm(now, proTerm)`.
  */
 export const proDisplayMinStandardDays = 90;
 
@@ -130,14 +130,22 @@ export function isProOffered(record: ProEnablementRecord | null): boolean {
   return record !== null && record.enabled;
 }
 
+/**
+ * A Standard coverage window as storage records it, half-open
+ * `[startsAt, endsAt)`. The gate takes the whole window rather than a bare end
+ * so that it can test the start itself; see `standardCoversProWindow`.
+ */
+export type StandardCoverage = { startsAt: number; endsAt: number };
+
 export type ProPurchaseInput = {
   /** Pro is only sold where the real exam is adaptive. */
   proOffered: boolean;
   /**
-   * End of the latest non-revoked Standard grant that is live at `now`, or null
-   * when there is none.
+   * The Standard window that covers `now`, or null when there is none. A window
+   * that starts after `now` is passed as it is and refused by the gate, not
+   * dropped by the caller.
    */
-  standardCoverageEndMs: number | null;
+  standardCoverage: StandardCoverage | null;
   /** End of a live non-revoked Pro grant on this certification, or null. */
   activeProEndsAtMs: number | null;
   now: number;
@@ -157,19 +165,63 @@ export function proWindow(now: number): { startsAt: number; endsAt: number } {
 }
 
 /**
- * The Pro gate, identical to the storage predicate
- * `learner_access_grants_pro_requires_standard` (0013): Standard coverage must
- * reach at least a full Pro term past `now`. Equality is allowed.
+ * The two windows one bundle purchase writes, from one anchor.
  *
- * A coverage end that reaches a full Pro term is necessarily later than `now`
- * (a term always advances), so this also rejects coverage that has ended.
+ * Product rule (`docs/product-design.md`: "Early Standard extension begins at the
+ * end of continuous current coverage"): the Standard leg **stacks** on live
+ * coverage, so 11 months of Standard plus the bundle is 14 months, 2 months is
+ * 5, and no coverage is 3. `coverageEnd` is null-as-`now`, so a first-time buyer
+ * gets a plain 3-month term.
+ *
+ * Both legs start at the same `now`. `max` is load-bearing, not defensive:
+ * calendar addition with a day clamp is **not order-preserving**, so
+ * `addTerm(coverageEnd, term)` can land *before* `addTerm(now, term)`. With
+ * `coverageEnd = 2026-01-31T00:00Z` and `now = 2026-01-30T18:00Z` both clamp into
+ * 30 April and the time of day decides: `addTerm(coverageEnd, 3 months)` is
+ * 30 Apr 00:00, `addTerm(now, 3 months)` is 30 Apr 18:00. Without the `max` the
+ * Standard leg would end before the Pro leg and 0013 would abort the bundle.
+ *
+ * With it, 0013 accepts by construction: `S.starts_at = P.starts_at = now` and
+ * `S.expires_at = max(...) >= addTerm(now, term) = P.expires_at`, which needs no
+ * ordering property of month arithmetic at all.
+ */
+export function bundleWindows(
+  coverageEndMs: number | null,
+  now: number,
+): { standard: StandardCoverage; pro: StandardCoverage } {
+  const term = termFor("bundle-standard-3m-pro");
+  const proLeg = proWindow(now);
+  const stacked = addTerm(coverageEndMs ?? now, term);
+  return {
+    standard: { startsAt: now, endsAt: Math.max(stacked, proLeg.endsAt) },
+    pro: proLeg,
+  };
+}
+
+/**
+ * The Pro gate, identical to the storage predicate
+ * `learner_access_grants_pro_requires_standard` (0013): a non-revoked Standard
+ * grant must satisfy `starts_at <= now` **and**
+ * `expires_at >= addTerm(now, proTerm)`. Equality is allowed.
+ *
+ * The start is tested here, not by the caller, so the guarantee is structural: a
+ * coverage window that begins in the future has an end that can comfortably
+ * exceed a full Pro term, and an end-only test would allow a purchase that 0013
+ * then refuses.
+ *
+ * `startsAt <= now` and `endsAt` taken together stay 0013-consistent for the
+ * pair `evaluateFeature` returns: the grant supplying `endsAt` is itself active
+ * at `now`, so it is a single witness for both conditions.
  */
 export function standardCoversProWindow(
-  standardCoverageEndMs: number | null,
+  standardCoverage: StandardCoverage | null,
   now: number,
 ): boolean {
-  if (standardCoverageEndMs === null) return false;
-  return standardCoverageEndMs >= proWindow(now).endsAt;
+  if (standardCoverage === null) return false;
+  return (
+    standardCoverage.startsAt <= now &&
+    standardCoverage.endsAt >= proWindow(now).endsAt
+  );
 }
 
 /**
@@ -177,10 +229,10 @@ export function standardCoversProWindow(
  * add-on, i.e. exactly when Standard cannot cover a full Pro term.
  */
 export function requiresBundle(
-  standardCoverageEndMs: number | null,
+  standardCoverage: StandardCoverage | null,
   now: number,
 ): boolean {
-  return !standardCoversProWindow(standardCoverageEndMs, now);
+  return !standardCoversProWindow(standardCoverage, now);
 }
 
 /**
@@ -194,10 +246,7 @@ export function requiresBundle(
  * way to find the end of a window.
  */
 export function canPurchasePro(input: ProPurchaseInput): ProPurchaseDecision {
-  const standardIsShort = requiresBundle(
-    input.standardCoverageEndMs,
-    input.now,
-  );
+  const standardIsShort = requiresBundle(input.standardCoverage, input.now);
   if (!input.proOffered) {
     return {
       allowed: false,

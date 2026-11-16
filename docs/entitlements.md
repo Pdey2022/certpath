@@ -82,7 +82,7 @@ reach a full Pro term.
 | Condition | Result |
 |---|---|
 | the exam is not Pro-capable | `pro-not-offered` |
-| Standard coverage ends before `addTerm(now, proTerm)` | `standard-too-short` (offer the bundle or a top-up) |
+| Standard coverage does not span `now` to `addTerm(now, proTerm)` (it is absent, starts later, or ends too soon) | `standard-too-short` (offer the bundle or a top-up) |
 | a Pro grant is still live (`expires_at > now`) | `pro-window-active` |
 | otherwise | allowed |
 
@@ -92,15 +92,19 @@ when the current `certification_pro_enablement` row for the exam has
 through `POST /api/admin/commerce/certifications/:id/pro-enablement`, which
 appends to an append-only log and audits every act by trigger.
 
-The "≈90 days" figure (`proDisplayMinStandardDays`) is display copy for the
-coverage rule. It gates nothing.
+The gate takes the whole Standard window (`startsAt` and `endsAt`), so a grant
+that begins in the future is refused by the gate itself rather than passed to a
+trigger that would abort the insert.
+
+The "≈90 days" figure (`proDisplayMinStandardDays`) is a display-only constant,
+currently unreferenced. It gates nothing.
 
 The price list is **provisional** until a fake-door test measures conversion. The
 rules around it are not provisional, and no route may hard-code a price.
 
 ## Not in this phase
 
-Checkout, payment provider adapters, webhooks, receipts and refund execution
-arrive in the next commerce change ([issue #47](https://github.com/Pdey2022/certpath/issues/47)).
+Checkout, a real payment provider adapter, webhooks, receipts and refund
+execution arrive in the next commerce change ([issue #47](https://github.com/Pdey2022/certpath/issues/47)).
 `docs/commerce.md` states exactly what exists today and what does not. This phase
 defines the model those features write into, plus Pro enablement itself.

@@ -5,7 +5,11 @@ import {
   graceDaysRemaining,
   type AccessGrantRecord,
 } from "../entitlements.ts";
-import { isProOffered, standardCoversProWindow } from "../pricing.ts";
+import {
+  isProOffered,
+  standardCoversProWindow,
+  type StandardCoverage,
+} from "../pricing.ts";
 import type { SecurityDatabase } from "./database.ts";
 import { readProEnablement } from "./pro-enablement.ts";
 import { loadLatestReadiness } from "./readiness-snapshots.ts";
@@ -205,6 +209,10 @@ export async function getLearnerDashboard(
     string,
     LearnerDashboardResponse["groups"][number]
   >();
+  // The Standard window per group, kept beside the response rather than inside
+  // it: the Pro gate needs `startsAt` as well as `endsAt`, and the dashboard
+  // contract carries only `endsAt`.
+  const standardCoverage = new Map<string, StandardCoverage | null>();
   for (const scope of scopes.results) {
     const access = evaluateAccess(
       grantsByCertification.get(scope.certification_id) ?? [],
@@ -213,7 +221,8 @@ export async function getLearnerDashboard(
     // Read access is what the dashboard itself needs; grace grants that, an
     // expired membership does not.
     if (!can(access, "results")) continue;
-    groups.set(`${scope.certification_id}\n${scope.exam_version_id}`, {
+    const key = `${scope.certification_id}\n${scope.exam_version_id}`;
+    groups.set(key, {
       certificationId: scope.certification_id,
       certificationName: scope.certification_name,
       examVersionId: scope.exam_version_id,
@@ -229,6 +238,15 @@ export async function getLearnerDashboard(
       resumable: [],
       completed: [],
     });
+    standardCoverage.set(
+      key,
+      access.standard.startsAt !== null && access.standard.endsAt !== null
+        ? {
+            startsAt: access.standard.startsAt,
+            endsAt: access.standard.endsAt,
+          }
+        : null,
+    );
   }
 
   for (const row of [...practice.results, ...timedMocks.results]) {
@@ -271,13 +289,16 @@ export async function getLearnerDashboard(
   //
   // Pro availability is a stored commercial fact plus the same coverage
   // predicate the purchase rule uses, read for every certification on the page
-  // in one query rather than one query per exam.
+  // in one query rather than one query per exam. The gate takes the whole
+  // Standard window, so a coverage that only starts later cannot advertise (or
+  // sell) Pro that 0013 would refuse.
+  const entries = [...groups.entries()];
   const enablement = await readProEnablement(
     database,
-    [...groups.values()].map((group) => group.certificationId),
+    entries.map(([, group]) => group.certificationId),
   );
   await Promise.all(
-    [...groups.values()].map(async (group) => {
+    entries.map(async ([key, group]) => {
       const stored = await loadLatestReadiness(
         database,
         {
@@ -300,7 +321,7 @@ export async function getLearnerDashboard(
           stored.isCurrent &&
           stored.isReady &&
           isProOffered(enablement.get(group.certificationId) ?? null) &&
-          standardCoversProWindow(group.access.endsAt, now),
+          standardCoversProWindow(standardCoverage.get(key) ?? null, now),
       };
     }),
   );

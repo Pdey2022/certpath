@@ -65,8 +65,8 @@ Standard term of exactly three months covers a Pro term bought at its start.
 The repurchase check reads the **stored** Pro expiry. It never re-derives an
 expiry from a start instant.
 
-`proDisplayMinStandardDays = 90` is the "≈90 days" figure shown in copy. It is
-not a threshold anything tests against.
+`proDisplayMinStandardDays = 90` is a display-only constant, currently
+unreferenced. It gates nothing.
 
 ## Pro enablement
 
@@ -129,6 +129,47 @@ session.
 **The port is not wired into any route yet.** No commerce binding is required to
 compile or deploy this phase, and no webhook exists to receive an event.
 
+## The bundle stacks on live coverage
+
+`bundle-standard-3m-pro` writes two windows from one anchor, and
+`apps/api/src/pricing.ts` (`bundleWindows`) is the only place that arithmetic may
+live:
+
+- Standard `[now, max(addTerm(coverageEnd, 3 months), addTerm(now, 3 months)))`
+- Pro `[now, addTerm(now, 3 months))`
+
+`coverageEnd` is the end of live Standard coverage, or `null`-as-`now` when there
+is none. The Standard leg **stacks**: a learner with 11 months gets 14, one with
+2 gets 5, one with none gets 3. That is `docs/product-design.md`: "Early Standard
+extension begins at the end of continuous current coverage".
+
+The `max` exists because **calendar arithmetic is not order-preserving** (see
+"Terms are calendar months" above). With `coverageEnd = 2026-01-31T00:00Z` and
+`now = 2026-01-30T18:00Z`, `addTerm(coverageEnd, 3 months)` is 30 Apr 00:00 while
+`addTerm(now, 3 months)` is 30 Apr 18:00: the later instant yields the earlier
+expiry, so the uncapped leg can end before the Pro leg and 0013 would abort the
+bundle. The `max` is not defensive tidying; removing it reintroduces that abort.
+
+A **cap** on this leg was decided on 2026-11-16 and withdrawn by the owner the
+same day, after seeing that a mid-term buyer would pay for the bundle and receive
+no extra Standard.
+
+### AC-5 — the bundle covers itself under one clock
+
+One batch writes Standard
+`[now, max(addTerm(coverageEnd, term), addTerm(now, term)))` and Pro
+`[now, addTerm(now, term))`, both carrying the identical `now`; 0013 accepts by
+construction because `S.starts_at = P.starts_at` and
+`S.expires_at = max(...) >= addTerm(now, term) = P.expires_at`, which holds
+**without** any ordering property of month arithmetic. Observable: both rows'
+`starts_at` are byte-identical; `S.expires_at >= P.expires_at` holds in the
+inversion case above; a learner with 11 months of coverage gets a Standard row
+ending 3 calendar months past their previous coverage end.
+
+Not yet observable: both legs sharing one `operation_id`. `learner_access_grants`
+`operation_id` is `UNIQUE` and `audit_events.operation_id` is the primary key, so
+one operation id for two rows is refused today. Raised for ARC, not decided here.
+
 ## Owner decisions carried forward
 
 Decided by the owner on 2026-11-16; not implemented, and not implemented
@@ -137,10 +178,6 @@ elsewhere either:
 - One self-serve refund **ever** per `(account, exam)`.
 - A refund of a Standard purchase that would orphan a separately-bought Pro
   refunds **both** checkouts in one refund record, Pro revoked before Standard.
-- The bundle's Standard leg is capped at
-  `[now, max(coverageEnd, addTerm(now, 3 months)))`, so a mid-term buyer gets
-  exactly three extra months of Standard rather than the old remainder plus
-  three.
 
 ## Arrives in the next commerce change (not present today)
 

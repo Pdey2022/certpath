@@ -1,6 +1,8 @@
 # ADR 0005: Readiness signal and access lifecycle
 
-- Status: Accepted, with owner approval on 2026-11-14.
+- Status: Accepted, with owner approval on 2026-11-14. Amended 2026-11-16 (see the
+  annotation under "Consequences") to replace the 90-day Pro prompt clause with
+  the coverage predicate.
 - Scope: Learner-facing readiness, the dashboard's next action, and what happens
   when a membership expires.
 
@@ -71,6 +73,22 @@ read state, not an entitlement: it never permits new questions or mocks.
   records; no new tracking surface is required.
 - The Pro prompt is `readiness = ready AND proEnabled AND standard remaining >=
   90 days` - one query, one place.
+
+  > _Amendment (2026-11-16, owner approved — the same decision that amended
+  > ADR 0003)._ The 90-day clause above is superseded; the decision text is left
+  > as written. The prompt is now
+  > `isCurrent AND isReady AND isProOffered AND the coverage predicate`, where
+  > the coverage predicate is ADR 0003 rule 1 and 0013's
+  > `learner_access_grants_pro_requires_standard`: a non-revoked Standard grant
+  > for the same account and exam with `starts_at <= now < expires_at` **and**
+  > `expires_at >= addTerm(now, proTerm)`. The flat 90 days was wrong in both
+  > directions — it refused Pro inside a full 3-month term bought on 1 February
+  > (89 days) and allowed a Pro window that ran past Standard, which 0013 then
+  > aborted after money was taken. 90 days survives as a display-only constant
+  > (`proDisplayMinStandardDays`), rendered nowhere and gating nothing.
+  > `apps/api/src/security/learner-dashboard.ts` and `docs/readiness.md`
+  > already describe the coverage predicate; this note removes the contradiction.
+
 - The readiness percentage is a customer-facing promise, so its basis line, its
   version, and its decay are part of the API contract, not presentation.
 - Grace days must be part of `canAccess()`; a route that ignores the state is a

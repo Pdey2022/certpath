@@ -9,7 +9,7 @@ need an owner or architect decision.
 | Decision | Outcome | Record |
 |---|---|---|
 | Price ladder | $59 / $89 / $129 (3 / 6 / 12 months), USD | [ADR 0003](decisions/0003-pricing-pro-and-refunds.md) |
-| Pro price and rules | $49 flat, 3 calendar months, CAT exams only, requires Standard coverage of a full Pro term (90 days kept as display copy only) | ADR 0003, amended 2026-11-16 |
+| Pro price and rules | $49 flat, 3 calendar months, CAT exams only, requires Standard coverage of a full Pro term (90 days kept as a display-only constant) | ADR 0003, amended 2026-11-16 |
 | Refunds | 7 days, no questions, one per account per exam | ADR 0003 |
 | Free sample | Guest sample: 10 questions + a mini mock, no account | ADR 0003 |
 | Recurring vs fixed term | Fixed-term one-off; no recurring at launch | ADR 0003 |

@@ -20,7 +20,7 @@ export const proEnablementActSchema = z
     enabled: z.boolean(),
     effectiveAt: safeInteger,
     operationId,
-    reason: z.string().min(1).max(500),
+    reason: z.string().min(1).max(200),
   })
   .strict();
 

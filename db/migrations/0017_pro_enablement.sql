@@ -22,7 +22,7 @@ CREATE TABLE certification_pro_enablement (
   effective_at INTEGER NOT NULL,
   changed_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   operation_id TEXT NOT NULL UNIQUE,
-  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 500),
+  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 200),
   UNIQUE (certification_id, effective_at)     -- one act per millisecond per exam
 );
 

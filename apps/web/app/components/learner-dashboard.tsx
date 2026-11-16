@@ -166,8 +166,8 @@ function ReadinessPanel({
       )}
       {readiness.proPrompt && (
         <p>
-          Pro is available for this exam while your Standard access runs for at
-          least 90 more days.
+          Pro is available for this exam while your Standard access covers a
+          full Pro term.
         </p>
       )}
     </section>

@@ -200,7 +200,12 @@ test("renders Pro only when the promotion gate and term both pass", async () => 
 
   await screen.findByText("In form");
   assert.ok(screen.getByText(/You have met the readiness rule/));
-  assert.ok(screen.getByText(/Pro is available/i));
+  // B-1: the prompt states the coverage rule, not a day count. A learner inside
+  // a 3-month term bought on 1 February has 89 days, so any number is a lie in
+  // exactly the case the coverage predicate exists to fix.
+  const prompt = screen.getByText(/Pro is available/i);
+  assert.match(prompt.textContent ?? "", /covers a full Pro term/);
+  assert.doesNotMatch(prompt.textContent ?? "", /\d/);
 });
 
 test("shows the grace countdown and asks for a fresh mock instead of a stale band", async () => {
