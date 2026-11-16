@@ -150,7 +150,10 @@ The fake adapter (`PAYMENT_PROVIDER=fake`) is `live: false`, takes no card data,
 and signs events as `X-CertPath-Signature: t=<seconds>,v1=<hex HMAC-SHA256(secret, "t.body")>`
 with a 300-second replay window and a constant-time comparison. Its sessions are
 keyed on our checkout id, so a retried `createCheckout` returns the same
-session.
+session. Its three URLs — `/commerce/fake-pay` for the redirect,
+`/commerce/checkout/complete` and `/commerce/checkout/cancelled` for
+`successUrl` / `cancelUrl` — are placeholders: no route serves any of them until
+the Phase 5 UI lands.
 
 `createCheckout` and `resolvePaymentProvider` are wired into checkout creation.
 `verifyEvent` and `refund` are **not** wired into any route: there is no webhook
@@ -186,10 +189,16 @@ Three tables, no rebuild of anything, and `learner_access_grants` untouched.
 
 ### `commerce_checkouts`
 
-One row is a request to buy: `id`, `user_id`, `certification_id`,
+One row is a request to buy: `id`, `user_id`, `certification_id`, `sku`,
 `client_checkout_key`, `request_fingerprint`, `currency`, `total_minor`,
 `status`, `provider`, `provider_session_id`, `provider_redirect_url`,
 `created_at`, `updated_at`, `expires_at`, `paid_at`.
+
+`sku` is the price-list key that was bought. It is stored rather than inferred
+from the lines because the bundle's `standard-3m` + `pro-3m` line pair describes
+the same two features as a Pro purchase made on top of existing Standard
+coverage; only the row says which one settlement is looking at, and the two need
+different writes.
 
 - `status` is one of `pending | paid | failed | expired | needs_support | refunded`.
 - `UNIQUE (user_id, client_checkout_key)` is the idempotency witness;
@@ -204,7 +213,7 @@ Storage guards, each a trigger rather than a convention:
 
 | Trigger | Refuses |
 |---|---|
-| `commerce_checkouts_immutable` | any change to `user_id`, `certification_id`, `client_checkout_key`, `request_fingerprint`, `currency`, `total_minor`, `provider`, `created_at`, `expires_at` |
+| `commerce_checkouts_immutable` | any change to `user_id`, `certification_id`, `sku`, `client_checkout_key`, `request_fingerprint`, `currency`, `total_minor`, `provider`, `created_at`, `expires_at` |
 | `commerce_checkouts_status_transition` | any edge outside `pending → {paid, failed, expired, needs_support}`, `expired → paid`, `paid → needs_support` (no-op same-status writes are allowed) |
 | `commerce_checkouts_no_delete` | every delete |
 
@@ -295,8 +304,9 @@ request never carries an amount, and a response amount that disagreed with the
 stored snapshot would fail the contract parse before it left the Worker.
 
 The response is
-`{ checkoutId, status, currency, totalMinor, lines[], redirectUrl, expiresAt,
-paidAt, refundWindowEndsAt }`, where each line is
+`{ checkoutId, sku, status, currency, totalMinor, lines[], redirectUrl,
+expiresAt, paidAt, refundWindowEndsAt }`, where `sku` is the purchased SKU and
+each line is
 `{ sku, label, amountMinor, feature, term, priceSource }` and `term` is the
 `TermSpec` the line grants — never a day count standing in for a month. `paidAt`
 and `refundWindowEndsAt` are `null` because nothing in this phase can pay a

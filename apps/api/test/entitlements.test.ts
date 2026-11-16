@@ -439,6 +439,11 @@ describe("price list", () => {
     const parts =
       priceList["standard-3m"].amountMinor + priceList["pro-3m"].amountMinor;
     expect(bundle).toBeLessThan(parts);
+    // The bundle's Pro line is the residual `bundle - standard-3m`, and a line
+    // amount is CHECKed `> 0`. Without this bound a price edit that dropped the
+    // bundle to (or below) the Standard price would surface as a 500 from that
+    // CHECK instead of as a failed test.
+    expect(bundle).toBeGreaterThan(priceList["standard-3m"].amountMinor);
     expect(priceList["pro-3m"].amountMinor).toBeLessThan(
       priceList["standard-3m"].amountMinor,
     );

@@ -120,6 +120,23 @@ async function liveStandard(
   );
 }
 
+/**
+ * Counts the grant rows a checkout could have written. Settlement's operation
+ * ids are `"<checkoutId>:<feature>"` (0019, `grantOperationId`); nothing else in
+ * these tests writes a colon-bearing operation id, so any match is a grant that
+ * checkout creation had no business writing.
+ */
+async function checkoutGrantRows(userId: string): Promise<number> {
+  const row = await database
+    .prepare(
+      `SELECT COUNT(*) AS rows FROM learner_access_grants
+       WHERE user_id = ? AND operation_id LIKE '%:%'`,
+    )
+    .bind(userId)
+    .first<{ rows: number }>();
+  return row?.rows ?? -1;
+}
+
 interface RequestOptions {
   method?: string;
   actor?: Learner;
@@ -416,6 +433,7 @@ describe("checkout creation", () => {
       const body = commerceCheckoutResponseSchema.parse(await response.json());
 
       expect(body.status).toBe("pending");
+      expect(body.sku).toBe(sku);
       expect(body.currency).toBe(currency);
       expect(body.totalMinor).toBe(priceList[sku].amountMinor);
       expect(body.totalMinor).toBe(
@@ -445,7 +463,57 @@ describe("checkout creation", () => {
         .bind(actor.userId, certificationId)
         .first<{ rows: number }>();
       expect(stored?.rows, sku).toBe(1);
+
+      // A checkout grants nothing. Settlement writes grants from the price
+      // snapshot, and its operation ids are `<checkoutId>:<feature>`; the
+      // fixtures above carry no `operation_id` and this route writes none, so
+      // any row matching that shape here is a settlement leak into creation.
+      expect(await checkoutGrantRows(actor.userId), sku).toBe(0);
     }
+  });
+
+  it("stores the purchased SKU on the checkout and returns it", async () => {
+    // The bundle's lines are `standard-3m` and `pro-3m` - the same feature pair a
+    // Pro purchase made on top of Standard coverage describes - so the line set
+    // cannot say which product was sold; only the row can. Settlement branches on
+    // this field, so it has to survive the round trip through storage, the replay
+    // and the read.
+    const { actor, certificationId } = await purchaserOf(
+      "bundle-standard-3m-pro",
+    );
+    const body = {
+      certificationId,
+      sku: "bundle-standard-3m-pro",
+      clientCheckoutKey: `sku-${crypto.randomUUID()}`,
+    };
+    const created = await createCheckoutRequest(actor, body);
+    expect(created.status).toBe(201);
+    const checkout = commerceCheckoutResponseSchema.parse(await created.json());
+    expect(checkout.sku).toBe("bundle-standard-3m-pro");
+    expect(checkout.lines.map((line) => line.sku)).toEqual([
+      "standard-3m",
+      "pro-3m",
+    ]);
+
+    const stored = await database
+      .prepare("SELECT sku FROM commerce_checkouts WHERE id = ?")
+      .bind(checkout.checkoutId)
+      .first<{ sku: string }>();
+    expect(stored?.sku).toBe("bundle-standard-3m-pro");
+
+    const replayed = commerceCheckoutResponseSchema.parse(
+      await (await createCheckoutRequest(actor, body)).json(),
+    );
+    expect(replayed.sku).toBe("bundle-standard-3m-pro");
+
+    const read = await call(
+      `/api/commerce/checkouts/${encodeURIComponent(checkout.checkoutId)}`,
+      { actor },
+    );
+    expect(read.status).toBe(200);
+    expect(commerceCheckoutResponseSchema.parse(await read.json()).sku).toBe(
+      "bundle-standard-3m-pro",
+    );
   });
 
   it("splits the bundle into a Standard line and a residual Pro line", async () => {
@@ -941,6 +1009,11 @@ describe("provider outage", () => {
       .bind(actor.userId)
       .first<{ rows: number }>();
     expect(rows?.rows).toBe(1);
+
+    // A provider outage and the retry that follows it move no entitlement: the
+    // first attempt wrote a priced row before the throw, the second re-bound a
+    // session, and neither wrote a grant.
+    expect(await checkoutGrantRows(actor.userId)).toBe(0);
   });
 });
 
@@ -1061,6 +1134,7 @@ describe("storage invariants", () => {
     for (const [column, value] of [
       ["total_minor", 1],
       ["currency", "EUR"],
+      ["sku", "standard-6m"],
       ["client_checkout_key", "different-key"],
       ["request_fingerprint", "0".repeat(64)],
       ["provider", "other"],
@@ -1202,12 +1276,12 @@ describe("storage invariants", () => {
     await database
       .prepare(
         `INSERT INTO commerce_checkouts (
-           id, user_id, certification_id, client_checkout_key,
+           id, user_id, certification_id, sku, client_checkout_key,
            request_fingerprint, currency, total_minor, status, provider,
            provider_session_id, provider_redirect_url, created_at, updated_at,
            expires_at, paid_at
-         ) VALUES (?, ?, ?, 'term-shape-fixture', ?, ?, 100000, 'pending',
-                   'fake', NULL, NULL, ?, ?, ?, NULL)`,
+         ) VALUES (?, ?, ?, 'standard-3m', 'term-shape-fixture', ?, ?, 100000,
+                   'pending', 'fake', NULL, NULL, ?, ?, ?, NULL)`,
       )
       .bind(
         checkoutId,

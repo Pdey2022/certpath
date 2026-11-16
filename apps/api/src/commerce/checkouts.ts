@@ -394,6 +394,7 @@ interface CheckoutRow {
   id: string;
   user_id: string;
   certification_id: string;
+  sku: string;
   client_checkout_key: string;
   request_fingerprint: string;
   currency: string;
@@ -434,7 +435,7 @@ async function findCheckout(
 ): Promise<CheckoutRow | null> {
   return database
     .prepare(
-      `SELECT id, user_id, certification_id, client_checkout_key,
+      `SELECT id, user_id, certification_id, sku, client_checkout_key,
               request_fingerprint, currency, total_minor, status, provider,
               provider_session_id, provider_redirect_url, created_at,
               updated_at, expires_at, paid_at
@@ -475,6 +476,7 @@ function toResponse(
     (row.status === "pending" || row.expires_at > now);
   return {
     checkoutId: row.id,
+    sku: row.sku as CommerceSku,
     status: row.status,
     currency: row.currency,
     totalMinor: row.total_minor,
@@ -610,12 +612,12 @@ export async function createCheckout(
       database
         .prepare(
           `INSERT INTO commerce_checkouts (
-             id, user_id, certification_id, client_checkout_key,
+             id, user_id, certification_id, sku, client_checkout_key,
              request_fingerprint, currency, total_minor, status, provider,
              provider_session_id, provider_redirect_url, created_at, updated_at,
              expires_at, paid_at
            )
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, ?, ?, ?, NULL)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, ?, ?, ?, NULL)
            ON CONFLICT (user_id, client_checkout_key) DO NOTHING
            RETURNING id`,
         )
@@ -623,6 +625,7 @@ export async function createCheckout(
           checkoutId,
           input.userId,
           input.certificationId,
+          input.sku,
           input.clientCheckoutKey,
           fingerprint,
           currency,

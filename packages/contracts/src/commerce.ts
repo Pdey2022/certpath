@@ -127,6 +127,13 @@ export const commerceCheckoutRequestSchema = z
 export const commerceCheckoutResponseSchema = z
   .object({
     checkoutId: id,
+    /**
+     * What was bought, as the price-list key - the SKU the learner chose, not a
+     * line. The bundle's `standard-3m` + `pro-3m` line pair describes the same
+     * two features as a Pro purchase made on top of Standard coverage, so
+     * settlement branches on this field rather than on line shape.
+     */
+    sku: commerceSkuSchema,
     status: commerceCheckoutStatusSchema,
     currency: currencyCode,
     totalMinor: safeInteger.positive(),

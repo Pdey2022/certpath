@@ -34,6 +34,17 @@ CREATE TABLE commerce_checkouts (
   id TEXT PRIMARY KEY NOT NULL,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   certification_id TEXT NOT NULL REFERENCES certifications(id) ON DELETE RESTRICT,
+  -- What was bought, as the price-list key. Settlement branches on this rather
+  -- than inferring the product from the line shapes: a bundle's `standard-3m` +
+  -- `pro-3m` pair and a Pro purchase made against existing Standard coverage
+  -- describe the same two features at line level, yet the bundle's Standard leg
+  -- must be appended to the coverage and a plain Pro purchase must not. A
+  -- settlement branch that guessed "bundle" from line shape would write a
+  -- Standard grant starting at `coverageEnd > now` and then abort the Pro insert
+  -- at 0013 - money taken, no entitlement, through a shape the schema
+  -- encouraged. The row also answers "which SKU was this" without reconstructing
+  -- the bundle from `pricing.ts`.
+  sku TEXT NOT NULL,
   client_checkout_key TEXT NOT NULL
     CHECK (length(client_checkout_key) BETWEEN 8 AND 128),
   request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64),
@@ -97,6 +108,7 @@ CREATE TRIGGER commerce_checkouts_immutable
 BEFORE UPDATE ON commerce_checkouts
 WHEN NEW.user_id IS NOT OLD.user_id
   OR NEW.certification_id IS NOT OLD.certification_id
+  OR NEW.sku IS NOT OLD.sku
   OR NEW.client_checkout_key IS NOT OLD.client_checkout_key
   OR NEW.request_fingerprint IS NOT OLD.request_fingerprint
   OR NEW.currency IS NOT OLD.currency
