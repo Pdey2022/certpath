@@ -1023,11 +1023,10 @@ describe("what settlement refuses to do", () => {
     ).toBe(1);
   });
 
-  it("does not resurrect a checkout the provider already failed", async () => {
-    // `failed -> paid` is not an edge 0018 permits, and settlement must not be a
-    // way around the transition guard: a later `checkout.completed` for the same
-    // checkout cannot grant, and the event is recorded as inconsistent rather than
-    // applied.
+  it("settles money that arrives after the provider already failed the checkout", async () => {
+    // 0020 makes `failed -> paid` legal, and the five widened predicates in
+    // `webhooks.ts` are what make the edge real: without them this completion
+    // would write nothing and the money would sit only in the event ledger.
     const { actor, certificationId } = await purchaserOf("standard-3m");
     const checkout = await createCheckout(actor, certificationId, "standard-3m");
     const failed = completedEvent(checkout, {
@@ -1040,19 +1039,87 @@ describe("what settlement refuses to do", () => {
     const late = completedEvent(checkout);
     const delivery = await deliver(late);
     expect(delivery.status).toBe(200);
-    expect((await eventRow(late.eventId))?.outcome).toBe("ignored-inconsistent");
-    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("failed");
+    expect(delivery.body).toMatchObject({ received: true, duplicate: false });
+    expect((await eventRow(late.eventId))?.outcome).toBe("applied");
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("paid");
+    expect((await checkoutRow(checkout.checkoutId))?.paid_at).toBe(clock);
+    expect(await grantsFor(actor.userId)).toHaveLength(1);
+    expect(await receiptFor(checkout.checkoutId)).not.toBeNull();
+  });
+
+  it("parks a failed checkout whose completion cannot be applied", async () => {
+    // The same edge, refused leg: money arriving that can grant nothing must be
+    // queued, not stranded in an event row no checkout-level queue shows.
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const checkout = await createCheckout(actor, certificationId, "standard-3m");
+    const failed = completedEvent(checkout, {
+      kind: "checkout.failed",
+      amountMinor: 0,
+    });
+    expect((await deliver(failed)).status).toBe(200);
+
+    const mismatched = completedEvent(checkout, {
+      amountMinor: checkout.totalMinor + 1,
+    });
+    const delivery = await deliver(mismatched);
+    expect(delivery.status).toBe(200);
+    const row = await checkoutRow(checkout.checkoutId);
+    expect(row?.status).toBe("needs_support");
+    expect(row?.paid_at).toBe(clock);
     expect(await grantsFor(actor.userId)).toHaveLength(0);
     expect(await receiptFor(checkout.checkoutId)).toBeNull();
+    expect((await eventRow(mismatched.eventId))?.outcome).toBe(
+      "ignored-inconsistent",
+    );
+    expect(
+      await count(
+        "SELECT COUNT(*) AS rows FROM commerce_provider_events WHERE checkout_id = ?",
+        checkout.checkoutId,
+      ),
+    ).toBe(2);
+  });
 
-    await expect(
-      database
-        .prepare(
-          "UPDATE commerce_checkouts SET status = 'paid', paid_at = ? WHERE id = ?",
-        )
-        .bind(clock, checkout.checkoutId)
-        .run(),
-    ).rejects.toThrow(/illegal checkout status/);
+  it("records a checkout.failed for a paid checkout as inconsistent and changes nothing", async () => {
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const checkout = await createCheckout(actor, certificationId, "standard-3m");
+    const paid = completedEvent(checkout);
+    expect((await deliver(paid)).status).toBe(200);
+
+    const refused = completedEvent(checkout, {
+      kind: "checkout.failed",
+      amountMinor: 0,
+    });
+    const delivery = await deliver(refused);
+    expect(delivery.status).toBe(200);
+    expect((await eventRow(refused.eventId))?.outcome).toBe(
+      "ignored-inconsistent",
+    );
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("paid");
+    expect(await grantsFor(actor.userId)).toHaveLength(1);
+  });
+
+  it("does not resurrect a checkout a refund has closed", async () => {
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const checkout = await createCheckout(actor, certificationId, "standard-3m");
+    expect((await deliver(completedEvent(checkout))).status).toBe(200);
+    const refunded = await call(
+      `/api/commerce/checkouts/${checkout.checkoutId}/refund`,
+      { actor, body: { reason: "webhook fixture" } },
+    );
+    expect(refunded.status).toBe(200);
+
+    const revived = completedEvent(checkout);
+    expect((await deliver(revived)).status).toBe(200);
+    expect((await eventRow(revived.eventId))?.outcome).toBe(
+      "ignored-inconsistent",
+    );
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("refunded");
+    expect(
+      await count(
+        "SELECT COUNT(*) AS rows FROM learner_access_grants WHERE user_id = ? AND revoked_at IS NULL",
+        actor.userId,
+      ),
+    ).toBe(0);
   });
 });
 

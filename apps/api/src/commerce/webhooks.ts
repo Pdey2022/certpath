@@ -61,6 +61,19 @@ import type { PaymentProvider, ProviderEvent } from "./provider.ts";
 // audit row - a row witness that reads 2 for one insert. Every statement here
 // returns `RETURNING id` and the returned rows are counted.
 //
+// ## `failed` is a settleable source
+//
+// Money can arrive after a `checkout.failed` - an out-of-order completion, or a
+// retry the provider authorised twice - and 0020 makes `failed -> paid` and
+// `failed -> needs_support` legal edges. The migration alone would be decoration,
+// so every "settleable" predicate in this module names `failed` too: both grant
+// statements, the checkout transition, the event row's retryable test, the park,
+// and the final status check. An edge the statements do not use is a rule the
+// code does not have.
+//
+// `applyFailure` deliberately keeps `WHERE status = 'pending'`: a
+// `checkout.failed` must never move a `paid` or `refunded` row backwards.
+//
 // Rules: docs/commerce.md, docs/decisions/0003-pricing-pro-and-refunds.md.
 
 /** Raw webhook bodies larger than this are refused before a signature is read. */
@@ -360,7 +373,7 @@ function standardGrantStatement(
               ?2, ?3, NULL, ?4, checkout.sku, ?5, ?6, NULL
        FROM commerce_checkouts AS checkout
        WHERE checkout.id = ?7
-         AND checkout.status IN ('pending', 'expired')
+         AND checkout.status IN ('pending', 'expired', 'failed')
          AND checkout.total_minor = ?8
          AND checkout.currency = ?9
          AND NOT EXISTS (
@@ -448,7 +461,7 @@ function proGrantStatement(
               ?2, ?3, NULL, ?4, checkout.sku, ?5, ?6, NULL
        FROM commerce_checkouts AS checkout
        WHERE checkout.id = ?7
-         AND checkout.status IN ('pending', 'expired')
+         AND checkout.status IN ('pending', 'expired', 'failed')
          AND checkout.total_minor = ?8
          AND checkout.currency = ?9
          AND NOT EXISTS (
@@ -480,7 +493,7 @@ function transitionStatement(
       `UPDATE commerce_checkouts
        SET status = 'paid', paid_at = ?1, updated_at = ?1
        WHERE id = ?2
-         AND status IN ('pending', 'expired')
+         AND status IN ('pending', 'expired', 'failed')
          AND total_minor = ?3
          AND currency = ?4
          AND (
@@ -567,7 +580,7 @@ function eventStatement(
   const retryable = `EXISTS (
                        SELECT 1 FROM commerce_checkouts AS open
                        WHERE open.id = ?3
-                         AND open.status IN ('pending', 'expired')
+                         AND open.status IN ('pending', 'expired', 'failed')
                          AND open.total_minor = ?4
                          AND open.currency = ?5
                      )
@@ -835,9 +848,9 @@ async function applyFailure(
  * instant we learned money moved.
  *
  * Both statuses settlement can arrive at are accepted by the transition trigger
- * (0019): `pending -> needs_support` and `expired -> needs_support`. The second
- * one matters - a late payment whose amount disagrees, or whose Pro leg aborts,
- * is a row our own expiry already closed. While that edge was illegal this batch
+ * (0019, widened in 0020): `pending -> needs_support`, `expired -> needs_support`
+ * and `failed -> needs_support`. The second one matters - a late payment whose
+ * amount disagrees, or whose Pro leg aborts, is a row our own expiry already closed. While that edge was illegal this batch
  * aborted and the webhook answered `503`, with the learner's money already taken;
  * what the provider saw next depended on the shape. A Pro leg that aborted rolled
  * the earlier settlement batch back, so no event row existed and every retry
@@ -874,7 +887,7 @@ export async function markNeedsSupport(
          SET status = 'needs_support', paid_at = COALESCE(paid_at, ?1),
              updated_at = ?1
          WHERE id = ?2
-           AND status IN ('pending', 'expired')
+           AND status IN ('pending', 'expired', 'failed')
          RETURNING id`,
       )
       .bind(now, checkout.id),
@@ -1028,7 +1041,12 @@ export async function settleCompletedEvent(
   }
 
   const latest = await readCheckoutById(database, checkout.id);
-  if (latest && (latest.status === "pending" || latest.status === "expired")) {
+  if (
+    latest &&
+    (latest.status === "pending" ||
+      latest.status === "expired" ||
+      latest.status === "failed")
+  ) {
     return markNeedsSupport(database, latest, event, checkout.provider, now);
   }
   return { ok: true, duplicate: true, outcome: "applied" };

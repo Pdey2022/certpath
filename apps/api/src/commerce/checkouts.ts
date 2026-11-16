@@ -493,9 +493,12 @@ function toResponse(
   // A redirect is only usable while the session can still be completed: while
   // pending, or before our own expiry if a provider echoed it late. The same
   // stored string is returned on replay, which is what makes a replay
-  // byte-identical.
+  // byte-identical. A refunded checkout's session is dead - `refunded -> paid` is
+  // illegal - so handing the learner that URL again could only invite a second
+  // charge.
   const redirectUsable =
     row.provider_redirect_url !== null &&
+    row.status !== "refunded" &&
     (row.status === "pending" || row.expires_at > now);
   return {
     checkoutId: row.id,
@@ -519,9 +522,14 @@ function toResponse(
     paidAt: row.paid_at,
     // The same number the purchase receipt records (`paid_at + 7 days`, 0019):
     // one commercial rule, imported from `pricing.ts`, so a paid checkout cannot
-    // contradict its own receipt. Null exactly while nothing has been paid.
+    // contradict its own receipt. Null exactly while nothing has been paid, and
+    // null again once the checkout is `refunded` - a refunded checkout has no
+    // window left to act on, and 0019's money/status CHECK keeps `paid_at`, so
+    // without this branch the API would advertise a window that has been used.
     refundWindowEndsAt:
-      row.paid_at === null ? null : row.paid_at + refundWindowMs,
+      row.paid_at === null || row.status === "refunded"
+        ? null
+        : row.paid_at + refundWindowMs,
   };
 }
 
