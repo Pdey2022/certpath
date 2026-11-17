@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { sha256Hex, tablesFromDump } from "./lib/d1-targets.mjs";
+import { parseJsonc, sha256Hex, tablesFromDump } from "./lib/d1-targets.mjs";
 
 const scriptsDir = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -111,6 +111,33 @@ test("d1-export refuses an unprovisioned remote target with exit 3 and writes no
   assert.deepEqual(existsSync(out) ? readdirSync(out) : [], []);
 });
 
+test("d1-export refuses the staging target while its database_id is the placeholder", (t) => {
+  // The staging config still carries the placeholder (5C has not been run), but
+  // the assertion is written against a temp copy so it keeps proving the guard
+  // after 5C records a real id. Exit 3 happens before any network call.
+  const directory = tempDir(t);
+  const config = JSON.parse(
+    readFileSync(path.join(webRoot, "wrangler.staging.jsonc"), "utf8"),
+  );
+  config.d1_databases[0].database_id = "00000000-0000-0000-0000-000000000000";
+  const configPath = path.join(directory, "wrangler.staging.jsonc");
+  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  const out = path.join(directory, "out");
+
+  const result = run("export", [
+    "--target",
+    "staging",
+    "--out",
+    out,
+    "--wrangler-config",
+    configPath,
+  ]);
+
+  assert.equal(result.status, 3, result.output);
+  assert.match(result.output, /d1_not_provisioned/);
+  assert.deepEqual(existsSync(out) ? readdirSync(out) : [], []);
+});
+
 test("d1-export rejects an unknown target with exit 2 and writes no file", (t) => {
   const out = path.join(tempDir(t), "out");
   const result = run("export", ["--target", "nope", "--out", out]);
@@ -191,6 +218,47 @@ test("the real configs pass the isolation gate", () => {
 
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /D1 isolation OK/);
+});
+
+test("the staging database id copied into pilot, local and preview fails the isolation gate", (t) => {
+  // Phase 5C: one database, one config. If the staging uuid is pasted anywhere
+  // else, a provisioned id must be caught by duplicate_database_id, and the
+  // preview Worker by preview_binds_d1. Simulated on temp copies: the configs in
+  // the repository are not edited.
+  const configDir = tempDir(t);
+  const stagingId = "11111111-2222-4333-8444-555555555555";
+  const databases = [
+    ["wrangler.jsonc", "certpath-local"],
+    ["wrangler.preview.jsonc", "certpath-preview"],
+    ["wrangler.staging.jsonc", "certpath-learner-staging"],
+    ["wrangler.pilot.jsonc", "certpath-pilot"],
+  ];
+  for (const [file, databaseName] of databases) {
+    const config = parseJsonc(
+      readFileSync(path.join(webRoot, file), "utf8"),
+      file,
+    );
+    config.d1_databases = [
+      {
+        binding: "DB",
+        database_name: databaseName,
+        database_id: stagingId,
+        migrations_dir: "../../db/migrations",
+      },
+    ];
+    writeFileSync(path.join(configDir, file), JSON.stringify(config, null, 2));
+  }
+
+  const result = run("isolation", ["--config-dir", configDir]);
+
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /duplicate_database_id/);
+  assert.match(result.output, /preview_binds_d1/);
+  // The shared id is reported once, naming every config that carries it.
+  assert.match(
+    result.output,
+    /duplicate_database_id: database_id [0-9a-f-]+ is used by local and preview and staging and pilot/,
+  );
 });
 
 test("a changed byte in an applied migration fails with migration_checksum_changed", (t) => {

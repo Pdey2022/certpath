@@ -1,7 +1,9 @@
 // Pure helpers shared by the Phase 5A data-safety scripts
-// (check-d1-isolation, d1-export, d1-restore-rehearse, d1-chain-check).
-// Nothing here touches the network, the file system or the environment, so the
-// rules that protect a restore can be unit-tested without Wrangler.
+// (check-d1-isolation, d1-export, d1-restore-rehearse, d1-chain-check), the
+// Phase 5C account preflight (d1-account-preflight) and the preview build guard
+// (preview-command). Nothing here touches the network, the file system or the
+// environment, so the rules that protect a restore can be unit-tested without
+// Wrangler.
 import { createHash } from "node:crypto";
 
 export const SCHEMA_VERSION = 1;
@@ -784,4 +786,222 @@ export function redactSecrets(text, values) {
     redacted = redacted.split(value).join("[redacted]");
   }
   return redacted;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5C account preflight.
+//
+// Wrangler resolves the target account from the Wrangler config, then from
+// CLOUDFLARE_ACCOUNT_ID, then from a stored selection. An id that arrives only
+// from the operator's shell therefore wins over the account the operator thinks
+// they selected, which is how a provisioning run lands in the wrong account.
+// The expected id is taken from the command line and nothing else; these
+// helpers make the assertions testable without the network.
+// ---------------------------------------------------------------------------
+
+/** Account ids are compared trimmed and lower-cased; nothing else is stripped. */
+export function normalizeAccountId(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+/**
+ * `CLOUDFLARE_ACCOUNT_ID` must agree with `--expect-account` whenever it is set,
+ * because Wrangler would silently prefer it. Checked before any network call.
+ */
+export function assertExpectedAccountEnv({ expectAccount, envAccountId = null }) {
+  const expected = normalizeAccountId(expectAccount);
+  if (expected === "") {
+    throw new CliError(
+      "missing_option_value",
+      "--expect-account needs an account id; it is the only source of the expected id",
+      2,
+    );
+  }
+  const fromEnv = normalizeAccountId(envAccountId);
+  if (fromEnv !== "" && fromEnv !== expected) {
+    throw new CliError(
+      "account_env_mismatch",
+      `CLOUDFLARE_ACCOUNT_ID is set to ${fromEnv} but --expect-account is ${expected}; Wrangler prefers the environment variable, so unset it (or set it to the expected id) and run again`,
+      1,
+    );
+  }
+  return expected;
+}
+
+/**
+ * Read only `accounts[].{id,name}` from `wrangler whoami --json`. Everything
+ * else in that payload (token, email, permissions) is deliberately dropped so
+ * no caller can print it.
+ */
+export function parseWhoamiAccounts(payload) {
+  const entries = payload?.accounts;
+  if (!Array.isArray(entries)) {
+    throw new CliError(
+      "preflight_unparsed",
+      "wrangler whoami --json did not return an accounts array; no account can be asserted",
+      1,
+    );
+  }
+  return entries.map((entry) => {
+    const id = normalizeAccountId(entry?.id);
+    if (id === "") {
+      throw new CliError(
+        "preflight_unparsed",
+        "wrangler whoami --json returned an account without an id",
+        1,
+      );
+    }
+    return {
+      id,
+      name:
+        typeof entry?.name === "string" && entry.name.trim() !== ""
+          ? entry.name.trim()
+          : null,
+    };
+  });
+}
+
+/** The expected account must be one this credential can actually see. */
+export function checkPreflightAccount({ whoami, expectAccount }) {
+  const expected = normalizeAccountId(expectAccount);
+  const accounts = parseWhoamiAccounts(whoami);
+  const match = accounts.find((account) => account.id === expected);
+  if (!match) {
+    const visible =
+      accounts.map((account) => `${account.name ?? "unnamed"} (${account.id})`).join(", ") ||
+      "none";
+    throw new CliError(
+      "account_mismatch",
+      `--expect-account ${expected} is not an account this credential can see; visible accounts: ${visible}. Nothing was created.`,
+      1,
+    );
+  }
+  return match;
+}
+
+/**
+ * `wrangler d1 list --json` has been seen as a plain array and as
+ * `{ result: [...] }`. Both are accepted; anything else is unparseable and the
+ * run stops, because "no database found" and "I could not read the answer" must
+ * not look the same to an --expect-absent assertion.
+ */
+export function parseDatabaseList(payload) {
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.result)
+      ? payload.result
+      : null;
+  if (!rows) {
+    throw new CliError(
+      "preflight_unparsed",
+      "wrangler d1 list --json returned neither an array nor { result: [...] }; the database assertion cannot run",
+      1,
+    );
+  }
+  return rows.map((row) => {
+    const name = typeof row?.name === "string" ? row.name.trim() : "";
+    const uuid = typeof row?.uuid === "string" ? row.uuid.trim().toLowerCase() : "";
+    if (name === "" || uuid === "") {
+      throw new CliError(
+        "preflight_unparsed",
+        "wrangler d1 list --json returned a database without a name and uuid; the database assertion cannot run",
+        1,
+      );
+    }
+    return { name, uuid };
+  });
+}
+
+/**
+ * Present/absent assertion. Names are compared case-insensitively so a
+ * differently-cased match still counts as present: that can only make
+ * `--expect-absent` refuse, never make it pass.
+ */
+export function checkPreflightDatabase({ databases, database, expectPresent }) {
+  if (typeof expectPresent !== "boolean") {
+    throw new CliError(
+      "missing_assertion",
+      "Pass exactly one of --expect-absent or --expect-present",
+      2,
+    );
+  }
+  const wanted = typeof database === "string" ? database.trim().toLowerCase() : "";
+  if (wanted === "") {
+    throw new CliError(
+      "missing_option_value",
+      "--database needs a database name",
+      2,
+    );
+  }
+  const match =
+    databases.find((entry) => entry.name.toLowerCase() === wanted) ?? null;
+  if (expectPresent && !match) {
+    throw new CliError(
+      "database_missing",
+      `D1 database "${database.trim()}" is not in this account; --expect-present was asserted. Nothing was created.`,
+      1,
+    );
+  }
+  if (!expectPresent && match) {
+    throw new CliError(
+      "database_already_exists",
+      `D1 database "${database.trim()}" already exists (${match.uuid}); --expect-absent was asserted. Nothing was created or changed.`,
+      1,
+    );
+  }
+  return {
+    name: database.trim(),
+    present: match !== null,
+    uuid: match?.uuid ?? null,
+  };
+}
+
+/** The only lines a successful preflight prints: no payload, no token. */
+export function formatPreflightReport({ account, database }) {
+  const lines = [`account: ${account.name ?? "unnamed account"} (${account.id})`];
+  lines.push(
+    database.present
+      ? `database ${database.name}: present (${database.uuid})`
+      : `database ${database.name}: absent`,
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Phase 5C preview build guard. The generated `build/server/wrangler.json` is
+ * what `wrangler deploy -c build/server/wrangler.json` would ship, so it must
+ * carry no D1 binding even if someone adds one to `wrangler.preview.jsonc`
+ * (which the isolation gate already refuses, but a built artefact could still be
+ * produced before that gate runs). An empty `d1_databases` array is no binding.
+ */
+export function assertPreviewGeneratedConfig(generatedConfig) {
+  if (
+    generatedConfig === null ||
+    typeof generatedConfig !== "object" ||
+    Array.isArray(generatedConfig)
+  ) {
+    throw new CliError(
+      "preflight_unparsed",
+      "The generated preview config is not a JSON object; a D1-free build cannot be proven",
+      1,
+    );
+  }
+  const databases = generatedConfig.d1_databases;
+  if (databases === undefined || databases === null) return generatedConfig;
+  if (!Array.isArray(databases)) {
+    throw new CliError(
+      "preview_binds_d1",
+      "The generated preview config declares a d1_databases value that is not a list; the preview Worker is documented as D1-free (workers/preview.ts) and must stay that way",
+      1,
+    );
+  }
+  if (databases.length === 0) return generatedConfig;
+  const named = databases
+    .map((entry) => entry?.database_name ?? entry?.binding ?? "(unnamed)")
+    .join(", ");
+  throw new CliError(
+    "preview_binds_d1",
+    `The generated preview config binds D1 (${named}); the preview Worker is documented as D1-free (workers/preview.ts) and must stay that way`,
+    1,
+  );
 }
