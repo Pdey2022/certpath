@@ -19,7 +19,7 @@
 		{
 			"binding": "DB",
 			"database_name": "certpath-learner-staging",
-			"database_id": "00000000-0000-0000-0000-000000000000",
+			"database_id": "c52e398f-4280-40a6-8244-854186dc6ef2",
 			"migrations_dir": "../../db/migrations"
 		}
 	],
