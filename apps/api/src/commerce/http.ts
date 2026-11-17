@@ -40,6 +40,7 @@ import {
   maxWebhookBodyBytes,
   type WebhookResult,
 } from "./webhooks.ts";
+import { createPilotEventRecorder } from "../analytics/pilot-events.ts";
 
 // The commerce routes: the learner-facing app (offers projection, checkout
 // creation, the checkout read and the local dev seam) and the provider webhook
@@ -86,6 +87,12 @@ type Bindings = {
    * other value answers `404` as if the route had never been written.
    */
   LOCAL_COMMERCE_DEV_TOOLS?: string;
+  /**
+   * The pilot funnel's server half. Exactly "true" writes checkout_started,
+   * purchase_confirmed and pro_activated beside the domain write; anything else
+   * (including absent) resolves to a `null` recorder and no statement is built.
+   */
+  PILOT_SERVER_EVENTS_ENABLED?: string;
 };
 
 interface Principal {
@@ -399,6 +406,7 @@ export function createCommerceApi(
         origin: principal.origin,
         now: now(),
       },
+      createPilotEventRecorder(context.env),
     );
     if (!result.ok) return checkoutFailure(context, result);
     return context.json(
@@ -543,6 +551,7 @@ export function createCommerceApi(
       rawBody: built.rawBody,
       headers: built.headers,
       now: now(),
+      events: createPilotEventRecorder(context.env),
     });
     return webhookResponse(context, result, context.get("requestId"));
   });
@@ -657,6 +666,7 @@ export function createCommerceWebhookApi(
       // is never logged.
       headers: context.req.raw.headers,
       now: now(),
+      events: createPilotEventRecorder(context.env),
     });
     return webhookResponse(context, result, requestId);
   });

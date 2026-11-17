@@ -13,3 +13,4 @@ export * from "./staff-admin";
 export * from "./admin-learners";
 export * from "./admin-commerce";
 export * from "./commerce";
+export * from "./analytics";

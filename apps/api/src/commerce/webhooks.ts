@@ -6,6 +6,8 @@ import type {
   SecurityDatabase,
 } from "../security/database.ts";
 import { grantOperationId } from "./checkouts.ts";
+import type { PilotEventRecorder } from "../analytics/pilot-events.ts";
+import { recordSafely } from "../analytics/pilot-events.ts";
 import type { FakePaymentProvider } from "./providers/fake.ts";
 import type { PaymentProvider, ProviderEvent } from "./provider.ts";
 
@@ -994,6 +996,13 @@ export async function settleCompletedEvent(
   checkout: SettleableCheckout,
   event: ProviderEvent,
   now: number,
+  /**
+   * The pilot funnel recorder, or `null` when the server half is off. It is
+   * called only after a settlement this delivery applied has committed, and it
+   * cannot fail the settlement: the provider's answer is identical whether the
+   * event row lands or is dropped.
+   */
+  events: PilotEventRecorder | null = null,
 ): Promise<WebhookResult> {
   const lines = await readSnapshotLines(database, checkout.id);
   for (let attempt = 1; attempt <= settlementAttempts; attempt += 1) {
@@ -1020,6 +1029,43 @@ export async function settleCompletedEvent(
 
     if (witness.eventRecorded) {
       if (witness.outcome === "applied") {
+        // The purchase is durable at this point: the checkout is `paid`, the
+        // grants are written and the receipt exists. Two deterministic ids -
+        // `settlement:<providerEventId>` and `grant:<operationId>` - so a
+        // replicated or replayed write collapses in storage even if this branch
+        // runs twice.
+        if (events) {
+          await recordSafely(
+            events,
+            {
+              name: "purchase_confirmed",
+              checkoutId: current.id,
+              productId: current.sku,
+              currency: current.currency,
+              amountMinor: plan.amountMinor,
+              providerEventId: event.eventId,
+              occurredAt: event.occurredAt,
+            },
+            now,
+          );
+          const proGrant = plan.grants.find(
+            (grant) => grant.feature === "pro",
+          );
+          if (proGrant) {
+            await recordSafely(
+              events,
+              {
+                name: "pro_activated",
+                checkoutId: current.id,
+                productId: current.sku,
+                certificationId: current.certification_id,
+                grantOperationId: proGrant.operationId,
+                occurredAt: now,
+              },
+              now,
+            );
+          }
+        }
         return { ok: true, duplicate: false, outcome: "applied" };
       }
       return markNeedsSupport(
@@ -1068,6 +1114,8 @@ export async function handleProviderWebhook(
     rawBody: string;
     headers: Headers;
     now: number;
+    /** The pilot funnel recorder, or `null`/absent when it is off. */
+    events?: PilotEventRecorder | null;
   },
 ): Promise<WebhookResult> {
   if (input.providerName !== provider.name) {
@@ -1128,7 +1176,13 @@ export async function handleProviderWebhook(
         input.now,
       );
     }
-    return await settleCompletedEvent(database, checkout, event, input.now);
+    return await settleCompletedEvent(
+      database,
+      checkout,
+      event,
+      input.now,
+      input.events ?? null,
+    );
   } catch {
     return { ok: false, status: 503, code: "provider_unavailable" };
   }

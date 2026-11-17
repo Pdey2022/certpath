@@ -7,10 +7,12 @@ import { proTerm, termFor, type Sku } from "../src/pricing.ts";
 import { expireStaleCheckouts } from "../src/commerce/expire.ts";
 import { grantOperationId } from "../src/commerce/checkouts.ts";
 import { createFakeProvider } from "../src/commerce/providers/fake.ts";
+import { createPilotEventRecorder } from "../src/analytics/pilot-events.ts";
 import type { ProviderEvent } from "../src/commerce/provider.ts";
 import {
   applySettlement,
   buildSettlementPlan,
+  handleProviderWebhook,
   readAccountGrants,
   readCheckoutForSession,
   readSnapshotLines,
@@ -55,7 +57,17 @@ const application = createApi(
   fakeProvider,
 );
 
-const bindings = {
+const bindings: {
+  DB: SecurityDatabase;
+  PUBLIC_SITE_ORIGIN: string;
+  CSRF_HMAC_SECRET: string;
+  COMMERCE_ENABLED: string;
+  PAYMENT_PROVIDER: string;
+  COMMERCE_WEBHOOK_SECRET: string;
+  LOCAL_COMMERCE_DEV_TOOLS: string;
+  PILOT_EVENTS_ENABLED?: string;
+  PILOT_SERVER_EVENTS_ENABLED?: string;
+} = {
   DB: database,
   PUBLIC_SITE_ORIGIN: origin,
   CSRF_HMAC_SECRET: csrfSecret,
@@ -1673,5 +1685,173 @@ describe("the dev seam", () => {
     });
     expect(response.status).toBe(404);
     expect((await checkoutRow(checkout.checkoutId))?.status).toBe("pending");
+  });
+});
+
+describe("the pilot funnel's purchase_confirmed and pro_activated", () => {
+  const funnelOn: TestBindings = {
+    ...bindings,
+    PILOT_SERVER_EVENTS_ENABLED: "true",
+  };
+
+  interface PilotRow {
+    event_id: string;
+    event_name: string;
+    source: string;
+    consent: string;
+    anonymous_session_id: string | null;
+    order_id: string | null;
+    product_id: string | null;
+    currency: string | null;
+    amount_minor: number | null;
+    provider_event_id: string | null;
+    exam_id: string | null;
+    occurred_at: number;
+    received_at: number;
+  }
+
+  async function pilotRows(checkoutId: string): Promise<PilotRow[]> {
+    const result = await database
+      .prepare(
+        `SELECT event_id, event_name, source, consent, anonymous_session_id,
+                order_id, product_id, currency, amount_minor, provider_event_id,
+                exam_id, occurred_at, received_at
+         FROM pilot_events WHERE order_id = ? OR exam_id = ?
+         ORDER BY event_name`,
+      )
+      .bind(checkoutId, checkoutId)
+      .all<PilotRow>();
+    return result.results;
+  }
+
+  it("writes one purchase_confirmed and one pro_activated for a Pro sale, and a replay adds none", async () => {
+    const { actor, certificationId } = await purchaserOf(
+      "bundle-standard-3m-pro",
+    );
+    const checkout = await createCheckout(
+      actor,
+      certificationId,
+      "bundle-standard-3m-pro",
+    );
+    const event = completedEvent(checkout);
+
+    const delivery = await deliver(event, { bindings: funnelOn });
+    expect(delivery.status).toBe(200);
+    expect(delivery.body).toEqual({ received: true, duplicate: false });
+
+    const rows = await pilotRows(checkout.checkoutId);
+    expect(rows.map((row) => row.event_name)).toEqual([
+      "pro_activated",
+      "purchase_confirmed",
+    ]);
+    const purchase = rows.find((row) => row.event_name === "purchase_confirmed")!;
+    expect(purchase).toMatchObject({
+      event_id: `settlement:${event.eventId}`,
+      source: "server",
+      consent: "not-required",
+      anonymous_session_id: null,
+      order_id: checkout.checkoutId,
+      product_id: "bundle-standard-3m-pro",
+      currency: "USD",
+      amount_minor: checkout.totalMinor,
+      provider_event_id: event.eventId,
+      occurred_at: event.occurredAt,
+    });
+    const pro = rows.find((row) => row.event_name === "pro_activated")!;
+    expect(pro).toMatchObject({
+      event_id: `grant:${checkout.checkoutId}:pro`,
+      source: "server",
+      consent: "not-required",
+      anonymous_session_id: null,
+      order_id: checkout.checkoutId,
+      product_id: "bundle-standard-3m-pro",
+      exam_id: certificationId,
+      received_at: clock,
+    });
+
+    // A redelivery is a duplicate for the webhook and a no-op for storage.
+    const replay = await deliver(event, { bindings: funnelOn });
+    expect(replay.body).toEqual({ received: true, duplicate: true });
+    expect(await pilotRows(checkout.checkoutId)).toHaveLength(2);
+  });
+
+  it("writes no event when the server flag is off, and the answer is unchanged", async () => {
+    const off = await purchaserOf("bundle-standard-3m-pro");
+    const offCheckout = await createCheckout(
+      off.actor,
+      off.certificationId,
+      "bundle-standard-3m-pro",
+    );
+    const offDelivery = await deliver(completedEvent(offCheckout));
+
+    const on = await purchaserOf("bundle-standard-3m-pro");
+    const onCheckout = await createCheckout(
+      on.actor,
+      on.certificationId,
+      "bundle-standard-3m-pro",
+    );
+    const onDelivery = await deliver(completedEvent(onCheckout), {
+      bindings: funnelOn,
+    });
+
+    expect(onDelivery.status).toBe(offDelivery.status);
+    expect(JSON.stringify(onDelivery.body)).toBe(
+      JSON.stringify(offDelivery.body),
+    );
+    expect(await pilotRows(offCheckout.checkoutId)).toHaveLength(0);
+    expect(await pilotRows(onCheckout.checkoutId)).toHaveLength(2);
+  });
+
+  it("writes no purchase event for a settled-but-parked payment", async () => {
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const checkout = await createCheckout(actor, certificationId, "standard-3m");
+    const event = completedEvent(checkout, {
+      amountMinor: checkout.totalMinor + 1,
+    });
+
+    const delivery = await deliver(event, { bindings: funnelOn });
+
+    expect(delivery.status).toBe(200);
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe(
+      "needs_support",
+    );
+    expect(await pilotRows(checkout.checkoutId)).toHaveLength(0);
+  });
+
+  it("answers 200 when the event insert fails in D1", async () => {
+    // The recorder is real; its storage is not. A D1 failure beside a committed
+    // settlement must not become a provider-facing failure: retrying cannot fix
+    // it, and the money has already been recorded.
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const checkout = await createCheckout(actor, certificationId, "standard-3m");
+    const event = completedEvent(checkout);
+    const signed = await fakeProvider.signEvent(
+      event,
+      Math.floor(clock / 1000),
+    );
+    const brokenDatabase = {
+      prepare() {
+        throw new Error("D1 unavailable");
+      },
+      withSession() {
+        return brokenDatabase;
+      },
+      batch: async () => [],
+    } as unknown as SecurityDatabase;
+
+    const result = await handleProviderWebhook(database, fakeProvider, {
+      providerName: "fake",
+      rawBody: JSON.stringify(event),
+      headers: new Headers(signed),
+      now: clock,
+      events: createPilotEventRecorder({
+        DB: brokenDatabase,
+        PILOT_SERVER_EVENTS_ENABLED: "true",
+      }),
+    });
+
+    expect(result).toEqual({ ok: true, duplicate: false, outcome: "applied" });
+    expect((await checkoutRow(checkout.checkoutId))?.status).toBe("paid");
+    expect(await pilotRows(checkout.checkoutId)).toHaveLength(0);
   });
 });

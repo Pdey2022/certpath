@@ -22,6 +22,7 @@ import { createLambdaPasswordVerifier } from "./security/lambda-password-verifie
 import { adminLearnersApi } from "./admin-learners.ts";
 import { createAdminCommerceApi } from "./admin-commerce.ts";
 import { createCommerceApi, createCommerceWebhookApi } from "./commerce/http.ts";
+import { createPilotEventsApi } from "./analytics/pilot-events.ts";
 import {
   isStagingLocalTestOrigin,
   stagingTesterGate,
@@ -70,6 +71,8 @@ type ApiBindings = {
   PAYMENT_PROVIDER?: string;
   COMMERCE_WEBHOOK_SECRET?: string;
   LOCAL_COMMERCE_DEV_TOOLS?: string;
+  PILOT_EVENTS_ENABLED?: string;
+  PILOT_SERVER_EVENTS_ENABLED?: string;
   COGNITO_LEARNER_TRANSACTION_ENCRYPTION_KEY?: string;
 };
 
@@ -144,6 +147,11 @@ export function createApi(
     createCommerceWebhookApi(now, paymentProvider),
   );
   application.route("/commerce", createCommerceApi(now, paymentProvider));
+  // The funnel endpoint is its own app: no session, no CSRF token, no admin
+  // surface. Mounting it outside the learner and commerce routers is what keeps
+  // "no session here" structural rather than a branch inside a middleware. It
+  // answers 503 on its own when `PILOT_EVENTS_ENABLED` is not "true".
+  application.route("/events", createPilotEventsApi(now));
   application.route("/practice", learnerPracticeApi);
   return application;
 }
