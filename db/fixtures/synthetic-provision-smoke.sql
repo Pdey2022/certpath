@@ -16,13 +16,14 @@
 --
 -- Two deliberate consequences, both required by the schema:
 --
---   1. The `exam_versions` and `domains` inserts fire `exam_versions_audit_insert`
---      and `domains_audit_insert` (0003), and the `exam_versions` insert also
---      fires `exam_versions_create_timed_mock_profile` (0006). The three
---      `audit_events` rows and the default `timed_mock_profiles` row are part of
---      the intended result, which is exactly why this fixture is a useful
---      rehearsal subject: it proves the trigger chain runs on the provisioned
---      database.
+--   1. Three inserts fire an audit trigger: `certifications_audit_insert`
+--      (0002) writes the `certification_created` row, `exam_versions_audit_insert`
+--      and `domains_audit_insert` (0003) write the other two, and the
+--      `exam_versions` insert also fires `exam_versions_create_timed_mock_profile`
+--      (0006). The three `audit_events` rows and the default
+--      `timed_mock_profiles` row are part of the intended result, which is
+--      exactly why this fixture is a useful rehearsal subject: it proves the
+--      trigger chain runs on the provisioned database.
 --
 --   2. `certifications`, `exam_versions` and `domains` are immutable roots and
 --      `audit_events` is append-only, so this database can never be emptied:

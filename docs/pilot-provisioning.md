@@ -206,10 +206,12 @@ personal data or exam content. It is not a migration, and nothing automated
 applies it to a remote database; CI applies it only to a throwaway local D1 (see
 the fixture header).
 
-It writes more than four rows: the `exam_versions` and `domains` inserts fire
-`exam_versions_audit_insert`, `domains_audit_insert` and
-`exam_versions_create_timed_mock_profile`. Three `audit_events` rows and the
-default `timed_mock_profiles` row are part of the expected result.
+It writes more than four rows: three inserts fire an audit trigger —
+`certifications_audit_insert` (0002) for the certification root,
+`exam_versions_audit_insert` and `domains_audit_insert` (0003) — and the
+`exam_versions` insert also fires `exam_versions_create_timed_mock_profile`
+(0006). Three `audit_events` rows and the default `timed_mock_profiles` row are
+part of the expected result.
 
 If the database now refuses a DELETE, that is the schema working: certification
 roots are immutable and audit is append-only. **Drop the database, never empty

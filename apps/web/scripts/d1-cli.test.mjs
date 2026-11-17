@@ -630,6 +630,8 @@ test("a data-bearing dump of the smoke fixture rehearses through the three-phase
 
   const rehearse = run("rehearse", ["--file", dumpPath]);
   assert.equal(rehearse.status, 0, rehearse.output);
-  assert.match(rehearse.output, /replay: schema \d+, data \d+, triggers \d+/);
+  // At least one trigger must be created: `triggers 0` would mean the trigger
+  // phase was silently emptied, and the dump would restore without its guards.
+  assert.match(rehearse.output, /replay: schema \d+, data \d+, triggers [1-9]\d*/);
   assert.match(rehearse.output, /integrity_check ok/);
 });
