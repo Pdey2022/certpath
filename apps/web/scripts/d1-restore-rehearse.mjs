@@ -3,6 +3,11 @@
 // proves the manifest still describes it: integrity, foreign keys, table set,
 // per-table row counts and the migration ledger. Nothing is repaired.
 //
+// The load is a three-phase replay of the verified dump — schema, then data,
+// then triggers — so a dump that carries trigger-written rows neither inserts
+// into a table that does not exist yet nor re-fires the triggers that wrote
+// those rows. The dump file itself is never edited; the phases are copies.
+//
 // Usage:
 //   node apps/web/scripts/d1-restore-rehearse.mjs --file <dump.sql>
 //
@@ -13,10 +18,12 @@
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -27,9 +34,11 @@ import {
   assertManifestShape,
   diffTableCounts,
   diffTableSets,
+  planReplay,
   readD1Entry,
   redactSecrets,
   sha256Hex,
+  splitSqlStatements,
 } from "./lib/d1-targets.mjs";
 
 const webRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -200,7 +209,7 @@ function main() {
   try {
     const configPath = path.join(webRoot, "wrangler.jsonc");
     const entry = readD1Entry(readFileSync(configPath, "utf8"), configPath);
-    const loaded = runWrangler([
+    const executeArgs = [
       "d1",
       "execute",
       entry.databaseName,
@@ -209,18 +218,32 @@ function main() {
       persistDir,
       "-c",
       configPath,
-      "--file",
-      dumpPath,
-      "-y",
-    ]);
-    if (loaded.status !== 0) {
-      console.error("Wrangler d1 execute failed:");
-      printDiagnostic(loaded.output);
-      throw new CliError(
-        "dump_load_failed",
-        "The dump did not load into a fresh local database",
-        1,
-      );
+    ];
+
+    // The dump is loaded in three derived phases (schema, data, triggers) so a
+    // replay neither inserts into a table that does not exist yet nor re-fires
+    // the AFTER INSERT triggers that wrote the rows in the first place. The
+    // verified dump is only read: the phases are copies written into the
+    // throwaway directory, so its sha256 still matches the manifest.
+    const replayDirectory = path.join(persistDir, "replay");
+    mkdirSync(replayDirectory, { recursive: true });
+    const phases = planReplay(splitSqlStatements(bytes.toString("utf8")));
+    const replayed = [];
+    for (const phase of phases) {
+      const phasePath = path.join(replayDirectory, `${phase.phase}.sql`);
+      writeFileSync(phasePath, phase.sql);
+      if (phase.statements === 0) continue;
+      const loaded = runWrangler([...executeArgs, "--file", phasePath, "-y"]);
+      if (loaded.status !== 0) {
+        console.error(`Wrangler d1 execute failed on the ${phase.phase} phase:`);
+        printDiagnostic(loaded.output);
+        throw new CliError(
+          "replay_failed",
+          `The ${phase.phase} phase of the replay did not load into a fresh local database (exit ${loaded.status}); the dump itself was not edited`,
+          1,
+        );
+      }
+      replayed.push(`${phase.phase} ${phase.statements}`);
     }
 
     const files = walkSqliteFiles(path.join(persistDir, "v3", "d1")).filter(
@@ -291,6 +314,26 @@ function main() {
       );
     }
 
+    // 4b. The one table a trigger writes to gets a named assertion: replaying a
+    // dump must not re-fire an audit trigger, so the restored count has to equal
+    // what the dump carried. A doubled trigger fails here by name instead of
+    // disappearing into a per-table diff.
+    const manifestAuditEvents = manifest.tables.find(
+      (table) => table.name === "audit_events",
+    );
+    if (manifestAuditEvents) {
+      const restoredAuditEvents =
+        restoredTables.find((table) => table.name === "audit_events")?.inserts ??
+        0;
+      if (restoredAuditEvents !== manifestAuditEvents.inserts) {
+        throw new CliError(
+          "audit_events_replayed",
+          `audit_events holds ${restoredAuditEvents} rows after the replay; the manifest recorded ${manifestAuditEvents.inserts}. A trigger wrote rows the dump did not carry, so the replay fired it.`,
+          1,
+        );
+      }
+    }
+
     // 5. Then the per-table row counts.
     const tableDiffs = diffTableCounts(manifest.tables, restoredTables);
     if (tableDiffs.length > 0) {
@@ -331,6 +374,9 @@ function main() {
       0,
     );
     console.log(`rehearsal ok: ${path.basename(dumpPath)}`);
+    console.log(
+      `  replay: ${replayed.join(", ")} (schema, data, triggers)`,
+    );
     console.log(
       `  integrity_check ok, foreign_key_check clean, ${restoredTables.length} tables, ${insertTotal} rows, ${restoredMigrations.length} migrations, sha256 ${digest}`,
     );
