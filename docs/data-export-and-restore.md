@@ -168,7 +168,7 @@ issues three `wrangler d1 execute --file` calls in this order:
 | Phase | Statements | Why |
 |---|---|---|
 | `schema` | `CREATE TABLE` / `CREATE INDEX` / `CREATE VIEW` / `PRAGMA` | every table exists before the first row |
-| `data` | `INSERT`, plus the dump's `PRAGMA defer_foreign_keys=TRUE` and `DELETE FROM sqlite_sequence` | rows load with the dump's own deferral and no triggers firing |
+| `data` | `INSERT`, plus the hard-coded `DEFER_FOREIGN_KEYS` constant (`PRAGMA defer_foreign_keys=TRUE;`) and the dump's `DELETE FROM sqlite_sequence` | rows load with the deferral in force and no triggers firing |
 | `triggers` | `CREATE TRIGGER` | triggers exist again before anyone uses the database |
 
 The dump file itself is never edited: it is only read, and the three files are
@@ -295,16 +295,12 @@ and rehearse both. See [`docs/pilot-provisioning.md`](pilot-provisioning.md).
 - No scheduling, no automatic retention enforcement, no remote restore. The
   rehearsal is local-only; restoring a remote D1 is a separate, owner-approved
   step.
-- A dump that carries `audit_events` rows does not currently rehearse. The dump
-  inserts into `audit_events` before it creates `certifications`
-  (`0002_local_security.sql` order), so the load fails with
-  `no such table: main.certifications` even though the dump sets
-  `PRAGMA defer_foreign_keys=TRUE`. Replaying the fixture also re-fires the
-  `*_audit_insert` triggers, which `audit_events_no_replace` would refuse. Both
-  are recorded as a stop condition in
-  [`docs/pilot-provisioning.md`](pilot-provisioning.md); neither is fixed here,
-  and no workaround (edited dump, disabled foreign keys, dropped trigger) is
-  approved.
+- **Dump provenance is not checked against the migration chain (issue #103).**
+  The rehearsal proves the restore matches its manifest, not that the manifest
+  belongs to `db/migrations/`. A dump whose `migrations[]` is empty, or is not a
+  prefix of the current chain, still rehearses green. Until #103 lands, an
+  operator diffs `migrations[]` against the files by hand — 5C's runbook makes
+  that an explicit step.
 - `db:export --target staging` and `--target pilot` cannot run until 5C records
   a real `database_id`; they exit `3` before touching the network.
 - `PRAGMA integrity_check` is refused by D1's local emulation (`SQLITE_AUTH`), so

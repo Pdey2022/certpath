@@ -6,9 +6,13 @@
 -- accepts a write before anything real is put in it.
 --
 -- This is a fixture, not a migration. It is never applied by
--- `wrangler d1 migrations apply`, never applied by CI and never part of
--- `npm run verify`. Only an owner-approved 5C provisioning run applies it, by
--- hand, to the isolated staging database.
+-- `wrangler d1 migrations apply`, and nothing automated applies it to a remote
+-- database. It does run in CI: `npm test` (inside `npm run verify`) applies it
+-- to the throwaway local D1 that `d1-chain-check` created in a temporary
+-- directory, exports that database and rehearses the restore. The database it
+-- lands in is dropped, never emptied. An owner-approved 5C provisioning run and
+-- nothing else applies it by hand to the isolated staging database, which is
+-- dropped for the same reason.
 --
 -- Two deliberate consequences, both required by the schema:
 --

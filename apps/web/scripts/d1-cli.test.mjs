@@ -564,9 +564,12 @@ test("chain, export local and rehearse round-trip the whole schema", (t) => {
 });
 
 test("a data-bearing dump of the smoke fixture rehearses through the three-phase replay", (t) => {
-  // Reverting the rehearsal to one `wrangler d1 execute --file` call fails here:
-  // a single ordered replay inserts into audit_events before certifications
-  // exists, and it re-fires the audit triggers under the same operation ids.
+  // Reverting the rehearsal to one `wrangler d1 execute --file` call fails here.
+  // Measured on 17 November 2026: the single call stops on foreign-key ordering
+  // first — `no such table: main.certifications`, because the dump inserts into
+  // `audit_events` before it creates `certifications` — so the trigger re-fire
+  // that a single replay would also cause is never reached. The ordering failure
+  // is what this test pins.
   const directory = tempDir(t);
   const work = path.join(directory, "work");
   mkdirSync(work);
