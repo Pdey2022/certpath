@@ -27,9 +27,13 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "check:isolation": "node apps/web/scripts/check-d1-isolation.mjs",
+    "db:export": "node apps/web/scripts/d1-export.mjs",
+    "db:rehearse": "node apps/web/scripts/d1-restore-rehearse.mjs",
+    "db:chain": "node apps/web/scripts/d1-chain-check.mjs",
     "db:migrate:local": "npm run db:migrate:local --workspace @certpath/web",
     "benchmark:lambda:package": "npm run benchmark:lambda:package --workspace @certpath/api",
     "benchmark:lambda": "npm run benchmark:lambda --workspace @certpath/api",
-    "verify": "npm run typecheck && npm test && npm run build"
+    "verify": "npm run check:isolation && npm run typecheck && npm test && npm run db:chain && npm run build"
   }
 }
