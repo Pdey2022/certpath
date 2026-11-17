@@ -123,13 +123,30 @@ the Workers Free capacity finding and rollback steps.
 npm run verify
 ```
 
-This runs workspace type checks, tests, and a production build. To inspect the
+This runs the D1 isolation gate, workspace type checks, tests, the fresh
+migration chain check, and a production build. To inspect the
 running HTML and API manually, start `npm run dev` and request `/`, `/exams`,
 `/robots.txt`, `/sitemap.xml`, `/app`, `/app/practice/live`, `/admin`, and
 `/api/health`. Private
 previews carry `noindex` and `private, no-store`; local robots configuration
 disallows crawling. See [Milestone 1 review](docs/reviews/milestone-1.md) for
 prototype limitations, screenshots, verification, and inspection steps.
+
+### D1 data safety
+
+```powershell
+npm run check:isolation          # preview binds no D1; no shared database name or id
+npm run db:chain                 # 0001..0020 in order, second apply a no-op, checksums
+npm run db:export -- --target local --out D:\certpath-exports
+npm run db:rehearse -- --file D:\certpath-exports\<dump>.sql
+```
+
+Exports carry a sidecar manifest (schema version, target, hashes, per-table
+counts, migration ledger) and the rehearsal loads a dump into a throwaway
+database to prove it still matches. Dumps go outside the repository by default
+and are never committed. See
+[data export and restore](docs/data-export-and-restore.md) for exit codes, the
+manifest fields, the retention rule, and what CI can and cannot prove.
 
 ## Architecture and product contracts
 

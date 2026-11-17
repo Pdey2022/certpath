@@ -33,6 +33,12 @@ need an owner or architect decision.
 | A definitive provider decline | Answers `409 refund_rejected`, not `503 provider_unavailable`: it is a decision, not an outage, and retrying cannot change it. | Owner decision, `docs/commerce-refunds.md` §15.3 |
 | Money arriving after a `checkout.failed` | `failed → paid` and `failed → needs_support` are legal. A late `checkout.completed` either grants (grant, receipt, one `paid_at`) or parks in `needs_support`; it never vanishes into an event row no checkout-level queue shows. The five settlement predicates widened with the edge. | `0020_refunds.sql`, `docs/commerce.md` §Failure paths |
 
+## Resolved (17 November 2026)
+
+| Decision | Outcome | Record |
+|---|---|---|
+| Export retention | Keep the last 3 dumps per target; delete a dump 14 days after the migration it precedes is confirmed; never commit a dump, never upload one | Owner decision, [`docs/data-export-and-restore.md`](data-export-and-restore.md) §Retention |
+
 ## Owner decisions still open
 
 - Launch market's tax, consumer, refund and invoicing obligations (currency is USD).
@@ -69,7 +75,10 @@ need an owner or architect decision.
 
 ## Architect decisions still open
 
-- Production Worker routing, D1 backup automation and migration rollout procedure.
+- Production Worker routing and migration rollout procedure. The export,
+  rehearsed-restore and fresh-chain tooling exists and is documented in
+  [`docs/data-export-and-restore.md`](data-export-and-restore.md); scheduling a
+  dump and enforcing its retention are still open.
 - Real MFA method to replace the tester-gate assurance before real learner data.
 - Production secret rotation without invalidating sessions.
 - Whether the production admin panel runs on the same Worker as learner traffic.

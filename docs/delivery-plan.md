@@ -8,13 +8,15 @@ issue tracking** so a phase cannot quietly start before its prerequisites exist.
 Each phase ships as one or more draft pull requests against `main`, with a
 decision record where a product rule is involved.
 
-## Current position (14 November 2026)
+## Current position (17 November 2026)
 
 | Area | State |
 |---|---|
 | Milestones 0-3C | Complete: foundation, prototype, local security, versioned content, admin editor/review/imports, learner practice, timed mocks, dashboard |
 | Admin tester gate and staff sign-in | Built and merged; tester-only, MFA parked, assurance labelled `tester-gate` |
 | Staff provisioning | Local and UUID-pinned remote mode merged; never run against a real database |
+| **Phase 4 Commerce** | **Complete and merged (#87)**: entitlements, checkout, settlement, refunds with access revocation |
+| **Phase 5 Pilot hardening** | **In progress**: 5A data-safety tooling in review; 5B-5F not started ([slice plan](pilot-hardening.md)) |
 | Evidence | Isolated workflow passed (sign-in, edit, reload); Worker CPU still **unmeasured** (Observability returns 403) |
 | Decisions | ADR 0003-0006 accepted; `docs/permissions.md` and `docs/open-decisions.md` updated |
 
@@ -27,7 +29,7 @@ decision record where a product rule is involved.
 | **2. Readiness and dashboard v1** | #45 | Readiness v1 snapshots, bands, decay, next action, Pro prompt | Phase 1 |
 | **3. Admin capability model** | #46 | Capability table, learner support with masked data and audited reveal, audit retention | Phase 1 |
 | **4. Commerce** | #47 | `PaymentProvider` port with a fake, checkout, webhooks, refunds and access revocation | Phases 1, 3 |
-| **5. Pilot hardening** | #48 | Isolated staging D1, pre-migration exports, funnel events, hostname decision, MFA before real learners | Phases 3, 4 |
+| **5. Pilot hardening** | #48 | Isolated staging D1, pre-migration exports, funnel events, hostname decision, MFA before real learners ([slices 5A-5F](pilot-hardening.md)) | Phases 3, 4 |
 | **6. CAT/adaptive Pro** | #49 | Blueprint-weighted item selection, session model, Pro reports, CISSP only | Phases 2, 4 and a stocked bank |
 
 Phases 1-3 are strictly sequential because they share the entitlement predicate.
