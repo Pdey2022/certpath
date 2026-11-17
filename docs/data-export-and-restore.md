@@ -113,18 +113,12 @@ values of `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`.
 
 `inserts` counts `INSERT INTO "<name>"` occurrences in the dump text. Wrangler's
 `d1 export` emits one `INSERT` per row, so the count is the number of rows the
-dump *carries* for that table — not the number of rows a load produces. A load
-can write more: replaying `certifications`, `exam_versions` or `domains` rows
-re-fires `certifications_audit_insert`, `exam_versions_audit_insert`,
-`domains_audit_insert` and `exam_versions_create_timed_mock_profile`, so the
-restored `audit_events` count can exceed the manifest's. The rehearsal compares
-the two per table, which is how a doubled trigger is caught.
-
-A dump that carries `audit_events` rows does not currently rehearse at all: the
-load fails on statement order before that comparison is reached, so the
-qualification above is untested for those dumps. Loading one is pending the
-replay fix, and the finding is recorded in
-[`docs/pilot-provisioning.md`](pilot-provisioning.md).
+dump *carries* for that table — not, in general, the number of rows a load
+produces. The three-phase replay
+([below](#the-load-is-a-three-phase-replay)) loads those rows before any trigger
+exists, so a restored count above the manifest's means a trigger fired during the
+load; the rehearsal asserts `audit_events` by name and compares every table, which
+is how a doubled trigger is caught.
 
 ## Rehearsed restore
 
@@ -151,7 +145,8 @@ Steps the script performs, in order:
 
 ### The load is a three-phase replay
 
-Replaying a dump as one ordered `--file` load is wrong twice over:
+Replaying a dump as one ordered `--file` load is wrong twice over, and the first
+of the two stops the load before the second can be observed:
 
 - it inserts into tables whose parent table has not been created yet.
   `audit_events` precedes `certifications` in `0002_local_security.sql`, and
