@@ -12,6 +12,7 @@ import { addTerm } from "../src/calendar.ts";
 import { currency, priceList, proTerm, termFor, type Sku } from "../src/pricing.ts";
 import {
   checkoutSessionTtlMs,
+  createCheckout,
   grantOperationId,
   linesForSku,
   maxCheckoutIdLength,
@@ -59,7 +60,16 @@ const application = createApi(
   fakeProvider,
 );
 
-const bindings = {
+const bindings: {
+  DB: SecurityDatabase;
+  PUBLIC_SITE_ORIGIN: string;
+  CSRF_HMAC_SECRET: string;
+  COMMERCE_ENABLED: string;
+  PAYMENT_PROVIDER: string;
+  COMMERCE_WEBHOOK_SECRET: string;
+  PILOT_EVENTS_ENABLED?: string;
+  PILOT_SERVER_EVENTS_ENABLED?: string;
+} = {
   DB: database,
   PUBLIC_SITE_ORIGIN: origin,
   CSRF_HMAC_SECRET: csrfSecret,
@@ -1643,5 +1653,138 @@ describe("contracts", () => {
       },
     });
     expect(response.status).toBe(400);
+  });
+});
+
+describe("the pilot funnel's checkout_started", () => {
+  const funnelOn: TestBindings = {
+    ...bindings,
+    PILOT_SERVER_EVENTS_ENABLED: "true",
+  };
+
+  interface StartedRow {
+    event_id: string;
+    source: string;
+    order_id: string | null;
+    product_id: string | null;
+    currency: string | null;
+    amount_minor: number | null;
+    consent: string;
+    anonymous_session_id: string | null;
+    occurred_at: number;
+    received_at: number;
+  }
+
+  async function startedRows(checkoutId: string): Promise<StartedRow[]> {
+    const result = await database
+      .prepare(
+        `SELECT event_id, source, order_id, product_id, currency, amount_minor,
+                consent, anonymous_session_id, occurred_at, received_at
+         FROM pilot_events WHERE event_id = ?`,
+      )
+      .bind(`checkout:${checkoutId}`)
+      .all<StartedRow>();
+    return result.results;
+  }
+
+  it("writes exactly one checkout_started for a created checkout, and none on the replay", async () => {
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const body = {
+      certificationId,
+      sku: "standard-3m",
+      clientCheckoutKey: crypto.randomUUID(),
+    };
+
+    const first = await createCheckoutRequest(actor, body, {
+      bindings: funnelOn,
+    });
+    expect(first.status).toBe(201);
+    const created = commerceCheckoutResponseSchema.parse(await first.json());
+
+    expect(await startedRows(created.checkoutId)).toEqual([
+      {
+        event_id: `checkout:${created.checkoutId}`,
+        source: "server",
+        order_id: created.checkoutId,
+        product_id: "standard-3m",
+        currency: created.currency,
+        amount_minor: created.totalMinor,
+        consent: "not-required",
+        anonymous_session_id: null,
+        occurred_at: clock,
+        received_at: clock,
+      },
+    ]);
+
+    // A replay of the same client key is not a second checkout, so it is not a
+    // second checkout_started (and the deterministic id would collapse it).
+    const replay = await createCheckoutRequest(actor, body, {
+      bindings: funnelOn,
+    });
+    expect(replay.status).toBe(200);
+    expect(await startedRows(created.checkoutId)).toHaveLength(1);
+  });
+
+  it("writes none with the flag off, and the response is unchanged", async () => {
+    const off = await purchaserOf("standard-3m");
+    const on = await purchaserOf("standard-3m");
+
+    const offResponse = await createCheckoutRequest(off.actor, {
+      certificationId: off.certificationId,
+      sku: "standard-3m",
+      clientCheckoutKey: crypto.randomUUID(),
+    });
+    const onResponse = await createCheckoutRequest(
+      on.actor,
+      {
+        certificationId: on.certificationId,
+        sku: "standard-3m",
+        clientCheckoutKey: crypto.randomUUID(),
+      },
+      { bindings: funnelOn },
+    );
+
+    const offText = await offResponse.text();
+    const onText = await onResponse.text();
+    const offBody = commerceCheckoutResponseSchema.parse(JSON.parse(offText));
+    const onBody = commerceCheckoutResponseSchema.parse(JSON.parse(onText));
+
+    // Byte-identical once the two random checkout ids (and the redirect URL that
+    // embeds one) are normalised: enabling recording changes no byte of the
+    // answer.
+    expect(onResponse.status).toBe(offResponse.status);
+    expect(onText.replaceAll(onBody.checkoutId, "<checkout>")).toBe(
+      offText.replaceAll(offBody.checkoutId, "<checkout>"),
+    );
+    expect(await startedRows(offBody.checkoutId)).toHaveLength(0);
+    expect(await startedRows(onBody.checkoutId)).toHaveLength(1);
+  });
+
+  it("still creates and answers the checkout when the recorder throws", async () => {
+    const { actor, certificationId } = await purchaserOf("standard-3m");
+    const failing = {
+      record: async () => {
+        throw new Error("D1 unavailable");
+      },
+    };
+
+    const result = await createCheckout(
+      database,
+      fakeProvider,
+      {
+        userId: actor.userId,
+        certificationId,
+        sku: "standard-3m",
+        clientCheckoutKey: crypto.randomUUID(),
+        origin,
+        now: clock,
+      },
+      failing,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.created).toBe(true);
+    expect(await startedRows(result.value.checkoutId)).toHaveLength(0);
   });
 });

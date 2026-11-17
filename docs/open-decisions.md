@@ -39,8 +39,23 @@ need an owner or architect decision.
 |---|---|---|
 | Export retention | Keep the last 3 dumps per target; delete a dump 14 days after the migration it precedes is confirmed; never commit a dump, never upload one | Owner decision, [`docs/data-export-and-restore.md`](data-export-and-restore.md) §Retention |
 
+## Resolved (17 November 2026, Phase 5B)
+
+| Decision | Outcome | Record |
+|---|---|---|
+| `pilot_events` retention | **12 months, for both `source = 'browser'` and `source = 'server'`.** This is the period only: 0021 ships no delete path and no delete-floor trigger. Enforcing the floor (clock semantics, D1 skew, withdrawal) is its own review, and it is a **precondition for enabling `PILOT_EVENTS_ENABLED`** — see [`docs/pilot-hardening.md`](pilot-hardening.md) §Retention precondition. | Owner decision, 17 November 2026; `db/migrations/0021_pilot_events.sql` |
+| Consent surface | **Explicit opt-in, no banner, 180-day cookie, issued in 5D.** Decided for 5D, not an ADR requirement; it must not stay ambiguous. 5B ships the verifier only (`apps/api/src/analytics/pilot-events.ts`): no banner, no copy, no issuing route, so a real origin has no `pilot_consent` cookie and `POST /api/events` records nothing. | Owner decision, 17 November 2026; [`docs/pilot-hardening.md`](pilot-hardening.md) §What 5B ships |
+
 ## Owner decisions still open
 
+- **Consent for server-originated funnel events** (`checkout_started`,
+  `purchase_confirmed`, `pro_activated`). **This blocks enabling
+  `PILOT_SERVER_EVENTS_ENABLED`.** The flag stays `"false"` until the owner
+  rules. The schema keeps `consent = 'not-required'` available for
+  `source = 'server'` rows and 5B builds **no identity linkage**: a server row
+  carries no session id at all. If the answer is "yes, these need consent", the
+  server path needs a consent reference — identity linkage and a new migration —
+  which is why it is not decided here.
 - Launch market's tax, consumer, refund and invoicing obligations (currency is USD).
 - Final brand, domain, and canonical production origin.
 - Exam launch order beyond CISSP (CISM is prepared but not scheduled).

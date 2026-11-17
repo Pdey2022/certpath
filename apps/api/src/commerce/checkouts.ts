@@ -28,6 +28,8 @@ import type {
 } from "../security/database.ts";
 import { readProEnablement } from "../security/pro-enablement.ts";
 import type { PaymentProvider } from "./provider.ts";
+import type { PilotEventRecorder } from "../analytics/pilot-events.ts";
+import { recordSafely } from "../analytics/pilot-events.ts";
 
 // The offers projection and checkout creation.
 //
@@ -599,6 +601,11 @@ function lineInsert(
  * idempotency key is *our* checkout id: a crash between the two leaves a
  * `pending` row with no session, and the retry with the same client key calls
  * the provider again with the same key instead of minting a second session.
+ *
+ * `events` is the pilot funnel recorder, or `null` when
+ * `PILOT_SERVER_EVENTS_ENABLED` is not "true". It is called after the row is
+ * committed, for a checkout this call created, and its failure is not this
+ * function's failure: the checkout's answer is identical either way.
  */
 export async function createCheckout(
   database: SecurityDatabase,
@@ -611,6 +618,7 @@ export async function createCheckout(
     origin: string;
     now: number;
   },
+  events: PilotEventRecorder | null = null,
 ): Promise<CheckoutResult> {
   // Idempotency is decided before the purchase rule: a replay is a replay even
   // if the rule that allowed the original would now refuse it. Nothing is
@@ -791,6 +799,25 @@ export async function createCheckout(
     const bound = await findCheckout(database, "id = ?", row.id);
     if (!bound) return { ok: false, failure: { code: "provider-unavailable" } };
     row = bound;
+  }
+
+  // The funnel event is written after the checkout exists and after the provider
+  // session is bound, for a checkout this call created: once per checkout, and
+  // never in the path of the answer. The recorder cannot throw, and `null` (the
+  // flag off) skips it before a statement is built.
+  if (events && created) {
+    await recordSafely(
+      events,
+      {
+        name: "checkout_started",
+        checkoutId: row.id,
+        productId: row.sku,
+        currency: row.currency,
+        amountMinor: row.total_minor,
+        occurredAt: input.now,
+      },
+      input.now,
+    );
   }
 
   return {

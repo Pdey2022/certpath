@@ -299,6 +299,14 @@ test("chain, export local and rehearse round-trip the whole schema", (t) => {
     manifest.tables.length >= migrations.length + 10,
     `expected the full schema, saw ${manifest.tables.length} tables`,
   );
+  // Phase 5B: the funnel table is exported and rehearsed like every other table,
+  // with no allowlist to update. A fresh export lists it at zero rows.
+  const funnel = manifest.tables.find((table) => table.name === "pilot_events");
+  assert.deepEqual(funnel, { name: "pilot_events", inserts: 0 });
+  assert.ok(
+    manifest.tables.some((table) => table.name === "pilot_event_names"),
+    "pilot_event_names must be in the manifest",
+  );
 
   const rehearse = run("rehearse", ["--file", dumpPath]);
   assert.equal(rehearse.status, 0, rehearse.output);

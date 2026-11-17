@@ -6,15 +6,17 @@ each one can be reviewed, approved and rolled back on its own. This file records
 the slices, their order, their migration reservations and the decisions each one
 needs.
 
-Status: **5A approved by the owner and in review.** Nothing in Phase 5 has been
-deployed or provisioned.
+Status: **5A approved by the owner and in review; 5B (pilot funnel events) is
+implemented on a draft PR with its design approved by the owner on 17 November
+2026.** Nothing in Phase 5 has been deployed or provisioned, and both funnel
+flags are `"false"`.
 
 ## Slices
 
 | Slice | Scope | Depends on | Migration | Approval |
 |---|---|---|---|---|
 | **5A Data-safety tooling** | D1 isolation gate, export + manifest, rehearsed restore, fresh-chain check, `verify` wiring, export runbook | - | none (`db/migrations/checksums.txt` is not a migration) | **Approved 17 Nov 2026** |
-| **5B Pilot funnel events** | `pilot_events` (consent-aware, no personal data), the events that the fake door needs | 5A (so a pre-migration export exists), 5C (a database to write to) | **0021** | ARC design + owner approval of *what* is recorded |
+| **5B Pilot funnel events** | `pilot_events` (consent-aware, no personal data), the events that the fake door needs | 5A (so a pre-migration export exists), 5C (a database to write to) | **0021** | **Design approved 17 Nov 2026**; the consent-issuing surface is 5D and the server-event consent question is open |
 | **5C Provisioning** | Dedicated staging D1, then the pilot D1: create, record ids, apply the chain, export before the first migration, rehearse it, seed one invited learner | 5A, owner approval | uses the existing chain | **Owner approval required**: creates Cloudflare resources |
 | **5D Fake door** | Price validation without taking payment | 5B (funnel), 5E (hostname) | none | Owner approval: product and pricing rule |
 | **5E Hostname decision** | Canonical pilot hostname and routing | 5C | none | **Owner approval required**: brand, domain, canonical origin |
@@ -48,6 +50,47 @@ lands first, renumber before writing the file and add its checksum line.
 `npm run verify` now runs the isolation gate first and the chain check before the
 build, so a broken chain fails verification instead of reporting a green summary.
 
+## What 5B ships
+
+| Piece | Where |
+|---|---|
+| `pilot_events` + `pilot_event_names`, guards, indexes | `db/migrations/0021_pilot_events.sql` |
+| Checksum line for 0021 | `db/migrations/checksums.txt` |
+| Wire contract (request, acceptance, error codes) | `packages/contracts/src/analytics.ts` |
+| Recorder, consent verifier, `POST /api/events` | `apps/api/src/analytics/pilot-events.ts` |
+| Funnel measurement query | `apps/api/src/analytics/funnel.ts` |
+| Server writes beside checkout and settlement | `apps/api/src/commerce/checkouts.ts`, `apps/api/src/commerce/webhooks.ts` |
+| Flags, both `"false"` | `apps/web/wrangler.jsonc` |
+
+Two flags, because either half must be switchable alone:
+`PILOT_EVENTS_ENABLED` (the browser endpoint) and `PILOT_SERVER_EVENTS_ENABLED`
+(the three server writes). Both are exact-string gates, like `COMMERCE_ENABLED`.
+
+5B ships the consent **verifier only**. There is no consent banner, no copy and no
+issuing route: the owner approved explicit opt-in with a 180-day cookie issued in
+5D. On a real origin no `pilot_consent` cookie exists, so the endpoint writes
+nothing even with the flag on — inertness by construction, not only by flag.
+
+Conversion is computed from `commerce_checkouts`, never from events, so a lost
+event cannot move the reported rate; the event-side counts sit beside it and
+`eventGap` makes the loss visible. `createCheckout` and `settleCompletedEvent`
+answer identically whether the recorder is off or fails.
+
+### Retention precondition
+
+The owner decided on 17 November 2026 that `pilot_events` is retained for **12
+months, for both `source = 'browser'` and `source = 'server'`**. That is the
+period, not the enforcement: 0021 ships **no delete path and no delete-floor
+trigger**, and nothing in the codebase deletes from `pilot_events`.
+
+**Enforcing the 12-month floor is a precondition for enabling
+`PILOT_EVENTS_ENABLED` — it is not part of 5B.** The enforcement lands in its own
+review (clock semantics, D1 clock skew, and what withdrawal does to stored
+history) and needs its own migration. Enabling the flag before that enforcement
+exists would create a table with a stated retention period and no mechanism that
+delivers it.
+
+
 ## Resolved decisions
 
 | Decision | Outcome | Date |
@@ -56,8 +99,11 @@ build, so a broken chain fails verification instead of reporting a green summary
 
 ## Open decisions that still block Phase 5
 
-- 5B: exactly which funnel events are recorded and under what consent wording
-  (ARC, then owner).
+- 5B: whether order-linked server events need consent (owner). This blocks
+  enabling `PILOT_SERVER_EVENTS_ENABLED`; the flag stays `"false"`, the schema
+  keeps `consent = 'not-required'` for server rows and no identity linkage is
+  built. The consent surface itself is decided for 5D (explicit opt-in, no
+  banner, 180-day cookie) and the retention period is decided (12 months).
 - 5C: account/plan posture for the isolated staging database (owner).
 - 5D: the price point to validate and what "demand" means (owner).
 - 5E: canonical hostname and whether the pilot keeps a `workers.dev` origin
