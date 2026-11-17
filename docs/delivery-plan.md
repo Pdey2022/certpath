@@ -29,7 +29,7 @@ decision record where a product rule is involved.
 | **2. Readiness and dashboard v1** | #45 | Readiness v1 snapshots, bands, decay, next action, Pro prompt | Phase 1 |
 | **3. Admin capability model** | #46 | Capability table, learner support with masked data and audited reveal, audit retention | Phase 1 |
 | **4. Commerce** | #47 | `PaymentProvider` port with a fake, checkout, webhooks, refunds and access revocation | Phases 1, 3 |
-| **5. Pilot hardening** | #48 | Isolated staging D1, pre-migration exports, funnel events, hostname decision, MFA before real learners ([slices 5A-5F](pilot-hardening.md)) | Phases 3, 4 |
+| **5. Pilot hardening** | #48 | Isolated staging D1, rehearsed exports and restores, funnel events, hostname decision, MFA before real learners ([slices 5A-5F](pilot-hardening.md)) | Phases 3, 4 |
 | **6. CAT/adaptive Pro** | #49 | Blueprint-weighted item selection, session model, Pro reports, CISSP only | Phases 2, 4 and a stocked bank |
 
 Phases 1-3 are strictly sequential because they share the entitlement predicate.

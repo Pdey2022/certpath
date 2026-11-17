@@ -1,11 +1,14 @@
 # Data export and restore
 
 Operator runbook for the Phase 5A data-safety tooling: the D1 isolation gate,
-pre-migration exports with a sidecar manifest, a rehearsed restore, and the
-fresh-chain check. Everything here runs locally. Nothing in this slice deploys
-anything, creates a database, schedules a dump or calls Cloudflare except the
-export of a *remote* target, which refuses to start until that target has a real
-`database_id`.
+exports with a sidecar manifest, a rehearsed restore, and the fresh-chain check.
+Everything here runs locally. Nothing in this slice deploys anything, creates a
+database, schedules a dump or calls Cloudflare except the export of a *remote*
+target, which refuses to start until that target has a real `database_id`.
+
+Provisioning the staging target — creating the database and recording its id —
+is [Phase 5C](pilot-provisioning.md), a separate owner-approved run. This
+document is the tooling that run uses.
 
 ## What exists
 
@@ -32,7 +35,24 @@ which is how the round-trip test points the export at a scratch database the
 chain check just migrated.
 
 `local` is the only target that may carry the placeholder `database_id`; it is
-wrangler-dev state, not a provisioned database.
+wrangler-dev state, not a provisioned database. `staging` and `pilot` carry the
+placeholder until their own provisioning run records a real id, and until then
+`db:export` exits `3` for them without touching the network. Staging is
+provisioned by [Phase 5C](pilot-provisioning.md); pilot waits for the first real
+learner.
+
+## The first export
+
+The first export of a target is **not** a pre-migration export. A database with
+no migrations in it exports to nothing, and `db:export` refuses that dump: it
+exits `1` with `empty_export` and publishes no `.sql` and no manifest. An empty
+dump proves nothing about the restore that follows.
+
+The first export is therefore the first **non-empty baseline**: the target has
+its chain applied, `d1_migrations` is populated, and the dump carries the schema
+plus the ledger with no application rows. Phase 5C calls that export #1 and
+rehearses it before the smoke fixture is applied
+([`docs/pilot-provisioning.md`](pilot-provisioning.md) §The order).
 
 ## Where dumps go
 
@@ -92,8 +112,19 @@ values of `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`.
 | `migrations` | `d1_migrations` names in id order |
 
 `inserts` counts `INSERT INTO "<name>"` occurrences in the dump text. Wrangler's
-`d1 export` emits one `INSERT` per row, so this equals the restored row count for
-every table.
+`d1 export` emits one `INSERT` per row, so the count is the number of rows the
+dump *carries* for that table — not the number of rows a load produces. A load
+can write more: replaying `certifications`, `exam_versions` or `domains` rows
+re-fires `certifications_audit_insert`, `exam_versions_audit_insert`,
+`domains_audit_insert` and `exam_versions_create_timed_mock_profile`, so the
+restored `audit_events` count can exceed the manifest's. The rehearsal compares
+the two per table, which is how a doubled trigger is caught.
+
+A dump that carries `audit_events` rows does not currently rehearse at all: the
+load fails on statement order before that comparison is reached, so the
+qualification above is untested for those dumps. Loading one is pending the
+replay fix, and the finding is recorded in
+[`docs/pilot-provisioning.md`](pilot-provisioning.md).
 
 ## Rehearsed restore
 
@@ -189,14 +220,25 @@ round trip: schema, manifest, hashing, load, integrity and counts. It cannot
 prove a data-bearing restore.
 
 The first data-bearing rehearsal belongs to slice 5C (provisioning): export the
-isolated staging database before its first migration, rehearse it, and record the
-result. Until then, no rehearsal has seen a real row.
+isolated staging database once its chain is applied, export it again after the
+synthetic smoke fixture is written, and rehearse both. Until then, no rehearsal
+has seen a real row. See [`docs/pilot-provisioning.md`](pilot-provisioning.md).
 
 ## Limitations
 
 - No scheduling, no automatic retention enforcement, no remote restore. The
   rehearsal is local-only; restoring a remote D1 is a separate, owner-approved
   step.
+- A dump that carries `audit_events` rows does not currently rehearse. The dump
+  inserts into `audit_events` before it creates `certifications`
+  (`0002_local_security.sql` order), so the load fails with
+  `no such table: main.certifications` even though the dump sets
+  `PRAGMA defer_foreign_keys=TRUE`. Replaying the fixture also re-fires the
+  `*_audit_insert` triggers, which `audit_events_no_replace` would refuse. Both
+  are recorded as a stop condition in
+  [`docs/pilot-provisioning.md`](pilot-provisioning.md); neither is fixed here,
+  and no workaround (edited dump, disabled foreign keys, dropped trigger) is
+  approved.
 - `db:export --target staging` and `--target pilot` cannot run until 5C records
   a real `database_id`; they exit `3` before touching the network.
 - `PRAGMA integrity_check` is refused by D1's local emulation (`SQLITE_AUTH`), so

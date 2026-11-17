@@ -7,23 +7,32 @@ import {
   CliError,
   MANIFEST_FIELDS,
   analyzeConfigs,
+  assertExpectedAccountEnv,
   assertManifestShape,
+  assertPreviewDeployConfig,
+  assertPreviewGeneratedConfig,
   buildManifest,
+  checkPreflightAccount,
+  checkPreflightDatabase,
   diffTableCounts,
   diffTableSets,
+  formatPreflightReport,
   idClass,
   isAuthFailure,
   migrationChecksum,
   normalizeDatabaseId,
   normalizeNewlines,
   parseChecksums,
+  parseDatabaseList,
   parseJsonc,
+  parseWhoamiAccounts,
   redactSecrets,
   resolveExportTarget,
   sha256Hex,
   stripJsonc,
   tablesFromDump,
   verifyChecksums,
+  wranglerEnv,
 } from "./d1-targets.mjs";
 
 const PLACEHOLDER = "00000000-0000-0000-0000-000000000000";
@@ -435,4 +444,279 @@ test("analyzeConfigs reports a config it cannot parse instead of assuming it is 
     violations.map((violation) => violation.code),
     ["config_parse_failed"],
   );
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5C account preflight. Each case names the mistake it catches; removing
+// the guard in scripts/lib/d1-targets.mjs makes exactly one of them fail.
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_A = "aa11bb22cc33dd44ee55ff66aa77bb88";
+const ACCOUNT_B = "bb22cc33dd44ee55ff66aa77bb88cc99";
+const DATABASE = "certpath-learner-staging";
+const DATABASE_UUID = "1234abcd-5678-4def-9012-3456789abcde";
+const OTHER_UUID = "fedcba98-7654-4321-0fed-cba987654321";
+
+function whoamiPayload(extra = {}) {
+  return {
+    accounts: [
+      { id: ACCOUNT_A, name: "CertPath Staging" },
+      { id: ACCOUNT_B, name: "Other Account" },
+    ],
+    ...extra,
+  };
+}
+
+function expectCode(code, exitCode) {
+  return (error) => {
+    assert.ok(error instanceof CliError, `expected a CliError, got ${error}`);
+    assert.equal(error.code, code);
+    assert.equal(error.exitCode, exitCode);
+    return true;
+  };
+}
+
+test("preflight: a CLOUDFLARE_ACCOUNT_ID that disagrees with --expect-account is account_env_mismatch", () => {
+  // Catches a stale exported account id silently retargeting every Wrangler
+  // call, because Wrangler prefers the environment variable over its selection.
+  assert.throws(
+    () =>
+      assertExpectedAccountEnv({
+        expectAccount: ACCOUNT_A,
+        envAccountId: ` ${ACCOUNT_B.toUpperCase()} `,
+      }),
+    expectCode("account_env_mismatch", 1),
+  );
+  // An agreeing environment id (any case) and an unset one are both fine.
+  assert.equal(
+    assertExpectedAccountEnv({ expectAccount: ACCOUNT_A, envAccountId: ACCOUNT_A.toUpperCase() }),
+    ACCOUNT_A,
+  );
+  assert.equal(
+    assertExpectedAccountEnv({ expectAccount: ACCOUNT_A, envAccountId: null }),
+    ACCOUNT_A,
+  );
+});
+
+test("preflight: an expected account that the credential cannot see is account_mismatch", () => {
+  assert.deepEqual(
+    checkPreflightAccount({ whoami: whoamiPayload(), expectAccount: ACCOUNT_A }),
+    { id: ACCOUNT_A, name: "CertPath Staging" },
+  );
+  assert.throws(
+    () =>
+      checkPreflightAccount({
+        whoami: whoamiPayload(),
+        expectAccount: "00112233445566778899aabbccddeeff",
+      }),
+    expectCode("account_mismatch", 1),
+  );
+});
+
+test("preflight: an unreadable whoami or d1 list payload is preflight_unparsed, never a pass", () => {
+  // Catches a Wrangler shape change turning "I cannot see the database" into
+  // "the database is absent", which would green-light a duplicate create.
+  for (const payload of [{}, null, { result: [] }, { accounts: "nope" }, { accounts: [{}] }]) {
+    assert.throws(
+      () => parseWhoamiAccounts(payload),
+      expectCode("preflight_unparsed", 1),
+    );
+  }
+  for (const payload of [42, "[]", {}, { result: "nope" }, { result: [{ name: DATABASE }] }, [null]]) {
+    assert.throws(
+      () => parseDatabaseList(payload),
+      expectCode("preflight_unparsed", 1),
+    );
+  }
+});
+
+test("preflight: absent and present are asserted against both d1 list JSON shapes", () => {
+  const present = [{ uuid: DATABASE_UUID, name: DATABASE }, { uuid: OTHER_UUID, name: "certpath-pilot" }];
+  const absent = [{ uuid: OTHER_UUID, name: "certpath-pilot" }];
+
+  for (const payload of [present, { result: present }]) {
+    const databases = parseDatabaseList(payload);
+    assert.deepEqual(
+      checkPreflightDatabase({ databases, database: DATABASE, expectPresent: true }),
+      { name: DATABASE, present: true, uuid: DATABASE_UUID },
+    );
+    // --expect-absent over an existing database would be a second create.
+    assert.throws(
+      () => checkPreflightDatabase({ databases, database: DATABASE, expectPresent: false }),
+      expectCode("database_already_exists", 1),
+    );
+  }
+
+  for (const payload of [absent, { result: absent }]) {
+    const databases = parseDatabaseList(payload);
+    assert.deepEqual(
+      checkPreflightDatabase({ databases, database: DATABASE, expectPresent: false }),
+      { name: DATABASE, present: false, uuid: null },
+    );
+    // --expect-present over a missing database must not proceed to migrate it.
+    assert.throws(
+      () => checkPreflightDatabase({ databases, database: DATABASE, expectPresent: true }),
+      expectCode("database_missing", 1),
+    );
+  }
+});
+
+test("preflight: a differently-cased match counts as present, so --expect-absent still refuses", () => {
+  const databases = parseDatabaseList([{ uuid: DATABASE_UUID, name: DATABASE }]);
+  assert.throws(
+    () =>
+      checkPreflightDatabase({
+        databases,
+        database: DATABASE.toUpperCase(),
+        expectPresent: false,
+      }),
+    expectCode("database_already_exists", 1),
+  );
+});
+
+test("preflight: the report carries the account name and id and never a token-shaped value", () => {
+  const token = "v1.0-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+  const account = checkPreflightAccount({
+    whoami: whoamiPayload({ api_token: token, email: "operator@example.test", token_permissions: [token] }),
+    expectAccount: ACCOUNT_A,
+  });
+  const report = formatPreflightReport({
+    account,
+    database: { name: DATABASE, present: false, uuid: null },
+  });
+
+  assert.equal(
+    report,
+    `account: CertPath Staging (${ACCOUNT_A})\ndatabase ${DATABASE}: absent`,
+  );
+  assert.doesNotMatch(report, /v1\.0-/);
+  assert.equal(report.includes(token), false);
+  assert.doesNotMatch(report, /@example\.test/);
+});
+
+test("preflight: wranglerEnv pins every read to --expect-account", () => {
+  // Catches the preflight reading account B's databases while asserting account
+  // A: Wrangler prefers CLOUDFLARE_ACCOUNT_ID, then a stored selection, so the
+  // child environment must carry the asserted id and nothing else may win.
+  const pinned = wranglerEnv({
+    parentEnv: { CLOUDFLARE_ACCOUNT_ID: ACCOUNT_B, PATH: "/bin", HOME: "/home/x" },
+    expectAccount: ACCOUNT_A,
+  });
+  assert.equal(pinned.CLOUDFLARE_ACCOUNT_ID, ACCOUNT_A);
+  assert.equal(pinned.PATH, "/bin");
+  assert.equal(pinned.HOME, "/home/x");
+
+  // No parent value at all: still pinned, so a stale stored selection cannot be
+  // used as the fallback.
+  assert.equal(
+    wranglerEnv({ parentEnv: { PATH: "/bin" }, expectAccount: ACCOUNT_A })
+      .CLOUDFLARE_ACCOUNT_ID,
+    ACCOUNT_A,
+  );
+  // Upper case and whitespace are normalised to the id Wrangler resolves.
+  assert.equal(
+    wranglerEnv({ parentEnv: {}, expectAccount: ` ${ACCOUNT_A.toUpperCase()} ` })
+      .CLOUDFLARE_ACCOUNT_ID,
+    ACCOUNT_A,
+  );
+  assert.throws(
+    () => wranglerEnv({ parentEnv: {}, expectAccount: "" }),
+    expectCode("missing_option_value", 2),
+  );
+});
+
+test("preflight: a credential whose visible account is not the expected one exits with account_mismatch, not a pass", () => {
+  // With the reads pinned to --expect-account, a stored selection of another
+  // account cannot make this pass: the visible account list is what decides.
+  assert.throws(
+    () =>
+      checkPreflightAccount({
+        whoami: { accounts: [{ id: ACCOUNT_B, name: "Other Account" }] },
+        expectAccount: ACCOUNT_A,
+      }),
+    expectCode("account_mismatch", 1),
+  );
+});
+
+test("preview deploy guard: a pilot artefact fails as preview_binds_d1, a site artefact as preview_wrong_config", () => {
+  // build:site, build:pilot, build:staging and build:preview all write the same
+  // build/server/wrangler.json, so deploy:preview must refuse any of the other
+  // targets' artefacts.
+  assert.throws(
+    () =>
+      assertPreviewDeployConfig({
+        name: "certpath-pilot",
+        configPath: "C:\\repo\\apps\\web\\wrangler.pilot.jsonc",
+        d1_databases: [
+          { binding: "DB", database_name: "certpath-pilot", database_id: PLACEHOLDER },
+        ],
+      }),
+    expectCode("preview_binds_d1", 1),
+  );
+
+  assert.throws(
+    () =>
+      assertPreviewDeployConfig({
+        name: "certpath-site",
+        configPath: "C:\\repo\\apps\\web\\wrangler.site.jsonc",
+      }),
+    expectCode("preview_wrong_config", 1),
+  );
+
+  // The right config path but the wrong Worker name is the same refusal.
+  assert.throws(
+    () =>
+      assertPreviewDeployConfig({
+        name: "certpath-staging",
+        configPath: "C:\\repo\\apps\\web\\wrangler.preview.jsonc",
+      }),
+    expectCode("preview_wrong_config", 1),
+  );
+
+  assert.deepEqual(
+    assertPreviewDeployConfig({
+      name: "certpath-ui-preview",
+      configPath: "C:/repo/apps/web/wrangler.preview.jsonc",
+    }),
+    {
+      name: "certpath-ui-preview",
+      configPath: "C:/repo/apps/web/wrangler.preview.jsonc",
+    },
+  );
+});
+
+test("preview build guard: a generated config that binds D1 fails as preview_binds_d1", () => {
+  // Catches a build artefact that would deploy a D1 binding to the preview
+  // Worker even though wrangler.preview.jsonc is clean.
+  assert.throws(
+    () =>
+      assertPreviewGeneratedConfig({
+        name: "certpath-ui-preview",
+        d1_databases: [
+          { binding: "DB", database_name: "certpath-preview", database_id: PLACEHOLDER },
+        ],
+      }),
+    (error) => {
+      expectCode("preview_binds_d1", 1)(error);
+      assert.match(error.message, /certpath-preview/);
+      return true;
+    },
+  );
+});
+
+test("preview build guard: a missing or empty d1_databases key passes, a non-object fails closed", () => {
+  assert.equal(
+    assertPreviewGeneratedConfig({ name: "certpath-ui-preview" }).name,
+    "certpath-ui-preview",
+  );
+  assert.deepEqual(assertPreviewGeneratedConfig({ name: "certpath-ui-preview", d1_databases: [] }), {
+    name: "certpath-ui-preview",
+    d1_databases: [],
+  });
+  for (const payload of [null, [], "wrangler.json"]) {
+    assert.throws(
+      () => assertPreviewGeneratedConfig(payload),
+      expectCode("preflight_unparsed", 1),
+    );
+  }
 });
