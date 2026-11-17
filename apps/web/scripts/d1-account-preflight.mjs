@@ -13,6 +13,9 @@
 // The expected account id comes only from --expect-account. CLOUDFLARE_ACCOUNT_ID
 // is not a source of truth: Wrangler prefers it over its stored selection, so a
 // stale value there is reported as account_env_mismatch instead of being used.
+// Both Wrangler reads are pinned to --expect-account (`CLOUDFLARE_ACCOUNT_ID` is
+// set in the child environment), so neither can fall back to a stored selection
+// and describe a different account than the one being asserted.
 //
 // Exit codes: 0 both assertions true, 1 assertion failed or the answer was
 // unparseable (named code), 2 usage, 4 remote_auth_failed.
@@ -29,6 +32,7 @@ import {
   parseDatabaseList,
   parseWhoamiAccounts,
   redactSecrets,
+  wranglerEnv,
 } from "./lib/d1-targets.mjs";
 
 // The account id is the subject of the assertion and is printed on purpose; a
@@ -113,11 +117,21 @@ function findWrangler() {
   );
 }
 
-function runWrangler(args) {
+function runWrangler(args, expectAccount) {
   const result = spawnSync(process.execPath, [findWrangler(), ...args], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+    // Pinned to --expect-account: without this, Wrangler would fall back to a
+    // stored selection and both reads could describe a different account than
+    // the one being asserted (and than the one `d1 create` would write to).
+    env: wranglerEnv({
+      parentEnv: {
+        ...process.env,
+        NO_COLOR: "1",
+        FORCE_COLOR: "0",
+      },
+      expectAccount,
+    }),
     maxBuffer: 64 * 1024 * 1024,
   });
   return {
@@ -218,7 +232,7 @@ function main() {
   });
 
   const whoamiOutput = requireWranglerResult(
-    runWrangler(["whoami", "--json"]),
+    runWrangler(["whoami", "--json"], options.expectAccount),
     "whoami --json",
   );
   const whoami = parseWranglerJson(whoamiOutput, "whoami --json");
@@ -231,7 +245,7 @@ function main() {
   });
 
   const listOutput = requireWranglerResult(
-    runWrangler(["d1", "list", "--json"]),
+    runWrangler(["d1", "list", "--json"], options.expectAccount),
     "d1 list --json",
   );
   const databases = parseDatabaseList(

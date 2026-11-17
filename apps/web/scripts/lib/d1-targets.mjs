@@ -805,6 +805,27 @@ export function normalizeAccountId(value) {
 }
 
 /**
+ * The environment for a read that must be about the asserted account.
+ *
+ * Wrangler resolves the target account from the config, then
+ * `CLOUDFLARE_ACCOUNT_ID`, then a stored selection, so a read issued with the
+ * operator's environment can be about a different account than the one being
+ * asserted. Pinning `CLOUDFLARE_ACCOUNT_ID` to `--expect-account` removes both
+ * fallbacks: the read is either about that account or it fails.
+ */
+export function wranglerEnv({ parentEnv = {}, expectAccount }) {
+  const expected = normalizeAccountId(expectAccount);
+  if (expected === "") {
+    throw new CliError(
+      "missing_option_value",
+      "wranglerEnv needs an account id to pin; it is the only source of the expected id",
+      2,
+    );
+  }
+  return { ...parentEnv, CLOUDFLARE_ACCOUNT_ID: expected };
+}
+
+/**
  * `CLOUDFLARE_ACCOUNT_ID` must agree with `--expect-account` whenever it is set,
  * because Wrangler would silently prefer it. Checked before any network call.
  */
@@ -1004,4 +1025,37 @@ export function assertPreviewGeneratedConfig(generatedConfig) {
     `The generated preview config binds D1 (${named}); the preview Worker is documented as D1-free (workers/preview.ts) and must stay that way`,
     1,
   );
+}
+
+/**
+ * Phase 5C deploy guard. `build:site`, `build:pilot`, `build:staging` and
+ * `build:preview` all write the same `build/server/wrangler.json`, so a pilot
+ * build followed by `deploy:preview` would ship a D1-bound Worker to the preview
+ * host. The generated config must therefore be D1-free *and* be the preview
+ * config, checked before Wrangler is spawned.
+ */
+export function assertPreviewDeployConfig(generatedConfig) {
+  // D1 first: a pilot artefact is the dangerous one, and it must be named as
+  // such rather than as a generic wrong-config error.
+  assertPreviewGeneratedConfig(generatedConfig);
+
+  const configPath =
+    typeof generatedConfig.configPath === "string"
+      ? generatedConfig.configPath.replaceAll("\\", "/")
+      : "";
+  if (!configPath.endsWith("/wrangler.preview.jsonc")) {
+    throw new CliError(
+      "preview_wrong_config",
+      `The generated config selected ${configPath || "(no configPath)"}, not wrangler.preview.jsonc; run npm run build:preview before deploy:preview`,
+      1,
+    );
+  }
+  if (generatedConfig.name !== "certpath-ui-preview") {
+    throw new CliError(
+      "preview_wrong_config",
+      `The generated config names the ${JSON.stringify(generatedConfig.name)} Worker, not certpath-ui-preview; run npm run build:preview before deploy:preview`,
+      1,
+    );
+  }
+  return generatedConfig;
 }

@@ -30,6 +30,8 @@ const SCRIPTS = {
   export: path.join(scriptsDir, "d1-export.mjs"),
   rehearse: path.join(scriptsDir, "d1-restore-rehearse.mjs"),
   chain: path.join(scriptsDir, "d1-chain-check.mjs"),
+  preflight: path.join(scriptsDir, "d1-account-preflight.mjs"),
+  preview: path.join(scriptsDir, "preview-command.mjs"),
 };
 
 function run(script, args) {
@@ -218,6 +220,131 @@ test("the real configs pass the isolation gate", () => {
 
   assert.equal(result.status, 0, result.output);
   assert.match(result.output, /D1 isolation OK/);
+});
+
+test("preflight: both Wrangler reads are pinned to --expect-account", (t) => {
+  // A stub Wrangler records the environment of each child process. Without the
+  // pin, `d1 list` is scoped to whatever Wrangler resolved (config -> env ->
+  // stored selection), so the preflight could assert account A and list account
+  // B's databases; with it, both reads carry the asserted id.
+  const directory = tempDir(t);
+  const scriptsCopy = path.join(directory, "scripts");
+  cpSync(scriptsDir, scriptsCopy, { recursive: true });
+  const stubDirectory = path.join(directory, "node_modules", "wrangler", "bin");
+  mkdirSync(stubDirectory, { recursive: true });
+  const accountId = "aaaa1111bbbb2222cccc3333dddd4444";
+  const logPath = path.join(directory, "child-env.log");
+  writeFileSync(
+    path.join(stubDirectory, "wrangler.js"),
+    [
+      'const { appendFileSync } = require("node:fs");',
+      "const args = process.argv.slice(2);",
+      "appendFileSync(",
+      "  process.env.CERTPATH_STUB_LOG,",
+      '  JSON.stringify({ args, accountId: process.env.CLOUDFLARE_ACCOUNT_ID ?? null }) + "\\n",',
+      ");",
+      'if (args[0] === "whoami") {',
+      `  process.stdout.write(JSON.stringify({ accounts: [{ id: "${accountId}", name: "Fixture Account" }] }));`,
+      "} else {",
+      '  process.stdout.write("[]");',
+      "}",
+      "process.exit(0);",
+      "",
+    ].join("\n"),
+  );
+
+  const env = {
+    ...process.env,
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+    CERTPATH_STUB_LOG: logPath,
+  };
+  // The parent deliberately carries no account id: that is the case where
+  // Wrangler would fall back to a stored selection of some other account.
+  delete env.CLOUDFLARE_ACCOUNT_ID;
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(scriptsCopy, "d1-account-preflight.mjs"),
+      "--expect-account",
+      accountId,
+      "--database",
+      "certpath-learner-staging",
+      "--expect-absent",
+    ],
+    { cwd: directory, encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024 },
+  );
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+
+  assert.equal(result.status, 0, output);
+  assert.match(output, /preflight ok/);
+  const calls = readFileSync(logPath, "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    calls.map((call) => call.args.slice(0, 2)),
+    [["whoami", "--json"], ["d1", "list"]],
+  );
+  for (const call of calls) {
+    assert.equal(
+      call.accountId,
+      accountId,
+      "Wrangler must be told which account to read; a stored selection is not an answer",
+    );
+  }
+});
+
+test("preview deploy refuses another target's artefact before spawning Wrangler", (t) => {
+  // build:pilot and build:site write the same build/server/wrangler.json, so
+  // deploy:preview must check the artefact it is about to ship.
+  const directory = tempDir(t);
+  const buildDirectory = path.join(directory, "build", "server");
+  mkdirSync(buildDirectory, { recursive: true });
+  const generatedPath = path.join(buildDirectory, "wrangler.json");
+  const deploy = () =>
+    spawnSync(process.execPath, [SCRIPTS.preview, "deploy"], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+      maxBuffer: 64 * 1024 * 1024,
+    });
+
+  writeFileSync(
+    generatedPath,
+    JSON.stringify({
+      name: "certpath-pilot",
+      configPath: "C:\\repo\\apps\\web\\wrangler.pilot.jsonc",
+      d1_databases: [
+        {
+          binding: "DB",
+          database_name: "certpath-pilot",
+          database_id: "00000000-0000-0000-0000-000000000000",
+        },
+      ],
+    }),
+  );
+  const pilot = deploy();
+  const pilotOutput = `${pilot.stdout ?? ""}\n${pilot.stderr ?? ""}`;
+  assert.equal(pilot.status, 1, pilotOutput);
+  assert.match(pilotOutput, /preview_binds_d1/);
+  assert.doesNotMatch(pilotOutput, /wrangler \d+\.\d+\.\d+/);
+  assert.doesNotMatch(pilotOutput, /⛅/);
+
+  writeFileSync(
+    generatedPath,
+    JSON.stringify({
+      name: "certpath-site",
+      configPath: "C:\\repo\\apps\\web\\wrangler.site.jsonc",
+    }),
+  );
+  const site = deploy();
+  const siteOutput = `${site.stdout ?? ""}\n${site.stderr ?? ""}`;
+  assert.equal(site.status, 1, siteOutput);
+  assert.match(siteOutput, /preview_wrong_config/);
+  assert.doesNotMatch(siteOutput, /wrangler \d+\.\d+\.\d+/);
+  assert.doesNotMatch(siteOutput, /⛅/);
 });
 
 test("the staging database id copied into pilot, local and preview fails the isolation gate", (t) => {

@@ -9,6 +9,7 @@ import {
   analyzeConfigs,
   assertExpectedAccountEnv,
   assertManifestShape,
+  assertPreviewDeployConfig,
   assertPreviewGeneratedConfig,
   buildManifest,
   checkPreflightAccount,
@@ -31,6 +32,7 @@ import {
   stripJsonc,
   tablesFromDump,
   verifyChecksums,
+  wranglerEnv,
 } from "./d1-targets.mjs";
 
 const PLACEHOLDER = "00000000-0000-0000-0000-000000000000";
@@ -590,6 +592,97 @@ test("preflight: the report carries the account name and id and never a token-sh
   assert.doesNotMatch(report, /v1\.0-/);
   assert.equal(report.includes(token), false);
   assert.doesNotMatch(report, /@example\.test/);
+});
+
+test("preflight: wranglerEnv pins every read to --expect-account", () => {
+  // Catches the preflight reading account B's databases while asserting account
+  // A: Wrangler prefers CLOUDFLARE_ACCOUNT_ID, then a stored selection, so the
+  // child environment must carry the asserted id and nothing else may win.
+  const pinned = wranglerEnv({
+    parentEnv: { CLOUDFLARE_ACCOUNT_ID: ACCOUNT_B, PATH: "/bin", HOME: "/home/x" },
+    expectAccount: ACCOUNT_A,
+  });
+  assert.equal(pinned.CLOUDFLARE_ACCOUNT_ID, ACCOUNT_A);
+  assert.equal(pinned.PATH, "/bin");
+  assert.equal(pinned.HOME, "/home/x");
+
+  // No parent value at all: still pinned, so a stale stored selection cannot be
+  // used as the fallback.
+  assert.equal(
+    wranglerEnv({ parentEnv: { PATH: "/bin" }, expectAccount: ACCOUNT_A })
+      .CLOUDFLARE_ACCOUNT_ID,
+    ACCOUNT_A,
+  );
+  // Upper case and whitespace are normalised to the id Wrangler resolves.
+  assert.equal(
+    wranglerEnv({ parentEnv: {}, expectAccount: ` ${ACCOUNT_A.toUpperCase()} ` })
+      .CLOUDFLARE_ACCOUNT_ID,
+    ACCOUNT_A,
+  );
+  assert.throws(
+    () => wranglerEnv({ parentEnv: {}, expectAccount: "" }),
+    expectCode("missing_option_value", 2),
+  );
+});
+
+test("preflight: a credential whose visible account is not the expected one exits with account_mismatch, not a pass", () => {
+  // With the reads pinned to --expect-account, a stored selection of another
+  // account cannot make this pass: the visible account list is what decides.
+  assert.throws(
+    () =>
+      checkPreflightAccount({
+        whoami: { accounts: [{ id: ACCOUNT_B, name: "Other Account" }] },
+        expectAccount: ACCOUNT_A,
+      }),
+    expectCode("account_mismatch", 1),
+  );
+});
+
+test("preview deploy guard: a pilot artefact fails as preview_binds_d1, a site artefact as preview_wrong_config", () => {
+  // build:site, build:pilot, build:staging and build:preview all write the same
+  // build/server/wrangler.json, so deploy:preview must refuse any of the other
+  // targets' artefacts.
+  assert.throws(
+    () =>
+      assertPreviewDeployConfig({
+        name: "certpath-pilot",
+        configPath: "C:\\repo\\apps\\web\\wrangler.pilot.jsonc",
+        d1_databases: [
+          { binding: "DB", database_name: "certpath-pilot", database_id: PLACEHOLDER },
+        ],
+      }),
+    expectCode("preview_binds_d1", 1),
+  );
+
+  assert.throws(
+    () =>
+      assertPreviewDeployConfig({
+        name: "certpath-site",
+        configPath: "C:\\repo\\apps\\web\\wrangler.site.jsonc",
+      }),
+    expectCode("preview_wrong_config", 1),
+  );
+
+  // The right config path but the wrong Worker name is the same refusal.
+  assert.throws(
+    () =>
+      assertPreviewDeployConfig({
+        name: "certpath-staging",
+        configPath: "C:\\repo\\apps\\web\\wrangler.preview.jsonc",
+      }),
+    expectCode("preview_wrong_config", 1),
+  );
+
+  assert.deepEqual(
+    assertPreviewDeployConfig({
+      name: "certpath-ui-preview",
+      configPath: "C:/repo/apps/web/wrangler.preview.jsonc",
+    }),
+    {
+      name: "certpath-ui-preview",
+      configPath: "C:/repo/apps/web/wrangler.preview.jsonc",
+    },
+  );
 });
 
 test("preview build guard: a generated config that binds D1 fails as preview_binds_d1", () => {

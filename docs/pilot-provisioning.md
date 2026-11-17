@@ -72,6 +72,12 @@ The command is read-only. It runs `wrangler whoami --json` and
 `wrangler d1 list --json`, asserts the account and the database, and prints
 neither the raw payload nor a token.
 
+Both reads are **pinned** to `--expect-account`: the child environment carries
+that id as `CLOUDFLARE_ACCOUNT_ID`, so neither call can fall back to a stored
+selection of some other account. The database that is asserted absent is
+therefore the database in the asserted account — the same account `d1 create`
+will write to — rather than in whichever account this shell happened to select.
+
 | Exit | Code | Meaning |
 |---|---|---|
 | 0 | — | both assertions true |
@@ -229,9 +235,16 @@ been observed against a remote D1:
    key. A dump that contains audit rows therefore inserts into `audit_events`
    before the `certifications` table exists. `PRAGMA defer_foreign_keys=TRUE` at
    the top of the dump does not help: the parent table has to exist for the
-   deferred check to be set up at all. This is reproducible locally today — a
-   dump of a local database carrying this fixture fails the rehearsal with
-   `no such table: main.certifications` (`dump_load_failed`).
+   deferred check to be set up at all. A dump of a local database carrying this
+   fixture fails the local rehearsal with `no such table: main.certifications`
+   (`dump_load_failed`).
+
+   **The diagnosis must be evidenced, not inferred.** Keep the first ~40
+   statements of the offending dump **outside the repository** — a dump is never
+   committed, never uploaded and never pasted into a PR — and read the statement
+   order directly. The 17 November 2026 observation did exactly that: in the
+   first 40 statements of that dump, the three `INSERT INTO "audit_events"`
+   statements sit immediately before `CREATE TABLE certifications`.
 2. **Trigger replay.** Restoring the fixture's `certifications`, `exam_versions`
    and `domains` rows re-fires `certifications_audit_insert`,
    `exam_versions_audit_insert`, `domains_audit_insert` and

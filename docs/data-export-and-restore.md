@@ -112,8 +112,19 @@ values of `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`.
 | `migrations` | `d1_migrations` names in id order |
 
 `inserts` counts `INSERT INTO "<name>"` occurrences in the dump text. Wrangler's
-`d1 export` emits one `INSERT` per row, so this equals the restored row count for
-every table.
+`d1 export` emits one `INSERT` per row, so the count is the number of rows the
+dump *carries* for that table — not the number of rows a load produces. A load
+can write more: replaying `certifications`, `exam_versions` or `domains` rows
+re-fires `certifications_audit_insert`, `exam_versions_audit_insert`,
+`domains_audit_insert` and `exam_versions_create_timed_mock_profile`, so the
+restored `audit_events` count can exceed the manifest's. The rehearsal compares
+the two per table, which is how a doubled trigger is caught.
+
+A dump that carries `audit_events` rows does not currently rehearse at all: the
+load fails on statement order before that comparison is reached, so the
+qualification above is untested for those dumps. Loading one is pending the
+replay fix, and the finding is recorded in
+[`docs/pilot-provisioning.md`](pilot-provisioning.md).
 
 ## Rehearsed restore
 
