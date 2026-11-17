@@ -1059,3 +1059,256 @@ export function assertPreviewDeployConfig(generatedConfig) {
   }
   return generatedConfig;
 }
+
+// ---------------------------------------------------------------------------
+// Replay planning.
+//
+// A Wrangler dump is one ordered sequence of statements, and replaying it in
+// that order is wrong twice over:
+//
+//   1. it inserts into tables whose parent tables have not been created yet
+//      (`audit_events` precedes `certifications` in 0002_local_security.sql, and
+//      `PRAGMA defer_foreign_keys` cannot defer a check whose parent table does
+//      not exist), and
+//   2. it re-fires every `AFTER INSERT` trigger, so the audit rows the dump
+//      carries are inserted again under the same `operation_id`.
+//
+// The rehearsal therefore loads the same statements in three phases — schema,
+// then data, then triggers — derived from the verified bytes. The dump itself is
+// never edited, so its sha256 stays the hash the manifest recorded.
+// ---------------------------------------------------------------------------
+
+/** The pragma a dump uses to let one transaction violate foreign keys mid-load. */
+export const DEFER_FOREIGN_KEYS = "PRAGMA defer_foreign_keys=TRUE;";
+
+const TRIGGER_HEAD = /^CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b/i;
+
+function isWordChar(character) {
+  return character !== undefined && /[A-Za-z0-9_$]/.test(character);
+}
+
+function skipWhitespaceAndComments(text, from) {
+  let index = from;
+  while (index < text.length) {
+    const character = text[index];
+    const next = text[index + 1];
+    if (/\s/.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === "-" && next === "-") {
+      const newline = text.indexOf("\n", index);
+      if (newline === -1) return text.length;
+      index = newline + 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      const end = text.indexOf("*/", index + 2);
+      if (end === -1) return text.length;
+      index = end + 2;
+      continue;
+    }
+    return index;
+  }
+  return index;
+}
+
+function statementStartsTrigger(text, from) {
+  const start = skipWhitespaceAndComments(text, from);
+  return TRIGGER_HEAD.test(text.slice(start, start + 48));
+}
+
+function classifyStatement(sql) {
+  if (/^PRAGMA\b/i.test(sql)) return "schema";
+  if (TRIGGER_HEAD.test(sql)) return "triggers";
+  if (/^CREATE\b/i.test(sql)) return "schema";
+  if (/^(?:INSERT|REPLACE)\b/i.test(sql)) return "data";
+  // Wrangler's export resets AUTOINCREMENT counters with exactly this statement;
+  // it belongs with the data, after the rows that set them were inserted.
+  if (/^DELETE\s+FROM\s+sqlite_sequence\b/i.test(sql)) return "data";
+  return "unplanned";
+}
+
+/**
+ * Split dump text into statements. Semicolons inside string literals,
+ * identifiers or comments do not split, and a `CREATE TRIGGER ... BEGIN ...
+ * END;` body stays one statement even though it contains semicolons.
+ */
+export function splitSqlStatements(text) {
+  const source = typeof text === "string" ? text : "";
+  const statements = [];
+  let start = 0;
+  let index = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inBacktick = false;
+  let inBracket = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let bodyDepth = 0;
+  let trigger = statementStartsTrigger(source, 0);
+
+  const finish = (end) => {
+    const sql = source.slice(start, end).trim();
+    start = end;
+    if (sql !== "") statements.push({ sql, kind: classifyStatement(sql) });
+    trigger = statementStartsTrigger(source, end);
+    bodyDepth = 0;
+  };
+
+  while (index < source.length) {
+    const character = source[index];
+    const next = source[index + 1];
+
+    if (inLineComment) {
+      if (character === "\n") inLineComment = false;
+      index += 1;
+      continue;
+    }
+    if (inBlockComment) {
+      if (character === "*" && next === "/") {
+        inBlockComment = false;
+        index += 2;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+    if (inSingle) {
+      if (character === "'") {
+        if (next === "'") {
+          index += 2;
+          continue;
+        }
+        inSingle = false;
+      }
+      index += 1;
+      continue;
+    }
+    if (inDouble) {
+      if (character === '"') {
+        if (next === '"') {
+          index += 2;
+          continue;
+        }
+        inDouble = false;
+      }
+      index += 1;
+      continue;
+    }
+    if (inBacktick) {
+      if (character === "`") {
+        if (next === "`") {
+          index += 2;
+          continue;
+        }
+        inBacktick = false;
+      }
+      index += 1;
+      continue;
+    }
+    if (inBracket) {
+      if (character === "]") inBracket = false;
+      index += 1;
+      continue;
+    }
+
+    if (character === "-" && next === "-") {
+      inLineComment = true;
+      index += 2;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      inBlockComment = true;
+      index += 2;
+      continue;
+    }
+    if (character === "'") {
+      inSingle = true;
+      index += 1;
+      continue;
+    }
+    if (character === '"') {
+      inDouble = true;
+      index += 1;
+      continue;
+    }
+    if (character === "`") {
+      inBacktick = true;
+      index += 1;
+      continue;
+    }
+    if (character === "[") {
+      inBracket = true;
+      index += 1;
+      continue;
+    }
+
+    // Inside a trigger body, BEGIN/CASE open and END closes; a semicolon only
+    // ends the statement once the body is closed.
+    if (trigger && !isWordChar(source[index - 1])) {
+      const head = source.slice(index, index + 8).toUpperCase();
+      if (head.startsWith("BEGIN") && !isWordChar(source[index + 5])) {
+        bodyDepth += 1;
+        index += 5;
+        continue;
+      }
+      if (head.startsWith("CASE") && !isWordChar(source[index + 4])) {
+        bodyDepth += 1;
+        index += 4;
+        continue;
+      }
+      if (head.startsWith("END") && !isWordChar(source[index + 3])) {
+        bodyDepth = Math.max(0, bodyDepth - 1);
+        index += 3;
+        continue;
+      }
+    }
+
+    if (character === ";") {
+      if (!trigger || bodyDepth === 0) finish(index + 1);
+      index += 1;
+      continue;
+    }
+    index += 1;
+  }
+
+  if (source.slice(start).trim() !== "") finish(source.length);
+  return statements;
+}
+
+/**
+ * The three replay phases, always in this order. `statements` is how many
+ * statements the phase holds, so a caller can skip an empty phase.
+ */
+export function planReplay(statements) {
+  const phases = { schema: [], data: [], triggers: [] };
+  for (const statement of statements ?? []) {
+    const bucket = phases[statement?.kind];
+    if (!bucket) {
+      throw new CliError(
+        "replay_unplanned",
+        `The dump contains a statement the rehearsal cannot place: ${JSON.stringify(String(statement?.sql ?? "").slice(0, 80))}`,
+        1,
+      );
+    }
+    bucket.push(statement.sql);
+  }
+  return [
+    {
+      phase: "schema",
+      statements: phases.schema.length,
+      sql: phases.schema.map((sql) => `${sql}\n`).join(""),
+    },
+    {
+      phase: "data",
+      statements: phases.data.length,
+      sql: `${DEFER_FOREIGN_KEYS}\n${phases.data.map((sql) => `${sql}\n`).join("")}`,
+    },
+    {
+      phase: "triggers",
+      statements: phases.triggers.length,
+      sql: phases.triggers.map((sql) => `${sql}\n`).join(""),
+    },
+  ];
+}

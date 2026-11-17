@@ -202,13 +202,16 @@ Set-Location ..\..
 
 The fixture is synthetic: one `users` row, one `certifications` root, one
 `exam_versions` row and one `domains` row, with fixed fixture constants and no
-personal data or exam content. It is deliberately not a migration and CI never
-applies it.
+personal data or exam content. It is not a migration, and nothing automated
+applies it to a remote database; CI applies it only to a throwaway local D1 (see
+the fixture header).
 
-It writes more than four rows: the `exam_versions` and `domains` inserts fire
-`exam_versions_audit_insert`, `domains_audit_insert` and
-`exam_versions_create_timed_mock_profile`. Three `audit_events` rows and the
-default `timed_mock_profiles` row are part of the expected result.
+It writes more than four rows: three inserts fire an audit trigger —
+`certifications_audit_insert` (0002) for the certification root,
+`exam_versions_audit_insert` and `domains_audit_insert` (0003) — and the
+`exam_versions` insert also fires `exam_versions_create_timed_mock_profile`
+(0006). Three `audit_events` rows and the default `timed_mock_profiles` row are
+part of the expected result.
 
 If the database now refuses a DELETE, that is the schema working: certification
 roots are immutable and audit is append-only. **Drop the database, never empty
@@ -224,41 +227,47 @@ npm run db:rehearse -- --file D:\certpath-exports\certpath-learner-staging-<UTC>
 Rehearsal #2 is the first rehearsal with a data-bearing dump in it: four
 application rows, three audit rows and one timed-mock profile, plus the ledger.
 
-#### Trigger replay and dump ordering are the unknown, and they are a stop condition
+#### Replaying a data-bearing dump
 
-`wrangler d1 export` writes `CREATE TABLE` statements and `INSERT` statements in
-schema order. Two things can go wrong when that dump is replayed, and neither has
-been observed against a remote D1:
+`wrangler d1 export` writes `CREATE TABLE` and `INSERT` statements in schema
+order, which makes a single ordered replay wrong twice over:
 
 1. **Ordering.** `audit_events` is created before `certifications` in
    `0002_local_security.sql`, and its rows carry a `certification_id` foreign
-   key. A dump that contains audit rows therefore inserts into `audit_events`
-   before the `certifications` table exists. `PRAGMA defer_foreign_keys=TRUE` at
-   the top of the dump does not help: the parent table has to exist for the
-   deferred check to be set up at all. A dump of a local database carrying this
-   fixture fails the local rehearsal with `no such table: main.certifications`
-   (`dump_load_failed`).
-
-   **The diagnosis must be evidenced, not inferred.** Keep the first ~40
-   statements of the offending dump **outside the repository** — a dump is never
-   committed, never uploaded and never pasted into a PR — and read the statement
-   order directly. The 17 November 2026 observation did exactly that: in the
-   first 40 statements of that dump, the three `INSERT INTO "audit_events"`
-   statements sit immediately before `CREATE TABLE certifications`.
+   key, so a dump with audit rows inserts into `audit_events` before
+   `certifications` exists and the load fails with
+   `no such table: main.certifications`. `PRAGMA defer_foreign_keys=TRUE` at the
+   top of the dump does not help: the parent table has to exist for the deferred
+   check to be set up at all.
 2. **Trigger replay.** Restoring the fixture's `certifications`, `exam_versions`
    and `domains` rows re-fires `certifications_audit_insert`,
    `exam_versions_audit_insert`, `domains_audit_insert` and
-   `exam_versions_create_timed_mock_profile`, which would insert the audit rows a
-   second time under the same `operation_id`; `audit_events_no_replace` aborts on
-   a repeated key. This sits behind problem 1 and has not been reached.
+   `exam_versions_create_timed_mock_profile`, inserting the audit rows a second
+   time under the same `operation_id`; `audit_events_no_replace` aborts on a
+   repeated key.
+
+Both are handled by the rehearsal itself: it loads the verified dump in three
+phases — schema, then data, then triggers
+([`docs/data-export-and-restore.md`](data-export-and-restore.md) §The load is a
+three-phase replay) — so no trigger exists while the rows load and every table
+exists before the first row. Rehearsal #2 is expected to be green.
+
+**This is pre-fix history, kept for the diagnosis.** Before the replay fix, a
+single `--file` call failed on the ordering problem first (`no such table:
+main.certifications`, reported as `dump_load_failed`), and the trigger re-fire was
+never reached. The diagnosis must still be evidenced, not inferred: keep the first
+~40 statements of an offending dump **outside the repository** — a dump is never
+committed, never uploaded and never pasted into a PR — and read the statement
+order directly. The 17 November 2026 observation did exactly that: in the first 40
+statements of that dump, the three `INSERT INTO "audit_events"` statements sit
+immediately before `CREATE TABLE certifications`.
 
 **If rehearsal #2 fails, stop.** Do not edit the dump, do not drop the trigger, do
 not re-key the audit rows, do not load with foreign keys disabled, and do not
 declare the export "restorable with a caveat". Record the exact error, keep both
 dumps and both manifests, and escalate: the next move (accepted limitation, a
 documented restore order, or a change to the export strategy) is an architecture
-decision, not an operator workaround. The first finding above means the expected
-outcome of step 10 on the current tooling is a stop, not a green rehearsal.
+decision, not an operator workaround.
 
 ## Time Travel
 
@@ -326,9 +335,9 @@ Not proven, and not claimed:
 
 - **no remote restore** — no dump has been restored into a remote D1, only into a
   local scratch database;
-- **no data-bearing restore** — the 5A round trip is proven with zero rows, and a
-  dump carrying the smoke fixture fails the local rehearsal on dump ordering (see
-  the stop condition above), so no dump with audit rows has ever loaded;
+- **no data-bearing restore into a remote database** — a dump carrying the smoke
+  fixture rehearses locally through the three-phase replay, and CI runs that round
+  trip, but no data-bearing dump has been loaded into a real D1;
 - **no concurrency** — no writer was active during an export, so nothing is known
   about a dump taken while rows are being written;
 - **no Time Travel restore** — the 7-day window is stated, not exercised;

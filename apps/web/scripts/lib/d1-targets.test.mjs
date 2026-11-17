@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CliError,
+  DEFER_FOREIGN_KEYS,
   MANIFEST_FIELDS,
   analyzeConfigs,
   assertExpectedAccountEnv,
@@ -26,9 +27,11 @@ import {
   parseDatabaseList,
   parseJsonc,
   parseWhoamiAccounts,
+  planReplay,
   redactSecrets,
   resolveExportTarget,
   sha256Hex,
+  splitSqlStatements,
   stripJsonc,
   tablesFromDump,
   verifyChecksums,
@@ -719,4 +722,97 @@ test("preview build guard: a missing or empty d1_databases key passes, a non-obj
       expectCode("preflight_unparsed", 1),
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Replay planning. These fail when the three-phase grouping is weakened: a
+// trigger body split into pieces, a semicolon inside a literal treated as a
+// statement boundary, or a data statement loaded before the schema.
+// ---------------------------------------------------------------------------
+
+const REPLAY_DUMP = [
+  "PRAGMA defer_foreign_keys=TRUE;",
+  'CREATE TABLE "a" (id INTEGER, note TEXT);',
+  'INSERT INTO "a" ("id","note") VALUES(1,\'semi; colon and \'\'quote\'\'\');',
+  "CREATE TRIGGER t_audit AFTER INSERT ON \"a\"",
+  "BEGIN",
+  '  INSERT INTO "b" (id) VALUES (NEW.id);',
+  "  UPDATE \"a\" SET id = CASE WHEN NEW.id > 0 THEN NEW.id ELSE 0 END WHERE id = NEW.id;",
+  "  SELECT RAISE(ABORT, 'no; way');",
+  "END;",
+  'CREATE INDEX a_idx ON "a" (id);',
+  "INSERT INTO \"a\" (\"id\",\"note\") VALUES(2,'second');",
+].join("\n");
+
+test("splitSqlStatements keeps a trigger body whole and does not split inside literals or comments", () => {
+  const statements = splitSqlStatements(REPLAY_DUMP);
+
+  assert.deepEqual(
+    statements.map((statement) => statement.kind),
+    ["schema", "schema", "data", "triggers", "schema", "data"],
+  );
+  // A split trigger would end at the first semicolon inside BEGIN ... END.
+  const trigger = statements[3].sql;
+  assert.ok(trigger.startsWith("CREATE TRIGGER t_audit"));
+  assert.ok(trigger.trimEnd().endsWith("END;"), trigger);
+  assert.ok(trigger.includes("INSERT INTO \"b\""));
+  assert.ok(trigger.includes("RAISE(ABORT, 'no; way')"));
+  // A CASE ... END inside the body must not close it early either.
+  assert.ok(trigger.includes("CASE WHEN NEW.id > 0 THEN NEW.id ELSE 0 END"));
+  // Semicolons in string literals are content, not boundaries.
+  assert.ok(statements[2].sql.includes("'semi; colon and ''quote'''"));
+});
+
+test("planReplay orders schema, data then triggers and defers foreign keys in the data phase", () => {
+  const phases = planReplay(splitSqlStatements(REPLAY_DUMP));
+
+  assert.deepEqual(
+    phases.map((phase) => phase.phase),
+    ["schema", "data", "triggers"],
+  );
+  assert.deepEqual(
+    phases.map((phase) => phase.statements),
+    [3, 2, 1],
+  );
+  // Every table exists before the first row is written.
+  assert.equal(phases[0].sql.includes("INSERT INTO"), false);
+  assert.ok(phases[0].sql.includes('CREATE TABLE "a"'));
+  assert.ok(phases[0].sql.includes('CREATE INDEX a_idx'));
+  // The dump's deferral belongs with the data, and triggers come last.
+  assert.ok(phases[1].sql.startsWith(DEFER_FOREIGN_KEYS), phases[1].sql);
+  assert.ok(phases[1].sql.includes('INSERT INTO "a"'));
+  assert.ok(phases[2].sql.startsWith("CREATE TRIGGER"));
+  assert.equal(phases[2].sql.includes('INSERT INTO "a"'), false);
+});
+
+test("planReplay refuses a statement it cannot place instead of silently dropping it", () => {
+  assert.throws(
+    () => planReplay([{ sql: "DELETE FROM a;", kind: "unplanned" }]),
+    expectCode("replay_unplanned", 1),
+  );
+  assert.throws(
+    () => planReplay([{ sql: "BEGIN TRANSACTION;", kind: "unplanned" }]),
+    expectCode("replay_unplanned", 1),
+  );
+});
+
+test("splitSqlStatements places Wrangler's sqlite_sequence reset with the data, not with the schema", () => {
+  // Wrangler's export emits `DELETE FROM sqlite_sequence;` between the rows and
+  // the triggers. Dropping it would leave AUTOINCREMENT counters at 0; running it
+  // before the schema would fail outright.
+  const dump = [
+    'CREATE TABLE "t" (id INTEGER PRIMARY KEY AUTOINCREMENT);',
+    'INSERT INTO "t" ("id") VALUES(1);',
+    "DELETE FROM sqlite_sequence;",
+    "CREATE TRIGGER t_audit AFTER INSERT ON \"t\" BEGIN SELECT 1; END;",
+  ].join("\n");
+  const statements = splitSqlStatements(dump);
+
+  assert.deepEqual(
+    statements.map((statement) => statement.kind),
+    ["schema", "data", "data", "triggers"],
+  );
+  const phases = planReplay(statements);
+  assert.equal(phases[1].statements, 2);
+  assert.ok(phases[1].sql.includes("DELETE FROM sqlite_sequence;"));
 });

@@ -34,6 +34,26 @@ const SCRIPTS = {
   preview: path.join(scriptsDir, "preview-command.mjs"),
 };
 
+const wranglerBin = (() => {
+  for (const candidate of [
+    path.join(webRoot, "node_modules", "wrangler", "bin", "wrangler.js"),
+    path.join(repoRoot, "node_modules", "wrangler", "bin", "wrangler.js"),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Cannot find the Wrangler CLI in node_modules");
+})();
+
+// Synthetic only: one user, one certification root, one exam version, one
+// domain. Applying it fires the audit triggers, which is the point of the
+// data-bearing round trip below.
+const FIXTURE = path.join(
+  repoRoot,
+  "db",
+  "fixtures",
+  "synthetic-provision-smoke.sql",
+);
+
 function run(script, args) {
   const result = spawnSync(process.execPath, [SCRIPTS[script], ...args], {
     cwd: repoRoot,
@@ -457,6 +477,41 @@ test("rehearsal fails when the manifest names a table the restore does not have,
   assert.match(result.output, /missing table: accounts/);
 });
 
+test("rehearsal reports an audit row count that disagrees with the manifest by name", (t) => {
+  // The named assertion exists because audit_events is what triggers write to; a
+  // doubled trigger must be diagnosed as such, not as a generic count diff. This
+  // fixture's dump carries two audit rows while the manifest records one, which
+  // is the shape a re-fired trigger produces.
+  const dump = [
+    'CREATE TABLE IF NOT EXISTS "d1_migrations" (',
+    "\tid INTEGER PRIMARY KEY AUTOINCREMENT,",
+    "\tname TEXT UNIQUE,",
+    "\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL",
+    ");",
+    "INSERT INTO \"d1_migrations\" (\"id\",\"name\") VALUES(1,'0001_foundation.sql');",
+    'CREATE TABLE "audit_events" (',
+    "\tid INTEGER PRIMARY KEY,",
+    "\taction TEXT NOT NULL",
+    ");",
+    "INSERT INTO \"audit_events\" (\"id\",\"action\") VALUES(1,'certification_created');",
+    "INSERT INTO \"audit_events\" (\"id\",\"action\") VALUES(2,'certification_created');",
+    "",
+  ].join("\n");
+  const { dumpPath } = writeFixture(tempDir(t), {
+    dump,
+    manifestTables: [
+      { name: "audit_events", inserts: 1 },
+      { name: "d1_migrations", inserts: 1 },
+    ],
+  });
+
+  const result = run("rehearse", ["--file", dumpPath]);
+
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /audit_events_replayed/);
+  assert.match(result.output, /audit_events holds 2 rows/);
+});
+
 test("chain, export local and rehearse round-trip the whole schema", (t) => {
   const directory = tempDir(t);
   const work = path.join(directory, "work");
@@ -505,5 +560,78 @@ test("chain, export local and rehearse round-trip the whole schema", (t) => {
 
   const rehearse = run("rehearse", ["--file", dumpPath]);
   assert.equal(rehearse.status, 0, rehearse.output);
+  assert.match(rehearse.output, /integrity_check ok/);
+});
+
+test("a data-bearing dump of the smoke fixture rehearses through the three-phase replay", (t) => {
+  // Reverting the rehearsal to one `wrangler d1 execute --file` call fails here.
+  // Measured on 17 November 2026: the single call stops on foreign-key ordering
+  // first — `no such table: main.certifications`, because the dump inserts into
+  // `audit_events` before it creates `certifications` — so the trigger re-fire
+  // that a single replay would also cause is never reached. The ordering failure
+  // is what this test pins.
+  const directory = tempDir(t);
+  const work = path.join(directory, "work");
+  mkdirSync(work);
+  const out = path.join(directory, "exports");
+
+  const chain = run("chain", ["--work-dir", work]);
+  assert.equal(chain.status, 0, chain.output);
+
+  // Applied the same way an operator applies it, through Wrangler.
+  const applied = spawnSync(
+    process.execPath,
+    [
+      wranglerBin,
+      "d1",
+      "execute",
+      "certpath-local",
+      "--local",
+      "--persist-to",
+      path.join(work, ".wrangler", "state"),
+      "-c",
+      path.join(work, "wrangler.jsonc"),
+      "--file",
+      FIXTURE,
+      "-y",
+    ],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+  assert.equal(applied.status, 0, `${applied.stdout ?? ""}\n${applied.stderr ?? ""}`);
+
+  const exported = run("export", [
+    "--target",
+    "local",
+    "--out",
+    out,
+    "--wrangler-config",
+    path.join(work, "wrangler.jsonc"),
+  ]);
+  assert.equal(exported.status, 0, exported.output);
+
+  const dumps = readdirSync(out).filter((name) => name.endsWith(".sql"));
+  assert.equal(dumps.length, 1, `expected exactly one dump, found ${dumps.join(", ")}`);
+  const dumpPath = path.join(out, dumps[0]);
+  const manifest = JSON.parse(readFileSync(`${dumpPath}.manifest.json`, "utf8"));
+
+  // The dump really carries trigger-written rows; without them it would not be a
+  // regression test for the replay at all.
+  const audit = manifest.tables.find((table) => table.name === "audit_events");
+  assert.ok(audit && audit.inserts >= 3, `expected audit rows, saw ${JSON.stringify(audit)}`);
+  for (const name of ["users", "certifications", "exam_versions", "domains"]) {
+    const table = manifest.tables.find((entry) => entry.name === name);
+    assert.ok(table && table.inserts >= 1, `${name} must carry the fixture row`);
+  }
+
+  const rehearse = run("rehearse", ["--file", dumpPath]);
+  assert.equal(rehearse.status, 0, rehearse.output);
+  // At least one trigger must be created: `triggers 0` would mean the trigger
+  // phase was silently emptied, and the dump would restore without its guards.
+  assert.match(rehearse.output, /replay: schema \d+, data \d+, triggers [1-9]\d*/);
   assert.match(rehearse.output, /integrity_check ok/);
 });

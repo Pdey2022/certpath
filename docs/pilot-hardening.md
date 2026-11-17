@@ -102,7 +102,7 @@ required), but the flag stays `"false"` until the retention floor exists.
 | Read-only account/database preflight | `apps/web/scripts/d1-account-preflight.mjs`, `npm run db:preflight` |
 | Preflight assertions + unit tests | `apps/web/scripts/lib/d1-targets.mjs`, `d1-targets.test.mjs` |
 | Generated-preview-config guard (build and deploy, no `d1_databases`) | `apps/web/scripts/preview-command.mjs` |
-| Synthetic smoke fixture (never applied by migrations or CI) | `db/fixtures/synthetic-provision-smoke.sql` |
+| Synthetic smoke fixture (applied in CI only to a throwaway local D1; never by migrations) | `db/fixtures/synthetic-provision-smoke.sql` |
 | Provisioning design and runbook | [`docs/pilot-provisioning.md`](pilot-provisioning.md) |
 
 5C creates nothing in this PR. It adds the assertions that must pass before a

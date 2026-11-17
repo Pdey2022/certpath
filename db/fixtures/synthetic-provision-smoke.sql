@@ -6,19 +6,24 @@
 -- accepts a write before anything real is put in it.
 --
 -- This is a fixture, not a migration. It is never applied by
--- `wrangler d1 migrations apply`, never applied by CI and never part of
--- `npm run verify`. Only an owner-approved 5C provisioning run applies it, by
--- hand, to the isolated staging database.
+-- `wrangler d1 migrations apply`, and nothing automated applies it to a remote
+-- database. It does run in CI: `npm test` (inside `npm run verify`) applies it
+-- to the throwaway local D1 that `d1-chain-check` created in a temporary
+-- directory, exports that database and rehearses the restore. The database it
+-- lands in is dropped, never emptied. An owner-approved 5C provisioning run and
+-- nothing else applies it by hand to the isolated staging database, which is
+-- dropped for the same reason.
 --
 -- Two deliberate consequences, both required by the schema:
 --
---   1. The `exam_versions` and `domains` inserts fire `exam_versions_audit_insert`
---      and `domains_audit_insert` (0003), and the `exam_versions` insert also
---      fires `exam_versions_create_timed_mock_profile` (0006). The three
---      `audit_events` rows and the default `timed_mock_profiles` row are part of
---      the intended result, which is exactly why this fixture is a useful
---      rehearsal subject: it proves the trigger chain runs on the provisioned
---      database.
+--   1. Three inserts fire an audit trigger: `certifications_audit_insert`
+--      (0002) writes the `certification_created` row, `exam_versions_audit_insert`
+--      and `domains_audit_insert` (0003) write the other two, and the
+--      `exam_versions` insert also fires `exam_versions_create_timed_mock_profile`
+--      (0006). The three `audit_events` rows and the default
+--      `timed_mock_profiles` row are part of the intended result, which is
+--      exactly why this fixture is a useful rehearsal subject: it proves the
+--      trigger chain runs on the provisioned database.
 --
 --   2. `certifications`, `exam_versions` and `domains` are immutable roots and
 --      `audit_events` is append-only, so this database can never be emptied:
