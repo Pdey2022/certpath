@@ -123,6 +123,10 @@ Any mismatch exits `1` with a per-table diff line, for example:
   users: manifest 3, restored 2 (-1)
 ```
 
+The rehearsal compares the table set as well as per-table counts, so a table the
+manifest lists at zero rows — every table in a fresh export — cannot silently
+disappear (`missing table: <name>` / `unexpected table: <name>`).
+
 Nothing is auto-repaired. A failing rehearsal is a stop condition: do not restore
 that dump anywhere, capture a fresh export, and escalate.
 
@@ -143,6 +147,11 @@ so a Windows checkout (`core.autocrlf=true`) and a Linux CI checkout agree; any
 other byte change still fails. A changed byte in an already-landed migration
 fails with `migration_checksum_changed` naming the file. Migrations are
 append-only; add the next number instead of editing one.
+
+CI enforces the same rule from the other side: a pull request fails when an
+existing `db/migrations/*.sql` file is modified, deleted or renamed relative to
+the merge base (`.github/workflows/ci.yml`), so editing a migration and its
+checksum line together cannot pass review.
 
 `--work-dir <empty dir>` keeps the scratch database (the round-trip test uses it);
 without it the scratch directory is removed.
@@ -194,3 +203,5 @@ result. Until then, no rehearsal has seen a real row.
   the rehearsal runs the integrity and foreign-key checks against the restored
   SQLite file with Node's built-in `node:sqlite`. The load itself still goes
   through `wrangler d1 execute`, so the operator path is exercised.
+  `node:sqlite` proves the operator load path and the restored bytes, not that D1
+  itself accepts the schema.

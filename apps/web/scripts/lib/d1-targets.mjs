@@ -582,6 +582,29 @@ export function assertManifestShape(manifest) {
   return manifest;
 }
 
+/**
+ * Table-set differences: a table in the manifest that the restore does not have,
+ * or one in the restore that the manifest does not list. A table that is present
+ * but empty must still be reported, which is why the name sets are compared
+ * before any count.
+ */
+export function diffTableSets(manifestTables, restoredTables) {
+  const expected = new Set(manifestTables.map((table) => table.name));
+  const actual = new Set(restoredTables.map((table) => table.name));
+  const names = [...new Set([...expected, ...actual])].sort(compareNames);
+  const diffs = [];
+  for (const name of names) {
+    if (expected.has(name) && !actual.has(name)) {
+      diffs.push(`missing table: ${name}`);
+      continue;
+    }
+    if (!expected.has(name) && actual.has(name)) {
+      diffs.push(`unexpected table: ${name}`);
+    }
+  }
+  return diffs;
+}
+
 /** Human-readable per-table differences; empty when the restore matches. */
 export function diffTableCounts(manifestTables, restoredTables) {
   const expected = new Map(

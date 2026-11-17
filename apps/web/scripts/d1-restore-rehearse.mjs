@@ -26,6 +26,7 @@ import {
   CliError,
   assertManifestShape,
   diffTableCounts,
+  diffTableSets,
   readD1Entry,
   redactSecrets,
   sha256Hex,
@@ -262,7 +263,9 @@ function main() {
       );
     }
 
-    // 4. Table set and per-table row counts against the manifest.
+    // 4. The table *set* first: a table the manifest lists with zero rows must
+    // still exist after the restore, and the first export of a freshly migrated
+    // database has every table at zero rows.
     const tableNames = database
       .prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -277,6 +280,18 @@ function main() {
           .get().count,
       ),
     }));
+    const tableSetDiffs = diffTableSets(manifest.tables, restoredTables);
+    if (tableSetDiffs.length > 0) {
+      console.error(`table set diff (${manifestPath}):`);
+      for (const line of tableSetDiffs) console.error(`  ${line}`);
+      throw new CliError(
+        "table_set_mismatch",
+        `${tableSetDiffs.length} table(s) missing from or unexpected in the restore`,
+        1,
+      );
+    }
+
+    // 5. Then the per-table row counts.
     const tableDiffs = diffTableCounts(manifest.tables, restoredTables);
     if (tableDiffs.length > 0) {
       console.error(`per-table diff (${manifestPath}):`);
@@ -288,7 +303,7 @@ function main() {
       );
     }
 
-    // 5. The migration ledger must line up exactly.
+    // 6. The migration ledger must line up exactly.
     const restoredMigrations = tableNames.includes("d1_migrations")
       ? database
           .prepare("SELECT name FROM d1_migrations ORDER BY id")

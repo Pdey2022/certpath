@@ -68,7 +68,10 @@ const FIXTURE_DUMP = [
   "",
 ].join("\n");
 
-function writeFixture(directory, { dump = FIXTURE_DUMP, accountsInserts = 1 } = {}) {
+function writeFixture(
+  directory,
+  { dump = FIXTURE_DUMP, accountsInserts = 1, manifestTables = null } = {},
+) {
   const file = "certpath-local-20260101T000000Z.sql";
   const dumpPath = path.join(directory, file);
   writeFileSync(dumpPath, dump);
@@ -86,11 +89,13 @@ function writeFixture(directory, { dump = FIXTURE_DUMP, accountsInserts = 1 } = 
     file,
     byteLength: bytes.length,
     sha256: sha256Hex(bytes),
-    tables: tablesFromDump(dump).map((table) =>
-      table.name === "accounts"
-        ? { name: "accounts", inserts: accountsInserts }
-        : table,
-    ),
+    tables:
+      manifestTables ??
+      tablesFromDump(dump).map((table) =>
+        table.name === "accounts"
+          ? { name: "accounts", inserts: accountsInserts }
+          : table,
+      ),
     migrations: ["0001_foundation.sql"],
   };
   writeFileSync(`${dumpPath}.manifest.json`, JSON.stringify(manifest, null, 2));
@@ -229,6 +234,32 @@ test("one extra INSERT INTO accounts fails the rehearsal with an exact diff", (t
   assert.equal(result.status, 1, result.output);
   assert.doesNotMatch(result.output, /dump_sha256_mismatch/);
   assert.match(result.output, /accounts: manifest 1, restored 2 \(\+1\)/);
+});
+
+test("rehearsal fails when the manifest names a table the restore does not have, even at zero rows", (t) => {
+  // The first export of a freshly migrated database has every table at zero
+  // rows, so a table that disappears from the restore must still fail.
+  const dump = [
+    'CREATE TABLE IF NOT EXISTS "d1_migrations" (',
+    "\tid INTEGER PRIMARY KEY AUTOINCREMENT,",
+    "\tname TEXT UNIQUE,",
+    "\tapplied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL",
+    ");",
+    "INSERT INTO \"d1_migrations\" (\"id\",\"name\") VALUES(1,'0001_foundation.sql');",
+    "",
+  ].join("\n");
+  const { dumpPath } = writeFixture(tempDir(t), {
+    dump,
+    manifestTables: [
+      { name: "accounts", inserts: 0 },
+      { name: "d1_migrations", inserts: 1 },
+    ],
+  });
+
+  const result = run("rehearse", ["--file", dumpPath]);
+
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /missing table: accounts/);
 });
 
 test("chain, export local and rehearse round-trip the whole schema", (t) => {

@@ -14,7 +14,39 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # Full history: the append-only check below needs the merge base, which a
+      # depth-1 clone cannot compute.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Migration history is append-only. A branch may add files under
+      # db/migrations/, but a modified, deleted or renamed migration (and so a
+      # rewritten checksum line) fails here. The base commit is chosen
+      # explicitly per event; it is never an implicit default.
+      - name: Migration history is append-only
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$PR_BASE_SHA" ]; then
+            base_sha="$PR_BASE_SHA"
+          elif [ "$EVENT_NAME" = "push" ] && [ -n "$PUSH_BEFORE_SHA" ] \
+            && [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            base_sha="$PUSH_BEFORE_SHA"
+          else
+            base_sha="$(git rev-parse origin/main)"
+          fi
+          git cat-file -e "${base_sha}^{commit}"
+          merge_base="$(git merge-base "$base_sha" HEAD)"
+          echo "append-only check: event ${EVENT_NAME}, base ${base_sha}, merge-base ${merge_base}"
+          if git diff --diff-filter=MDR --exit-code "$merge_base" -- 'db/migrations/*.sql'; then
+            echo "db/migrations is append-only: no migration was modified, deleted or renamed"
+          else
+            echo "::error::db/migrations is append-only: the migration(s) above were modified, deleted or renamed relative to ${merge_base}. Add the next unused number instead."
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22

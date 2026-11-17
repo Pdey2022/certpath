@@ -10,6 +10,7 @@ import {
   assertManifestShape,
   buildManifest,
   diffTableCounts,
+  diffTableSets,
   idClass,
   isAuthFailure,
   migrationChecksum,
@@ -310,6 +311,35 @@ test("sha256Hex is the lowercase hex digest of the exact bytes", () => {
   assert.equal(
     sha256Hex(Buffer.from("abc\n", "utf8")),
     "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb",
+  );
+});
+
+test("diffTableSets names a missing or unexpected table even when every count is zero", () => {
+  const manifestTables = [
+    { name: "accounts", inserts: 0 },
+    { name: "d1_migrations", inserts: 20 },
+  ];
+
+  // A table listed at zero rows that the restore does not have is a diff; the
+  // counts alone would have looked identical.
+  assert.deepEqual(
+    diffTableSets(manifestTables, [{ name: "d1_migrations", inserts: 20 }]),
+    ["missing table: accounts"],
+  );
+  assert.deepEqual(
+    diffTableSets(manifestTables, [
+      { name: "accounts", inserts: 0 },
+      { name: "d1_migrations", inserts: 20 },
+      { name: "users", inserts: 0 },
+    ]),
+    ["unexpected table: users"],
+  );
+  assert.deepEqual(
+    diffTableSets(manifestTables, [
+      { name: "accounts", inserts: 0 },
+      { name: "d1_migrations", inserts: 20 },
+    ]),
+    [],
   );
 });
 
