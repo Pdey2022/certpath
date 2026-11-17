@@ -71,15 +71,22 @@ CREATE TABLE pilot_events (
   provider_event_id TEXT CHECK (provider_event_id IS NULL
                         OR (length(provider_event_id) BETWEEN 1 AND 128
                             AND provider_event_id NOT GLOB '*[^A-Za-z0-9._:-]*')),
-  currency      TEXT CHECK (currency IS NULL OR length(currency) = 3),
+  -- A currency is a canonical ISO code in capitals, not any three characters:
+  -- `a@b` and `usd` are refused, `USD` is stored.
+  currency      TEXT CHECK (currency IS NULL
+                        OR (length(currency) = 3 AND currency = upper(currency)
+                            AND currency NOT GLOB '*[^A-Z]*')),
   amount_minor  INTEGER CHECK (amount_minor IS NULL OR amount_minor > 0),
   result_band   TEXT CHECK (result_band IS NULL OR result_band IN ('below','near','above')),
   question_count_band TEXT CHECK (question_count_band IS NULL
                         OR question_count_band IN ('1-10','11-25','26-50','51+')),
   PRIMARY KEY (source, event_id),
   -- A consented event names the session it was consented for; a server fact has
-  -- no session at all (no identity linkage is built here).
+  -- no session at all (no identity linkage is built here). Consent is a storage
+  -- property, not a code-review habit: a browser row without consent cannot be
+  -- stored, whatever the route does.
   CHECK (consent <> 'granted' OR anonymous_session_id IS NOT NULL),
+  CHECK (source <> 'browser' OR consent = 'granted'),
   CHECK (source = 'browser' OR anonymous_session_id IS NULL),
   -- Money is either absent or complete; a half-written amount is not a band.
   CHECK ((currency IS NULL) = (amount_minor IS NULL))

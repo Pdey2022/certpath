@@ -92,6 +92,29 @@ async function checkoutStartedEvent(options: {
   return eventId;
 }
 
+let browserCounter = 0;
+async function browserEvent(options: {
+  sessionId: string;
+  receivedAt?: number;
+}): Promise<void> {
+  browserCounter += 1;
+  const receivedAt = options.receivedAt ?? clock + day;
+  await database
+    .prepare(
+      `INSERT INTO pilot_events (
+         source, event_id, event_name, schema_version, occurred_at, received_at,
+         consent, anonymous_session_id, exam_id
+       ) VALUES ('browser', ?, 'exam_viewed', 1, ?, ?, 'granted', ?, 'cissp')`,
+    )
+    .bind(
+      `evt_funnel_${browserCounter}_${crypto.randomUUID()}`,
+      receivedAt,
+      receivedAt,
+      options.sessionId,
+    )
+    .run();
+}
+
 describe("readPilotFunnel", () => {
   it("returns no rows for an empty window - 'no data', not a zero", async () => {
     const rows = await readPilotFunnel(database, {
@@ -148,9 +171,34 @@ describe("readPilotFunnel", () => {
     expect(row.checkoutStartsFromEvents).toBe(2);
     expect(row.eventGap).toBe(3);
     expect(row.conversionRate).toBeCloseTo(0.4, 10);
-    // Server-originated events carry no session by construction, so this reads 0
-    // until the owner rules on consent for server events.
+    // No browser event in this window, so no consented session can be counted.
     expect(row.consentedSessions).toBe(0);
+  });
+
+  it("counts distinct consented browser sessions in the window, not server rows", async () => {
+    const from = clock + 180 * day;
+    const to = from + day;
+    const at = from + 1_000;
+    await checkout({ createdAt: at });
+    const first = "session_funnel_first_aaaa";
+    const second = "session_funnel_second_bbb";
+    await browserEvent({ sessionId: first, receivedAt: at });
+    await browserEvent({ sessionId: first, receivedAt: at });
+    await browserEvent({ sessionId: second, receivedAt: at });
+    // Outside the window, so it does not add a session.
+    await browserEvent({ sessionId: "session_funnel_outside_ccc", receivedAt: from - 1 });
+    // A server-originated event, which is the only kind that can name a checkout.
+    await checkoutStartedEvent({ receivedAt: at });
+
+    const rows = await readPilotFunnel(database, { from, to, products: null });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.consentedSessions).toBe(2);
+    // The browser count does not touch the ledger-derived rate.
+    expect(rows[0]!.checkoutsCreated).toBe(1);
+    expect(rows[0]!.checkoutStartsFromEvents).toBe(1);
+    expect(rows[0]!.eventGap).toBe(0);
+    expect(rows[0]!.conversionRate).toBe(0);
   });
 
   it("makes a lost event visible: delete one and the gap grows", async () => {

@@ -1,5 +1,9 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import {
+  pilotEventAcceptedResponseSchema,
+  pilotEventErrorSchema,
+} from "@certpath/contracts";
 import { createApi } from "../src/index.ts";
 import {
   createPilotConsentCookieValue,
@@ -519,6 +523,153 @@ describe("dedupe and the rate limit", () => {
     const response = await postEvent(eventBody(), { cookie: second.cookie });
 
     expect(response.status).toBe(202);
+  });
+});
+
+describe("every answer is the published contract", () => {
+  it("validates every non-2xx body against pilotEventErrorSchema", async () => {
+    const { cookie } = await consentCookie();
+    const rateLimited = await consentCookie();
+    for (let index = 0; index < pilotEventRateLimit; index += 1) {
+      await postEvent(eventBody(), { cookie: rateLimited.cookie });
+    }
+    // A storage refusal the route cannot pre-validate: `occurredAt` six minutes
+    // ahead of our clock trips 0021's five-minute skew bound after the request is
+    // accepted.
+    const originalError = console.error;
+    console.error = () => {};
+    let storageRefusal: Response;
+    try {
+      storageRefusal = await postEvent(
+        eventBody({ occurredAt: clock + 6 * 60_000 }),
+        { cookie },
+      );
+    } finally {
+      console.error = originalError;
+    }
+
+    const cases: {
+      label: string;
+      status: number;
+      code: string;
+      response: Response;
+    }[] = [
+      {
+        label: "unknown_event",
+        status: 400,
+        code: "unknown_event",
+        response: await postEvent(eventBody({ name: "made_up_event" }), {
+          cookie,
+        }),
+      },
+      {
+        label: "server_event_name",
+        status: 400,
+        code: "server_event_name",
+        response: await postEvent(
+          eventBody({ name: "purchase_confirmed" }),
+          { cookie },
+        ),
+      },
+      {
+        label: "validation_error",
+        status: 400,
+        code: "validation_error",
+        response: await postEvent(eventBody({ email: "a@b.com" }), { cookie }),
+      },
+      {
+        label: "invalid_origin",
+        status: 400,
+        code: "invalid_origin",
+        response: await call("/api/events", {
+          headers: {
+            Origin: "https://evil.example",
+            "Content-Type": "application/json",
+            Cookie: cookie,
+          },
+          body: JSON.stringify(eventBody()),
+        }),
+      },
+      {
+        label: "method_not_allowed",
+        status: 405,
+        code: "method_not_allowed",
+        response: await call("/api/events", {
+          method: "GET",
+          headers: { Cookie: cookie },
+        }),
+      },
+      {
+        label: "payload_too_large",
+        status: 413,
+        code: "payload_too_large",
+        response: await postEvent(
+          JSON.stringify(eventBody({ padding: "x".repeat(maxPilotEventBytes) })),
+          { cookie },
+        ),
+      },
+      {
+        label: "unsupported_media_type",
+        status: 415,
+        code: "unsupported_media_type",
+        response: await postEvent(eventBody(), {
+          cookie,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      },
+      {
+        label: "rate_limited",
+        status: 429,
+        code: "rate_limited",
+        response: await postEvent(eventBody(), { cookie: rateLimited.cookie }),
+      },
+      {
+        label: "internal_error",
+        status: 500,
+        code: "internal_error",
+        response: storageRefusal,
+      },
+      {
+        label: "pilot_events_disabled",
+        status: 503,
+        code: "pilot_events_disabled",
+        response: await postEvent(eventBody(), {
+          cookie,
+          bindings: { ...bindings, PILOT_EVENTS_ENABLED: "false" },
+        }),
+      },
+      {
+        label: "service_unavailable",
+        status: 503,
+        code: "service_unavailable",
+        response: await postEvent(eventBody(), {
+          cookie,
+          bindings: { ...bindings, CSRF_HMAC_SECRET: "" },
+        }),
+      },
+    ];
+
+    for (const entry of cases) {
+      expect(entry.response.status, entry.label).toBe(entry.status);
+      const body = (await entry.response.json()) as {
+        error?: { code?: string };
+      };
+      expect(
+        pilotEventErrorSchema.safeParse(body).success,
+        `${entry.label}: ${JSON.stringify(body)}`,
+      ).toBe(true);
+      expect(body.error?.code, entry.label).toBe(entry.code);
+    }
+
+    // The two success shapes are the contract too.
+    const accepted = await postEvent(eventBody(), { cookie });
+    expect(accepted.status).toBe(202);
+    expect(
+      pilotEventAcceptedResponseSchema.safeParse(await accepted.json()).success,
+    ).toBe(true);
+    const unconsented = await postEvent(eventBody());
+    expect(unconsented.status).toBe(204);
+    expect(await unconsented.text()).toBe("");
   });
 });
 

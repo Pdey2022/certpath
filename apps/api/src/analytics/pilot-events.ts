@@ -2,9 +2,11 @@ import { Hono, type Context } from "hono";
 import {
   pilotBrowserEventNameSchema,
   pilotEventAcceptedResponseSchema,
+  pilotEventErrorSchema,
   pilotEventNameSchema,
   pilotEventRequestSchema,
   type PilotEventAcceptedResponse,
+  type PilotEventErrorCode,
 } from "@certpath/contracts";
 import type { SecurityDatabase } from "../security/database.ts";
 import { constantTimeEqual } from "../security/http-session.ts";
@@ -516,10 +518,15 @@ function setPrivateHeaders(context: PilotContext): void {
 function errorResponse(
   context: PilotContext,
   status: 400 | 405 | 413 | 415 | 429 | 500 | 503,
-  code: string,
+  code: PilotEventErrorCode,
 ): Response {
+  // The body is validated against the published contract, not assembled by
+  // hand: a code or shape the contract does not define fails here instead of
+  // reaching a caller.
   return context.json(
-    { error: { code, requestId: context.get("requestId") } },
+    pilotEventErrorSchema.parse({
+      error: { code, requestId: context.get("requestId") },
+    }),
     status,
   );
 }

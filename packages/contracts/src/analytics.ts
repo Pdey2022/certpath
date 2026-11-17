@@ -129,11 +129,18 @@ export type PilotEventAcceptedResponse = z.infer<
   typeof pilotEventAcceptedResponseSchema
 >;
 
+/**
+ * Every code the route can answer with. `errorResponse` parses its body with
+ * `pilotEventErrorSchema` and takes this union as its `code` type, so a code the
+ * route emits and this list does not name is a type error before it is a
+ * contract drift.
+ */
 export const pilotEventErrorCodeSchema = z.enum([
   "unknown_event",
   "server_event_name",
   "validation_error",
   "invalid_origin",
+  "method_not_allowed",
   "payload_too_large",
   "unsupported_media_type",
   "rate_limited",
@@ -141,6 +148,8 @@ export const pilotEventErrorCodeSchema = z.enum([
   "pilot_events_disabled",
   "service_unavailable",
 ]);
+
+export type PilotEventErrorCode = z.infer<typeof pilotEventErrorCodeSchema>;
 
 export const pilotEventErrorSchema = z
   .object({

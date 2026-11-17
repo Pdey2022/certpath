@@ -171,6 +171,20 @@ describe("0021 stores no address and no free text", () => {
     expect(await countRows(row.eventId)).toBe(0);
   });
 
+  it("refuses a currency that is not three capitals", async () => {
+    for (const currency of ["a@b", "usd", "@@@", "zzz"]) {
+      const row = newServerRow({ currency });
+      await expect(insert(row), currency).rejects.toThrow(
+        /CHECK constraint failed/,
+      );
+      expect(await countRows(row.eventId), currency).toBe(0);
+    }
+
+    const stored = newServerRow({ currency: "USD" });
+    await insert(stored);
+    expect(await countRows(stored.eventId)).toBe(1);
+  });
+
   it("refuses free text in a band column", async () => {
     const row = newBrowserRow({
       eventName: "sample_completed",
@@ -244,6 +258,18 @@ describe("the per-name field matrix is enforced by storage", () => {
 });
 
 describe("consent cannot be claimed without a signed session", () => {
+  it("refuses a browser row that claims no consent was required", async () => {
+    // Storage, not the route, is what makes consent a property of the row: a
+    // browser event with `consent = 'not-required'` cannot exist, whatever wrote
+    // it.
+    const row = newBrowserRow({
+      consent: "not-required",
+      anonymousSessionId: null,
+    });
+    await expect(insert(row)).rejects.toThrow(/CHECK constraint failed/);
+    expect(await countRows(row.eventId)).toBe(0);
+  });
+
   it("refuses consent = granted with no session id", async () => {
     const row = newBrowserRow({ anonymousSessionId: null });
     await expect(insert(row)).rejects.toThrow(/CHECK constraint failed/);

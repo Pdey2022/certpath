@@ -39,17 +39,26 @@ export const funnelMeasurementSql = `WITH cohort AS (
    GROUP BY sku, currency, total_minor
  ), interest AS (
    SELECT product_id AS productId, currency, amount_minor AS amountMinor,
-          SUM(event_name = 'checkout_started')        AS checkoutStarts,
-          COUNT(DISTINCT anonymous_session_id)        AS consentedSessions
+          SUM(event_name = 'checkout_started')        AS checkoutStarts
    FROM pilot_events
    WHERE received_at >= ?1 AND received_at < ?2
      AND event_name IN ('checkout_started','purchase_confirmed')
    GROUP BY product_id, currency, amount_minor
+ ), consent AS (
+   -- Counted over the names a browser may actually send, because those are the
+   -- only rows that carry a consented session: storage forbids a browser event
+   -- named checkout_started or purchase_confirmed, and forbids a session on a
+   -- server row. A browser event has no product attribution, so this is one
+   -- number for the whole window rather than a per-product count.
+   SELECT COUNT(DISTINCT anonymous_session_id) AS consentedSessions
+   FROM pilot_events
+   WHERE received_at >= ?1 AND received_at < ?2
+     AND event_name IN ('exam_viewed','sample_started','sample_completed')
  )
  SELECT c.productId AS productId, c.currency AS currency,
         c.amountMinor AS amountMinor,
         COALESCE(i.checkoutStarts, 0)      AS checkoutStartsFromEvents,
-        COALESCE(i.consentedSessions, 0)   AS consentedSessions,
+        s.consentedSessions                AS consentedSessions,
         c.checkoutsCreated AS checkoutsCreated,
         c.checkoutsPaid AS checkoutsPaid,
         c.checkoutsRefunded AS checkoutsRefunded,
@@ -57,10 +66,12 @@ export const funnelMeasurementSql = `WITH cohort AS (
         c.checkoutsCreated - COALESCE(i.checkoutStarts, 0) AS eventGap,
         CAST(c.checkoutsPaid AS REAL) / NULLIF(c.checkoutsCreated, 0)
           AS conversionRate
- FROM cohort c LEFT JOIN interest i
+ FROM cohort c
+ LEFT JOIN interest i
    ON i.productId = c.productId
   AND i.currency = c.currency
   AND i.amountMinor = c.amountMinor
+ CROSS JOIN consent s
  ORDER BY c.productId, c.currency, c.amountMinor`;
 
 /** The products whose purchase grants Pro, for the Pro reading of the query. */
@@ -80,6 +91,12 @@ export interface PilotFunnelRow {
   currency: string;
   amountMinor: number;
   checkoutStartsFromEvents: number;
+  /**
+   * Distinct consented browser sessions that sent `exam_viewed`,
+   * `sample_started` or `sample_completed` in the window. A browser event carries
+   * no product attribution, so this is one number for the window and repeats on
+   * every row; it is not a per-product measure.
+   */
   consentedSessions: number;
   checkoutsCreated: number;
   checkoutsPaid: number;
