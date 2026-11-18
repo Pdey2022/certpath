@@ -307,17 +307,39 @@ export async function confirmStaffTotp(
   // winner had just inserted and then issue ten nobody would ever see, before
   // answering 409. Claiming first means only the winner runs `batch(revoke,
   // insert)` at all, and the loser leaves the winner's rows untouched.
+  //
+  // `revoked_at IS NULL` is part of the predicate, not a pre-check: a Global-Admin
+  // reset that commits between the read above and this statement revokes the
+  // credential, its codes and its sessions. Without it the claim would match the
+  // revoked row, publish ten live codes the reset believed it had killed, and one
+  // of them would mint a self-issued ticket - undoing the reset without its
+  // printed ticket.
   const claimed = await database
     .prepare(
       `UPDATE staff_totp_credentials
        SET confirmed_at = ?
-       WHERE credential_id = ? AND confirmed_at IS NULL
+       WHERE credential_id = ? AND confirmed_at IS NULL AND revoked_at IS NULL
        RETURNING credential_id`,
     )
     .bind(options.now, credential.credential_id)
     .all<{ credential_id: string }>();
   if (claimed.results.length !== 1) {
-    return { ok: false, status: 409, code: "mfa_already_enrolled" };
+    // Distinguish "somebody else confirmed this first" from "the credential was
+    // revoked under us". The first is the documented 409; the second is answered
+    // exactly as if the reset had committed before the read above, which is the
+    // same state from the caller's point of view and never leaks whether a
+    // credential existed.
+    const current = await database
+      .withSession("first-primary")
+      .prepare(
+        `SELECT confirmed_at, revoked_at FROM staff_totp_credentials
+         WHERE credential_id = ?`,
+      )
+      .bind(credential.credential_id)
+      .first<{ confirmed_at: number | null; revoked_at: number | null }>();
+    return current && current.revoked_at === null && current.confirmed_at !== null
+      ? { ok: false, status: 409, code: "mfa_already_enrolled" }
+      : invalidCode;
   }
 
   const results = await database.batch([

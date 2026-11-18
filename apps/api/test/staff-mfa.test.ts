@@ -1,9 +1,18 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createApi } from "../src/index.ts";
-import type { SecurityDatabase } from "../src/security/database.ts";
+import type {
+  D1PreparedStatement,
+  D1Value,
+  SecurityDatabase,
+} from "../src/security/database.ts";
 import { sessionDigest } from "../src/security/http-session.ts";
 import { hashLearnerPassword } from "../src/security/password-hashing.ts";
+import {
+  confirmStaffTotp,
+  redeemStaffRecoveryCode,
+  resetStaffMfa,
+} from "../src/security/staff-mfa.ts";
 import {
   createEnrolmentTicket,
   openTotpSeed,
@@ -223,6 +232,43 @@ async function seedFor(userId: string): Promise<Uint8Array> {
 
 function codeAt(seed: Uint8Array, atMs: number): Promise<string> {
   return totpCodeAt(seed, totpStepAt(atMs));
+}
+
+/**
+ * A view of the same database whose confirm-claim statement runs a callback
+ * first. It is the only way to make the read-then-claim window deterministic:
+ * the callback commits in the gap, after the pre-read and before the UPDATE, which
+ * is exactly the interleaving a Global-Admin reset can produce.
+ */
+function interleaveBeforeAll(
+  statement: D1PreparedStatement,
+  onAll: () => Promise<void>,
+): D1PreparedStatement {
+  return {
+    bind: (...values: D1Value[]) =>
+      interleaveBeforeAll(statement.bind(...values), onAll),
+    first: <T,>() => statement.first<T>(),
+    run: () => statement.run(),
+    all: async <T,>() => {
+      await onAll();
+      return statement.all<T>();
+    },
+  };
+}
+
+function databaseWithClaimInterleave(
+  onClaim: () => Promise<void>,
+): SecurityDatabase {
+  return {
+    withSession: (constraint) => database.withSession(constraint),
+    batch: (statements) => database.batch(statements),
+    prepare(query) {
+      const statement = database.prepare(query);
+      return query.includes("SET confirmed_at = ?")
+        ? interleaveBeforeAll(statement, onClaim)
+        : statement;
+    },
+  };
 }
 
 /** Sign in, enrol with a ticket and confirm. Returns the session + seed. */
@@ -578,6 +624,88 @@ describe("staff second factor", () => {
       .bind(userId)
       .first<{ count: number }>();
     expect(revokedSets?.count).toBe(0);
+  }, 30_000);
+
+  it("a reset between the pre-read and the claim cannot resurrect a code set", async () => {
+    const adminEmail = uniqueEmail("mfa-reset-interleave-admin");
+    const adminId = await provisionStaff("global_admin", adminEmail);
+    const email = uniqueEmail("mfa-reset-interleave");
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await signedInCookie(email);
+    expect(
+      (
+        await postMfa("/mfa/enrol", cookie, {
+          ticket: await issueTicket(userId),
+        })
+      ).status,
+    ).toBe(200);
+    const seed = await seedFor(userId);
+    const key = await readSealKey(sealKey);
+    if (!key) throw new Error("The test seal key is unusable");
+
+    // The confirm reads a live credential, then the reset commits, then the
+    // claim runs. Without `revoked_at IS NULL` in the claim's predicate the
+    // revoked row still matches and ten live codes appear on an account whose
+    // factor, codes and sessions the reset had just destroyed.
+    let resetRan = false;
+    const interleaved = databaseWithClaimInterleave(async () => {
+      const reset = await resetStaffMfa(database, {
+        actorUserId: adminId,
+        targetUserId: userId,
+        reason: "Interleaved reset between read and claim",
+        now: clock,
+      });
+      expect(reset.ok).toBe(true);
+      resetRan = true;
+    });
+
+    const result = await confirmStaffTotp(interleaved, {
+      userId,
+      code: await codeAt(seed, clock),
+      sealKey: key,
+      now: clock,
+    });
+    expect(resetRan).toBe(true);
+    // The refusal, not a success: same answer as a reset that landed before the
+    // read, which is the documented `invalid_code` for "nothing to confirm".
+    expect(result).toEqual({ ok: false, status: 400, code: "invalid_code" });
+
+    const live = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes
+         WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(live?.count).toBe(0);
+    const issued = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_recovery_codes_issued' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(issued?.count).toBe(0);
+
+    // Nothing was mintable from the claimed codes, and the only live ticket is
+    // the one the reset itself printed.
+    const tickets = await database
+      .prepare(
+        `SELECT created_by_user_id, created_by_ref
+         FROM staff_mfa_enrolment_tickets
+         WHERE user_id = ? AND consumed_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .all<{ created_by_user_id: string | null; created_by_ref: string | null }>();
+    expect(tickets.results).toEqual([
+      { created_by_user_id: adminId, created_by_ref: null },
+    ]);
+    const redeemed = await redeemStaffRecoveryCode(database, {
+      userId,
+      recoveryCode: "ABCDE-FGHJ2",
+      now: clock,
+    });
+    expect(redeemed.ok).toBe(false);
   }, 30_000);
 
   it("recovery code is single-use", async () => {
