@@ -25,6 +25,9 @@ that run and its evidence.
 **Not approved to run:** deploying the staging Worker or setting its secrets.
 Each is a separate owner decision. (Applying `0022` remotely was such a decision;
 the owner gave it and it ran on 18 November 2026 — §Pre-enablement step.)
+The deployment now has a guarded command — `npm run deploy:staging`, guard and
+rollback described in §Deploying the staging Worker. Having the command is not an
+approval to run it, and it has never been run.
 
 This document is both the record of that run and the from-scratch path for a
 future rebuild. Each step is a checked step rather than an improvisation; only an
@@ -375,6 +378,228 @@ like every other run step — that approval was given for the 18 November 2026 r
 and a repeat run would need a new one. It changes no repository file: no migration
 is edited, no checksum line changes, and `apps/web/wrangler.staging.jsonc` stays
 exactly as committed.
+
+## Deploying the staging Worker: `deploy:staging` — the command exists, nothing ran
+
+Until #149 there was no guarded way to ship this Worker. Only
+`npm run build:staging` existed, and the raw form the other runbooks use —
+`wrangler deploy -c build/server/wrangler.json` — ships whatever build wrote that
+file. `build:site`, `build:pilot`, `build:staging` and `build:preview` all write
+it, so a pilot build followed by a staging deploy would have shipped a D1-bound
+`certpath-pilot` Worker to the staging host.
+
+`npm run deploy:staging` is that command now. **It has never been run:** no
+Worker is deployed (`learner-auth-staging` answers `code: 10007`, checked
+18 November 2026), no secret is set and no route exists. What changed is that the
+deployment has a name, a guard and a rollback.
+
+### The command
+
+```powershell
+npm run build:staging     # writes build/server/wrangler.json and asserts the entry
+Set-Location apps\web
+npm run dry-run:staging                                   # optional; the account may be omitted
+npm run dry-run:staging -- --expect-account <account id>  # guards + local bundle; uploads nothing
+npm run deploy:staging -- --expect-account <account id>   # --expect-account is REQUIRED; then wrangler deploy -c build/server/wrangler.json
+Set-Location ..\..
+```
+
+`--expect-account` is passed from `apps/web`, where the CLI runs: the root
+`npm run deploy:staging` delegates to `@certpath/web` and a trailing
+`-- --expect-account …` stops at the delegating `npm`, exactly as it does for
+`--allow-pilot-flags` (below). From the root the equivalent is
+`npm run deploy:staging --workspace @certpath/web -- --expect-account <account id>`.
+
+`deploy:staging` and `dry-run:staging` read `build/server/wrangler.json` —
+resolved from the working directory, exactly as `-c build/server/wrangler.json`
+is — and refuse **before Wrangler is spawned** unless every rule holds (exit 1
+for a refused guard, exit 2 where the table below says so):
+
+| Rule the generated config must satisfy | Refusal code |
+|---|---|
+| it selected `wrangler.staging.jsonc` | `staging_wrong_config` |
+| the Worker name is `learner-auth-staging` | `staging_wrong_worker` |
+| exactly one `d1_databases` entry, binding `DB`, named `certpath-learner-staging` | `staging_database_mismatch` |
+| its `database_id` is present and is not the all-zero placeholder | `staging_database_placeholder` |
+| `triggers.crons` is exactly `["*/5 * * * *"]` | `staging_schedule_mismatch` |
+| `PILOT_EVENTS_ENABLED`, `PILOT_SERVER_EVENTS_ENABLED` and `PILOT_EVENTS_RETENTION_ENABLED` are each the string `"false"` | `staging_pilot_flag_enabled` |
+| all three flags are present at all | `staging_pilot_flag_missing` |
+| `build/server/wrangler.json` exists | `staging_config_missing` |
+| it parses as a JSON object | `staging_config_unparsed` |
+
+The **account** is asserted first, before any spawn. `deploy` **requires**
+`--expect-account <account id>`: a deploy creates the Worker and its cron, and
+with nothing asserted Wrangler falls back to its stored selection, which is an
+assertion about nothing. `dry-run` uploads nothing, so it may omit the flag —
+and then prints `Account: not asserted (...)` instead of implying otherwise.
+
+`CLOUDFLARE_ACCOUNT_ID` is never a source of truth. Wrangler prefers it over its
+stored selection, so an id left in the shell would deploy `learner-auth-staging`
+into *that* account, bound to a `database_id` that does not exist there. When
+`--expect-account` is given it must agree with the variable, and the child
+Wrangler process is pinned to that id (`wranglerEnv`), which removes both
+fallbacks. An unset variable is not a licence to skip the flag on `deploy`:
+
+| Rule the environment must satisfy | Refusal code | Exit |
+|---|---|---|
+| `deploy` without `--expect-account` (variable set or not) | `account_not_asserted` | 2 |
+| `dry-run` with `CLOUDFLARE_ACCOUNT_ID` set and no `--expect-account` | `account_env_mismatch` | 1 |
+| `CLOUDFLARE_ACCOUNT_ID` set and different from `--expect-account` | `account_env_mismatch` | 1 |
+| an argument other than `--expect-account` / `--allow-pilot-flags` | `unknown_argument` | 2 |
+
+`account_not_asserted` is exit 2 because it is usage: the `deploy` subcommand
+always needs the option, and `db:preflight` already answers exit 2 to a missing
+`--expect-account`. `account_env_mismatch` is exit 1 because it is the guard
+refusing a state the operator can fix in the shell. Both print nothing from
+Wrangler — no version banner, no request — which is how an operator confirms the
+refusal happened before any spawn.
+
+Exit 2 is a usage error (an unknown action, an unknown argument, a missing option
+value, or `deploy` without `--expect-account`). The guards print what they
+verified, so the operator can see the target, the schedule, the flag values and
+the account that was checked:
+
+```
+Verified staging deploy target: worker learner-auth-staging, database certpath-learner-staging (binding DB)
+Verified cron schedule: */5 * * * *
+Verified PILOT_EVENTS_ENABLED="false"
+Verified PILOT_SERVER_EVENTS_ENABLED="false"
+Verified PILOT_EVENTS_RETENTION_ENABLED="false"
+Account: CLOUDFLARE_ACCOUNT_ID pinned to <account id> for this run
+```
+
+`--allow-pilot-flags` is the only override, and it permits a flag that is not
+`"false"` for a deliberate, owner-approved flag change, printing
+`Pilot flag override: --allow-pilot-flags (the flags above are not asserted false)`.
+Pass it where the CLI runs — from `apps/web` — together with the account, since
+`deploy` requires one:
+
+```powershell
+Set-Location apps\web
+npm run deploy:staging -- --expect-account <account id> --allow-pilot-flags
+Set-Location ..\..
+```
+
+`npm run deploy:staging -- --allow-pilot-flags` **from the repository root does
+not reach the CLI**: the root script delegates to `@certpath/web`, so the flags
+stop at the delegating `npm`. That combination is fail-closed — the guard still
+refuses an enabled flag with `staging_pilot_flag_enabled`, and `deploy` refuses
+with `account_not_asserted` when the account flag is swallowed too — but it is a
+refusal, not an applied override. From the root the working form is
+`npm run deploy:staging --workspace @certpath/web -- --expect-account <account id> --allow-pilot-flags`.
+It does not permit a flag to be absent: a build that dropped the vars is not the
+artefact the guard checked. Every refusal and the accepted path are covered in
+`apps/web/scripts/staging-command.test.mjs`; the refusals never spawn `deploy`.
+
+### Preconditions
+
+All seven must hold. Any one missing is a stop, not a retry.
+
+1. **The account is asserted.** `deploy` will refuse without
+   `--expect-account <account id>` — the Certpath account the database was
+   created in (#134) — and an unset `CLOUDFLARE_ACCOUNT_ID` is **not** a licence
+   to skip it: silence there means Wrangler's stored selection decides where the
+   Worker is created. If the shell does set `CLOUDFLARE_ACCOUNT_ID`, it must
+   agree with the flag or the run refuses (`account_env_mismatch`). A `dry-run`
+   may omit the flag and then prints `Account: not asserted (...)`.
+2. **`npm run build:staging` exited 0** in this checkout after the last change.
+   It asserts the bundle entry is `workers/staging-app.ts`.
+3. **The staging database has 22 applied migrations**, last
+   `0022_pilot_events_retention.sql` (§Pre-enablement step). The Worker carries a
+   `*/5 * * * *` cron; shipping the prune before the floor exists would run a job
+   against a table with no floor. Re-read the ledger:
+
+   ```powershell
+   Set-Location apps\web
+   npx wrangler d1 execute certpath-learner-staging --remote -c wrangler.staging.jsonc `
+     --command "SELECT COUNT(*) AS applied, MAX(name) AS last FROM d1_migrations"
+   Set-Location ..\..
+   ```
+
+4. **`CSRF_HMAC_SECRET` is set** on the Worker, at least 32 random bytes. Without
+   it `/api/auth/session/csrf` and `/api/auth/session/logout` answer `503`.
+5. **`STAGING_TESTER_IPS` is set** to the tester's egress IP list. Until it is,
+   every request answers `503`; with it, an address not on the list answers
+   `403`. Both are hosted secrets, never files or arguments:
+
+   ```powershell
+   Set-Location apps\web
+   npx wrangler secret put STAGING_TESTER_IPS -c wrangler.staging.jsonc
+   npx wrangler secret put CSRF_HMAC_SECRET -c wrangler.staging.jsonc
+   Set-Location ..\..
+   ```
+
+   `wrangler secret put` prompts for the value. **Neither secret is set today**,
+   and setting either is its own owner decision, not part of `deploy:staging`.
+
+6. **The three `PILOT_*` flags are `"false"`** in `apps/web/wrangler.staging.jsonc`,
+   and so in the built copy. The guard asserts the built copy, which is what
+   ships.
+7. **`npm run dry-run:staging -- --expect-account <account id>` exited 0** (from
+   `apps/web`; the flag is optional here but asserted when given) and printed the
+   verified lines above, with the account line naming the id it pinned. It
+   bundles locally and uploads nothing.
+
+### Afterwards: what to check
+
+The read after the deploy names the Worker through `wrangler.staging.jsonc`, not
+through the built config. `build/server/wrangler.json` is a mutable artefact —
+any later `build`, `build:pilot` or `build:site` overwrites it with another
+target's Worker name — so `status`, `rollback` and `delete` must not be pointed
+at it:
+
+```powershell
+npx wrangler deployments status -c apps/web/wrangler.staging.jsonc
+```
+
+Expected: exactly one deployment for `learner-auth-staging`, created by this run.
+Record its version id with the run. If `deployments status` does not print the
+triggers in your Wrangler version, the dashboard's Triggers tab is the authority:
+`*/5 * * * *` and nothing else — that cron is half of what this deploy ships.
+
+The three flags are not printed by `deployments status`; read them from the
+artefact that was deployed, which the guard also asserts:
+
+```powershell
+Select-String -Path apps\web\build\server\wrangler.json `
+  -Pattern 'PILOT_[A-Z_]+":"[a-z]+' -AllMatches |
+  ForEach-Object { $_.Matches.Value }
+```
+
+Expected: all three `"false"`. A deploy that turns any of them on is a stop —
+the retention flag needs the floor that §Pre-enablement step applied, and the
+funnel flags need a consent path staging does not exercise yet.
+
+The gate itself, from an address **not** in `STAGING_TESTER_IPS`:
+
+```powershell
+curl.exe -i https://learner-auth-staging.certpath.workers.dev/
+```
+
+Expected: `503` while `STAGING_TESTER_IPS` is unset, `403` once it holds a list
+the caller is not on. A `200` means the tester gate is not enforcing — delete the
+deployment (below) and escalate; do not add an address to make it pass.
+
+### Rollback
+
+A deploy is a remote write and needs the owner's approval like every other step.
+The guard proves the target, not the authorisation to run the command.
+
+```powershell
+npx wrangler rollback -c apps/web/wrangler.staging.jsonc
+```
+
+`rollback` returns to the previous version and needs one to exist, so on a first
+deploy there is nothing to roll back to; the rollback is then a delete:
+
+```powershell
+npx wrangler delete -c apps/web/wrangler.staging.jsonc
+```
+
+`delete` removes the Worker, its cron and its secrets. The **database is
+untouched** — `certpath-learner-staging` and its 22 migrations stay, and dropping
+it is the separate teardown decision below. After a delete, `learner-auth-staging`
+answers `code: 10007` again and no remote staging write is outstanding.
 
 ## Time Travel
 

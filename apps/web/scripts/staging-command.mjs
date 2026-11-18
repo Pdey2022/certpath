@@ -1,50 +1,155 @@
 import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CliError } from "./lib/d1-targets.mjs";
+import {
+  assertStagingDeployConfig,
+  deployEnv,
+  parseDeployOptions,
+  readStagingGeneratedConfig,
+  wranglerArgs,
+} from "./lib/staging-deploy.mjs";
+
+// The generated config Wrangler is pointed at, resolved the same way Wrangler
+// resolves `-c build/server/wrangler.json`: relative to the working directory.
+// The build below reads the artefact it just wrote through the same path, so a
+// single resolution rule covers both actions.
+const GENERATED_CONFIG = path.resolve("build", "server", "wrangler.json");
+const OUTPUT_DIRECTORY = path.dirname(GENERATED_CONFIG);
+
+const BUILD_ENV = {
+  ...process.env,
+  VITE_CERTPATH_STAGING: "true",
+  VITE_CERTPATH_STAGING_LOCAL_ORIGIN: "https://127.0.0.1:8794",
+};
 
 function find(...relativePaths) {
-  for (const path of relativePaths) {
-    const file = fileURLToPath(new URL(path, import.meta.url));
+  for (const candidate of relativePaths) {
+    const file = fileURLToPath(new URL(candidate, import.meta.url));
     if (existsSync(file)) return file;
   }
-  throw new Error("Cannot find the React Router build command");
+  throw new Error(`Cannot find ${relativePaths[0]}`);
 }
 
-const script = find(
-  "../node_modules/@react-router/dev/bin.cjs",
-  "../../../node_modules/@react-router/dev/bin.cjs",
-);
-const result = spawnSync(process.execPath, [script, "build"], {
-  env: {
-    ...process.env,
-    VITE_CERTPATH_STAGING: "true",
-    VITE_CERTPATH_STAGING_LOCAL_ORIGIN: "https://127.0.0.1:8794",
-  },
-  stdio: "inherit",
-});
-if (result.status !== 0) process.exit(result.status ?? 1);
+const reactRouterBin = () =>
+  find(
+    "../node_modules/@react-router/dev/bin.cjs",
+    "../../../node_modules/@react-router/dev/bin.cjs",
+  );
 
-const outputDirectory = new URL("../build/server/", import.meta.url);
-const generatedConfig = JSON.parse(
-  await readFile(new URL("wrangler.json", outputDirectory), "utf8"),
-);
-if (
-  !generatedConfig.configPath
-    ?.replaceAll("\\", "/")
-    .endsWith("/wrangler.staging.jsonc")
-) {
-  throw new Error("Staging build did not select wrangler.staging.jsonc");
+const wranglerBin = () =>
+  find(
+    "../node_modules/wrangler/bin/wrangler.js",
+    "../../../node_modules/wrangler/bin/wrangler.js",
+  );
+
+async function build() {
+  const result = spawnSync(process.execPath, [reactRouterBin(), "build"], {
+    env: BUILD_ENV,
+    stdio: "inherit",
+  });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+
+  const generatedConfig = JSON.parse(
+    await readFile(path.join(OUTPUT_DIRECTORY, "wrangler.json"), "utf8"),
+  );
+  if (
+    !generatedConfig.configPath
+      ?.replaceAll("\\", "/")
+      .endsWith("/wrangler.staging.jsonc")
+  ) {
+    throw new Error("Staging build did not select wrangler.staging.jsonc");
+  }
+
+  const sourceMap = JSON.parse(
+    await readFile(path.join(OUTPUT_DIRECTORY, "index.js.map"), "utf8"),
+  );
+  if (
+    !sourceMap.sources.some((source) =>
+      source.replaceAll("\\", "/").endsWith("/workers/staging-app.ts"),
+    )
+  ) {
+    throw new Error("Staging bundle does not contain workers/staging-app.ts");
+  }
+  console.log("Verified staging bundle entry: workers/staging-app.ts");
 }
 
-const sourceMap = JSON.parse(
-  await readFile(new URL("index.js.map", outputDirectory), "utf8"),
-);
-if (
-  !sourceMap.sources.some((source) =>
-    source.replaceAll("\\", "/").endsWith("/workers/staging-app.ts"),
-  )
-) {
-  throw new Error("Staging bundle does not contain workers/staging-app.ts");
+async function main() {
+  const action = process.argv[2];
+  // `npm run build:staging` passes no action: the build stays the default.
+  if (action === undefined || action === "build") {
+    await build();
+    return 0;
+  }
+
+  if (action === "deploy" || action === "dry-run") {
+    const options = parseDeployOptions(process.argv.slice(3));
+
+    // Phase 5D (issue #149): the guards run before any spawn, account first
+    // because it decides where the write lands.
+    //   1. the account — Wrangler prefers CLOUDFLARE_ACCOUNT_ID, then its stored
+    //      selection, so an unpinned deploy lands wherever that points. `deploy`
+    //      therefore requires --expect-account; `dry-run` uploads nothing and
+    //      may omit it;
+    //   2. the artefact — `build:site`, `build:pilot`, `build:staging` and
+    //      `build:preview` all write build/server/wrangler.json, so a pilot
+    //      build followed by deploy:staging would ship a D1-bound
+    //      certpath-pilot Worker to the staging host.
+    const account = deployEnv({
+      parentEnv: BUILD_ENV,
+      expectAccount: options.expectAccount,
+      requireAccount: action === "deploy",
+    });
+    const verified = assertStagingDeployConfig(
+      readStagingGeneratedConfig(GENERATED_CONFIG),
+      { allowPilotFlags: options.allowPilotFlags },
+    );
+
+    console.log(
+      `Verified staging deploy target: worker ${verified.worker}, database ${verified.database} (binding ${verified.binding})`,
+    );
+    console.log(`Verified cron schedule: ${verified.schedule.join(", ")}`);
+    for (const [name, value] of Object.entries(verified.flags)) {
+      console.log(`Verified ${name}=${JSON.stringify(value)}`);
+    }
+    if (verified.allowPilotFlags) {
+      console.log(
+        "Pilot flag override: --allow-pilot-flags (the flags above are not asserted false)",
+      );
+    }
+    if (account.expectAccount) {
+      console.log(
+        `Account: CLOUDFLARE_ACCOUNT_ID pinned to ${account.expectAccount} for this run`,
+      );
+    } else {
+      console.log(
+        "Account: not asserted (no --expect-account and CLOUDFLARE_ACCOUNT_ID unset; Wrangler uses its stored selection)",
+      );
+    }
+
+    const result = spawnSync(
+      process.execPath,
+      [wranglerBin(), ...wranglerArgs(action)],
+      { env: account.env, stdio: "inherit" },
+    );
+    return result.status ?? 1;
+  }
+
+  console.error(
+    "Usage: staging-command.mjs [build|deploy|dry-run] [--expect-account <account id>] [--allow-pilot-flags]",
+  );
+  return 2;
 }
-console.log("Verified staging bundle entry: workers/staging-app.ts");
+
+try {
+  process.exit(await main());
+} catch (error) {
+  if (error instanceof CliError) {
+    console.error(`error ${error.code}: ${error.message}`);
+    process.exit(error.exitCode);
+  }
+  console.error(error);
+  process.exit(1);
+}
