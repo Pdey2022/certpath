@@ -15,6 +15,7 @@ import { CliError } from "./lib/d1-targets.mjs";
 import {
   STAGING_PILOT_FLAGS,
   assertStagingDeployConfig,
+  deployEnv,
   readStagingGeneratedConfig,
   wranglerArgs,
 } from "./lib/staging-deploy.mjs";
@@ -367,6 +368,51 @@ test("a CLOUDFLARE_ACCOUNT_ID in the parent environment is never deployed to sil
   assert.match(confirmed.output, /--dry-run: exiting now/);
 });
 
+test("deploy requires --expect-account, and a disagreeing environment still refuses", (t) => {
+  // ARC round 3: `deploy` is the one irreversible action, so the account is
+  // mandatory even when the environment is silent - otherwise Wrangler's stored
+  // selection decides where the Worker and its cron are created.
+  //
+  // Both rows use an artefact the next guard refuses (the pilot Worker name).
+  // The account guard runs first, so the assertion is about the account; and if
+  // the account rule ever regressed, the run would stop at the artefact guard
+  // instead of reaching a real `wrangler deploy`. This suite never uploads.
+  const { directory } = workspace(t, {
+    ...stagingConfig(),
+    name: "certpath-pilot",
+  });
+  const expected = "99999999-8888-4777-8666-555555555555";
+  const stale = "11111111-2222-4333-8444-555555555555";
+
+  const missing = runCli(directory, ["deploy"]);
+  assert.equal(missing.status, 2, missing.output);
+  assert.match(missing.output, /error account_not_asserted: /);
+  assert.match(missing.output, /pass --expect-account <account id>/);
+  assert.doesNotMatch(missing.output, /wrangler \d+\.\d+\.\d+/);
+  assert.doesNotMatch(missing.output, /⛅/);
+
+  // The environment is set: still not a source of truth, and still refused when
+  // it disagrees with the flag.
+  const disagreeing = runCli(directory, ["deploy", "--expect-account", expected], {
+    CLOUDFLARE_ACCOUNT_ID: stale,
+  });
+  assert.equal(disagreeing.status, 1, disagreeing.output);
+  assert.match(disagreeing.output, /error account_env_mismatch: /);
+  assert.doesNotMatch(disagreeing.output, /wrangler \d+\.\d+\.\d+/);
+  assert.doesNotMatch(disagreeing.output, /⛅/);
+
+  // With the account in order, the run reaches the artefact guard - which is
+  // the ordering the two rows above rely on, stated as a positive.
+  const agreed = runCli(
+    directory,
+    ["deploy", "--expect-account", expected],
+    { CLOUDFLARE_ACCOUNT_ID: expected },
+  );
+  assert.equal(agreed.status, 1, agreed.output);
+  assert.match(agreed.output, /error staging_wrong_worker: /);
+  assert.doesNotMatch(agreed.output, /wrangler \d+\.\d+\.\d+/);
+});
+
 test("only dry-run carries --dry-run, and only deploy has no guard-free path", () => {
   // ARC: every CLI test spawns `dry-run`, so dropping `--dry-run` from the
   // deploy argument list would turn the happy-path test into an upload. The argv
@@ -396,6 +442,50 @@ test("only dry-run carries --dry-run, and only deploy has no guard-free path", (
       (error) => error instanceof CliError && error.code === "unknown_action",
     );
   }
+});
+
+test("deployEnv makes the account mandatory for deploy and optional for dry-run", () => {
+  // The CLI-level rows above pin the ordering; these pin the rule itself.
+  const missing = {
+    parentEnv: {},
+    expectAccount: null,
+    requireAccount: true,
+  };
+  for (const parentEnv of [{}, { CLOUDFLARE_ACCOUNT_ID: "abc" }]) {
+    assert.throws(
+      () => deployEnv({ ...missing, parentEnv }),
+      (error) =>
+        error instanceof CliError &&
+        error.code === "account_not_asserted" &&
+        error.exitCode === 2,
+    );
+  }
+
+  // `dry-run` may omit it: nothing is created, and the command says so.
+  const unpinned = deployEnv({ parentEnv: {}, expectAccount: null });
+  assert.equal(unpinned.expectAccount, null);
+  assert.equal(unpinned.env.CLOUDFLARE_ACCOUNT_ID, undefined);
+
+  // A supplied id is pinned into the child environment, and it must agree with
+  // whatever the shell carries.
+  const pinned = deployEnv({
+    parentEnv: { CLOUDFLARE_ACCOUNT_ID: "abc" },
+    expectAccount: "abc",
+    requireAccount: true,
+  });
+  assert.equal(pinned.env.CLOUDFLARE_ACCOUNT_ID, "abc");
+  assert.throws(
+    () =>
+      deployEnv({
+        parentEnv: { CLOUDFLARE_ACCOUNT_ID: "abc" },
+        expectAccount: "def",
+        requireAccount: true,
+      }),
+    (error) =>
+      error instanceof CliError &&
+      error.code === "account_env_mismatch" &&
+      error.exitCode === 1,
+  );
 });
 
 test("the guard helper names each refusal code and returns what it verified", () => {

@@ -87,22 +87,25 @@ async function main() {
   if (action === "deploy" || action === "dry-run") {
     const options = parseDeployOptions(process.argv.slice(3));
 
-    // Phase 5D (issue #149): the guards run before any spawn.
-    //   1. the artefact — `build:site`, `build:pilot`, `build:staging` and
+    // Phase 5D (issue #149): the guards run before any spawn, account first
+    // because it decides where the write lands.
+    //   1. the account — Wrangler prefers CLOUDFLARE_ACCOUNT_ID, then its stored
+    //      selection, so an unpinned deploy lands wherever that points. `deploy`
+    //      therefore requires --expect-account; `dry-run` uploads nothing and
+    //      may omit it;
+    //   2. the artefact — `build:site`, `build:pilot`, `build:staging` and
     //      `build:preview` all write build/server/wrangler.json, so a pilot
     //      build followed by deploy:staging would ship a D1-bound
-    //      certpath-pilot Worker to the staging host;
-    //   2. the account — Wrangler prefers CLOUDFLARE_ACCOUNT_ID over its stored
-    //      selection, so a stale id there would deploy into another account,
-    //      bound to a database that does not exist there.
+    //      certpath-pilot Worker to the staging host.
+    const account = deployEnv({
+      parentEnv: BUILD_ENV,
+      expectAccount: options.expectAccount,
+      requireAccount: action === "deploy",
+    });
     const verified = assertStagingDeployConfig(
       readStagingGeneratedConfig(GENERATED_CONFIG),
       { allowPilotFlags: options.allowPilotFlags },
     );
-    const account = deployEnv({
-      parentEnv: BUILD_ENV,
-      expectAccount: options.expectAccount,
-    });
 
     console.log(
       `Verified staging deploy target: worker ${verified.worker}, database ${verified.database} (binding ${verified.binding})`,

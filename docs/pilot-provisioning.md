@@ -398,8 +398,9 @@ deployment has a name, a guard and a rollback.
 ```powershell
 npm run build:staging     # writes build/server/wrangler.json and asserts the entry
 Set-Location apps\web
-npm run dry-run:staging -- --expect-account <account id>   # guards + local bundle; uploads nothing
-npm run deploy:staging -- --expect-account <account id>    # the guards, then wrangler deploy -c build/server/wrangler.json
+npm run dry-run:staging                                   # optional; the account may be omitted
+npm run dry-run:staging -- --expect-account <account id>  # guards + local bundle; uploads nothing
+npm run deploy:staging -- --expect-account <account id>   # --expect-account is REQUIRED; then wrangler deploy -c build/server/wrangler.json
 Set-Location ..\..
 ```
 
@@ -411,8 +412,8 @@ Set-Location ..\..
 
 `deploy:staging` and `dry-run:staging` read `build/server/wrangler.json` —
 resolved from the working directory, exactly as `-c build/server/wrangler.json`
-is — and refuse with exit 1 **before Wrangler is spawned** unless every rule
-holds:
+is — and refuse **before Wrangler is spawned** unless every rule holds (exit 1
+for a refused guard, exit 2 where the table below says so):
 
 | Rule the generated config must satisfy | Refusal code |
 |---|---|
@@ -426,24 +427,37 @@ holds:
 | `build/server/wrangler.json` exists | `staging_config_missing` |
 | it parses as a JSON object | `staging_config_unparsed` |
 
-The **account** is asserted in the same breath, before any spawn.
-`CLOUDFLARE_ACCOUNT_ID` is never accepted silently: Wrangler prefers it over its
+The **account** is asserted first, before any spawn. `deploy` **requires**
+`--expect-account <account id>`: a deploy creates the Worker and its cron, and
+with nothing asserted Wrangler falls back to its stored selection, which is an
+assertion about nothing. `dry-run` uploads nothing, so it may omit the flag —
+and then prints `Account: not asserted (...)` instead of implying otherwise.
+
+`CLOUDFLARE_ACCOUNT_ID` is never a source of truth. Wrangler prefers it over its
 stored selection, so an id left in the shell would deploy `learner-auth-staging`
-into *that* account, bound to a `database_id` that does not exist there. If the
-variable is set, `--expect-account <account id>` is required and must agree with
-it; the child Wrangler process is then pinned to that id (`wranglerEnv`), which
-removes both fallbacks. Missing or disagreeing is `account_env_mismatch`, exit 1,
-before Wrangler runs:
+into *that* account, bound to a `database_id` that does not exist there. When
+`--expect-account` is given it must agree with the variable, and the child
+Wrangler process is pinned to that id (`wranglerEnv`), which removes both
+fallbacks. An unset variable is not a licence to skip the flag on `deploy`:
 
-| Rule the environment must satisfy | Refusal code |
-|---|---|
-| `CLOUDFLARE_ACCOUNT_ID` set and `--expect-account` absent | `account_env_mismatch` |
-| `CLOUDFLARE_ACCOUNT_ID` set and different from `--expect-account` | `account_env_mismatch` |
-| an argument other than `--expect-account` / `--allow-pilot-flags` | `unknown_argument` (exit 2) |
+| Rule the environment must satisfy | Refusal code | Exit |
+|---|---|---|
+| `deploy` without `--expect-account` (variable set or not) | `account_not_asserted` | 2 |
+| `dry-run` with `CLOUDFLARE_ACCOUNT_ID` set and no `--expect-account` | `account_env_mismatch` | 1 |
+| `CLOUDFLARE_ACCOUNT_ID` set and different from `--expect-account` | `account_env_mismatch` | 1 |
+| an argument other than `--expect-account` / `--allow-pilot-flags` | `unknown_argument` | 2 |
 
-Exit 2 is a usage error (an unknown action or a missing option value). The guards
-print what they verified, so the operator can see the target, the schedule, the
-flag values and the account that was checked:
+`account_not_asserted` is exit 2 because it is usage: the `deploy` subcommand
+always needs the option, and `db:preflight` already answers exit 2 to a missing
+`--expect-account`. `account_env_mismatch` is exit 1 because it is the guard
+refusing a state the operator can fix in the shell. Both print nothing from
+Wrangler — no version banner, no request — which is how an operator confirms the
+refusal happened before any spawn.
+
+Exit 2 is a usage error (an unknown action, an unknown argument, a missing option
+value, or `deploy` without `--expect-account`). The guards print what they
+verified, so the operator can see the target, the schedule, the flag values and
+the account that was checked:
 
 ```
 Verified staging deploy target: worker learner-auth-staging, database certpath-learner-staging (binding DB)
@@ -451,25 +465,28 @@ Verified cron schedule: */5 * * * *
 Verified PILOT_EVENTS_ENABLED="false"
 Verified PILOT_SERVER_EVENTS_ENABLED="false"
 Verified PILOT_EVENTS_RETENTION_ENABLED="false"
+Account: CLOUDFLARE_ACCOUNT_ID pinned to <account id> for this run
 ```
 
 `--allow-pilot-flags` is the only override, and it permits a flag that is not
 `"false"` for a deliberate, owner-approved flag change, printing
 `Pilot flag override: --allow-pilot-flags (the flags above are not asserted false)`.
-Pass it where the CLI runs — from `apps/web`:
+Pass it where the CLI runs — from `apps/web` — together with the account, since
+`deploy` requires one:
 
 ```powershell
 Set-Location apps\web
-npm run deploy:staging -- --allow-pilot-flags
+npm run deploy:staging -- --expect-account <account id> --allow-pilot-flags
 Set-Location ..\..
 ```
 
 `npm run deploy:staging -- --allow-pilot-flags` **from the repository root does
-not reach the CLI**: the root script delegates to `@certpath/web`, so the flag
-stops at the delegating `npm`. That combination is fail-closed — the guard still
-refuses an enabled flag with `staging_pilot_flag_enabled` — but it is a refusal,
-not an applied override. From the root the working form is
-`npm run deploy:staging --workspace @certpath/web -- --allow-pilot-flags`.
+not reach the CLI**: the root script delegates to `@certpath/web`, so the flags
+stop at the delegating `npm`. That combination is fail-closed — the guard still
+refuses an enabled flag with `staging_pilot_flag_enabled`, and `deploy` refuses
+with `account_not_asserted` when the account flag is swallowed too — but it is a
+refusal, not an applied override. From the root the working form is
+`npm run deploy:staging --workspace @certpath/web -- --expect-account <account id> --allow-pilot-flags`.
 It does not permit a flag to be absent: a build that dropped the vars is not the
 artefact the guard checked. Every refusal and the accepted path are covered in
 `apps/web/scripts/staging-command.test.mjs`; the refusals never spawn `deploy`.
@@ -478,13 +495,13 @@ artefact the guard checked. Every refusal and the accepted path are covered in
 
 All seven must hold. Any one missing is a stop, not a retry.
 
-1. **The account is asserted.** Run with `--expect-account <account id>` — the
-   Certpath account the database was created in (#134) — and make sure a
-   `CLOUDFLARE_ACCOUNT_ID` in the shell either agrees with it or is removed. The
-   command refuses before spawning Wrangler otherwise (`account_env_mismatch`),
-   and when nothing is asserted it prints
-   `Account: not asserted (...)`, which is the line to notice before deploying
-   into whatever Wrangler has stored.
+1. **The account is asserted.** `deploy` will refuse without
+   `--expect-account <account id>` — the Certpath account the database was
+   created in (#134) — and an unset `CLOUDFLARE_ACCOUNT_ID` is **not** a licence
+   to skip it: silence there means Wrangler's stored selection decides where the
+   Worker is created. If the shell does set `CLOUDFLARE_ACCOUNT_ID`, it must
+   agree with the flag or the run refuses (`account_env_mismatch`). A `dry-run`
+   may omit the flag and then prints `Account: not asserted (...)`.
 2. **`npm run build:staging` exited 0** in this checkout after the last change.
    It asserts the bundle entry is `workers/staging-app.ts`.
 3. **The staging database has 22 applied migrations**, last
@@ -519,8 +536,9 @@ All seven must hold. Any one missing is a stop, not a retry.
    and so in the built copy. The guard asserts the built copy, which is what
    ships.
 7. **`npm run dry-run:staging -- --expect-account <account id>` exited 0** (from
-   `apps/web`) and printed the verified lines above, with the account line naming
-   the id it pinned. It bundles locally and uploads nothing.
+   `apps/web`; the flag is optional here but asserted when given) and printed the
+   verified lines above, with the account line naming the id it pinned. It
+   bundles locally and uploads nothing.
 
 ### Afterwards: what to check
 
