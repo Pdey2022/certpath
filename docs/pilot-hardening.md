@@ -133,9 +133,14 @@ by `apps/web/wrangler.staging.jsonc`:
 **What remains before events can be recorded and pruned:**
 
 1. deploy the staging Worker (an owner-approved deployment; the cron ships with
-   the deployment and stays a no-op until step 2);
-2. turn `PILOT_EVENTS_RETENTION_ENABLED` on (owner decision);
-3. only then consider `PILOT_EVENTS_ENABLED` / `PILOT_SERVER_EVENTS_ENABLED`: the
+   the deployment and stays a no-op until step 3);
+2. apply `0022` to the staging database and prove it: that database was migrated
+   through `0021` (21 rows in `d1_migrations`, verified 18 November 2026) and the
+   retention floor landed afterwards, so its index and delete trigger are not
+   there yet — [`docs/pilot-provisioning.md`](pilot-provisioning.md)
+   §Pre-enablement step;
+3. turn `PILOT_EVENTS_RETENTION_ENABLED` on (owner decision) — not before;
+4. only then consider `PILOT_EVENTS_ENABLED` / `PILOT_SERVER_EVENTS_ENABLED`: the
    coupling test refuses an events flag that is `"true"` while retention is not,
    because that would promise a twelve-month period nothing delivers.
 

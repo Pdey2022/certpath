@@ -1,9 +1,17 @@
 # Pilot provisioning (Phase 5C)
 
 Status: **design approved to implement (owner, 17 November 2026); NOT approved to
-run.** Nothing in this document has been executed. No Cloudflare resource exists,
-no Worker is deployed, no secret is set, and every `database_id` in the
-repository is still the all-zero placeholder.
+run.** One Cloudflare resource exists: the D1 database `certpath-learner-staging`,
+created and migrated through `0021_pilot_events.sql` (**21 applied migrations**:
+`SELECT COUNT(*), MAX(name) FROM d1_migrations` answers `21` and
+`0021_pilot_events.sql`, verified 18 November 2026), with its id recorded in
+#134. `0022_pilot_events_retention.sql` landed after that migration, so the
+retention floor is **not applied there yet** — see §Pre-enablement step below.
+
+No Worker is deployed (`learner-auth-staging` answers `code: 10007`, checked
+18 November 2026), no secret is set and no route exists. Apart from the recorded
+staging id, every `database_id` in the repository is still the all-zero
+placeholder.
 
 This is the runbook for the one provisioning run the owner will approve later. It
 is written now, with the tooling and the guards, so that the run is a sequence of
@@ -26,8 +34,11 @@ It does **not** create:
 - a learner, an invited learner, a credential or a sign-in link — no real learner
   data exists until MFA replaces the tester-gate assurance
   ([`docs/delivery-plan.md`](delivery-plan.md) §Operating constraints);
-- a Worker deployment, a route, a secret or a var change. The staging Worker's
-  vars and the `PILOT_*` / `COMMERCE_ENABLED` flags are untouched.
+- a Worker deployment, a route, a secret or a var change. 5C itself changes no
+  var: the three `PILOT_*` flags in `apps/web/wrangler.staging.jsonc`
+  (`PILOT_EVENTS_ENABLED`, `PILOT_SERVER_EVENTS_ENABLED`,
+  `PILOT_EVENTS_RETENTION_ENABLED`) were declared beforehand, all `"false"`, in
+  #141. No flag is enabled, and none is touched by this run.
 
 The original slice plan also seeded one invited learner and exported the pilot
 database "before its first migration". Both were withdrawn by the owner on
@@ -272,6 +283,46 @@ declare the export "restorable with a caveat". Record the exact error, keep both
 dumps and both manifests, and escalate: the next move (accepted limitation, a
 documented restore order, or a change to the export strategy) is an architecture
 decision, not an operator workaround.
+
+## Pre-enablement step: apply `0022` to staging
+
+**Not part of 5C, not approved to run, and it blocks the retention flag.** The
+staging database stopped at `0021`: `SELECT COUNT(*), MAX(name) FROM
+d1_migrations` answers `21` and `0021_pilot_events.sql` (verified 18 November
+2026). `0022_pilot_events_retention.sql` landed after that migration, so
+`pilot_events_received_at_idx` and `pilot_events_no_delete` do not exist on
+staging yet, and nothing there enforces the twelve-month floor.
+
+Until this step is done and proven, `PILOT_EVENTS_RETENTION_ENABLED` stays
+`"false"` on staging. Turning it on first would run a prune against a table with
+no floor — the window would be a promise the database cannot keep, which is the
+one thing [`docs/pilot-events-retention.md`](pilot-events-retention.md) says is
+enforced in storage rather than by the job.
+
+```powershell
+Set-Location apps\web
+npx wrangler d1 migrations apply certpath-learner-staging --remote -c wrangler.staging.jsonc
+Set-Location ..\..
+```
+
+Then prove it, and keep the output with the step's record:
+
+```powershell
+Set-Location apps\web
+npx wrangler d1 execute certpath-learner-staging --remote -c wrangler.staging.jsonc `
+  --command "SELECT COUNT(*) AS applied, MAX(name) AS last FROM d1_migrations"
+Set-Location ..\..
+```
+
+Expected after the step: `22` applied and `0022_pilot_events_retention.sql` as
+the last name. Anything else is a stop, not a retry: `21` means the apply did not
+reach the remote database, and any other last name means the ledger does not
+match `db/migrations/*.sql`.
+
+This is a remote write to the staging database, so it needs the owner's approval
+like every other run step. It changes no repository file: no migration is edited,
+no checksum line changes, and `apps/web/wrangler.staging.jsonc` stays exactly as
+committed.
 
 ## Time Travel
 
