@@ -149,9 +149,10 @@ forces the arithmetic to be revisited.
 
 ## The flag
 
-`PILOT_EVENTS_RETENTION_ENABLED` is a `wrangler.jsonc` var, `"false"` here, read
-by the exact-string gate `pilotEventsRetentionEnabled(bindings)` — `"TRUE"`,
-`" true"`, `"1"` and `"yes"` are all off.
+`PILOT_EVENTS_RETENTION_ENABLED` is a Worker var declared in both
+`apps/web/wrangler.jsonc` and `apps/web/wrangler.staging.jsonc`, `"false"` in
+both, read by the exact-string gate `pilotEventsRetentionEnabled(bindings)` —
+`"TRUE"`, `" true"`, `"1"` and `"yes"` are all off.
 
 With the flag off the `scheduled` handler prepares no statement and reads no row:
 the check is before the `ctx.waitUntil`, not inside it. With it on, the prune runs
@@ -165,6 +166,29 @@ was never turned on still refuses every in-window delete.
 Nothing about the prune is logged except a failure's `reason` (for example
 `invalid-input`). No event id, no session id, no row value, no count appears in a
 log line: the row is deliberately unidentifiable and a log line must not undo that.
+
+## Where the prune runs
+
+Two different Workers, two different configuration files, one prune:
+
+| Config | Worker | `scheduled` handler | Today |
+|---|---|---|---|
+| `apps/web/wrangler.jsonc` | `certpath-foundation` | `apps/web/workers/app.ts`, beside question-import cleanup, audit retention and commerce expiry | local/foundation config; binds the all-zero `certpath-local` placeholder |
+| `apps/web/wrangler.staging.jsonc` | `learner-auth-staging` | `apps/web/workers/staging-app.ts` → `schedulePilotEventRetention` in `apps/web/workers/pilot-events-retention-schedule.ts` | declared in code, **not deployed**; every `PILOT_*` flag `"false"` |
+
+Both declare the same `*/5 * * * *` cron. The staging handler runs the pilot
+prune and nothing else, so the staging database never sees the question-import,
+audit-retention or commerce-expiry jobs that share `app.ts`'s handler. With the
+flag `"false"` in the staging config, a fired cron prepares no statement and
+reads no row.
+
+The foundation Worker is not the events target. Its `certpath-local` binding is
+the all-zero placeholder, and the owner decided on 18 November 2026 (#141) that
+pilot events are recorded and pruned by the staging Worker. That Worker does not
+exist yet: the database was recorded (#134), the Worker answers `code: 10007`
+(not found) as checked on 18 November 2026, so no deployed Worker can record or
+prune pilot events today. What remains is the deployment and the enablement
+decision — [`docs/pilot-hardening.md`](pilot-hardening.md) §Events target.
 
 ## Failure modes
 

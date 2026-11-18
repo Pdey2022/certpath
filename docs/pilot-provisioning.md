@@ -13,7 +13,11 @@ Cloudflare state; only an owner-approved execution of this document does.
 ## What 5C is, narrowed
 
 5C creates **one resource**: the D1 database `certpath-learner-staging` in the
-account that owns the staging Worker (`learner-auth-staging`).
+account where the staging Worker (`learner-auth-staging`) will be deployed. That
+Worker does not exist yet: it answered `code: 10007` (not found) on 18 November
+2026, after the database id was recorded (#134). Its
+`apps/web/wrangler.staging.jsonc` gained a `*/5 * * * *` cron and the three
+pilot event flags, all `"false"`, in #141 — code only, not deployed.
 
 It does **not** create:
 

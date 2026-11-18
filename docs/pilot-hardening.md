@@ -11,7 +11,11 @@ implemented on a draft PR with its design approved by the owner on 17 November
 2026; 5C is narrowed to one staging database with no learner, design approved by
 the owner on 17 November 2026 to implement, and not approved to run.** Nothing in
 Phase 5 has been deployed or provisioned, and both funnel flags and
-`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`.
+`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`. The staging Worker
+(`learner-auth-staging`) does not exist: on 18 November 2026 its database
+`certpath-learner-staging` exists, but the Worker answers `code: 10007` (not
+found). #141 decides that Worker is the events target, **in code only**; see
+§Events target below.
 
 ## Slices
 
@@ -101,7 +105,45 @@ precondition is the owner's enablement decision. Both
 `PILOT_EVENTS_ENABLED` and `PILOT_SERVER_EVENTS_ENABLED` stay `"false"` until
 then, and the scheduled prune stays off until the owner turns it on: with it off
 the table accumulates rows and nothing is removed automatically, though every
-in-window delete is still refused by storage.
+in-window delete is still refused by storage. The prune is now also declared for
+the staging Worker, which is the events target — code only, not deployed
+(§Events target below).
+
+### Events target (#141): staging, in code only
+
+Closed by owner decision on 18 November 2026. The Worker that will record and
+prune pilot events is the **staging** Worker, `learner-auth-staging`, configured
+by `apps/web/wrangler.staging.jsonc`:
+
+- the config declares the same `*/5 * * * *` cron as `wrangler.jsonc`, and the
+  three events flags, all `"false"` — `PILOT_EVENTS_ENABLED`,
+  `PILOT_SERVER_EVENTS_ENABLED`, `PILOT_EVENTS_RETENTION_ENABLED`;
+- `apps/web/workers/staging-app.ts` has a `scheduled` handler that calls
+  `schedulePilotEventRetention` in
+  `apps/web/workers/pilot-events-retention-schedule.ts`. With every flag
+  `"false"` the cron fires and does nothing: the gate returns before
+  `ctx.waitUntil`, so no statement is prepared and no row is read;
+- the handler does not reuse `app.ts`'s handler, which would also run
+  question-import cleanup, audit retention and commerce expiry against the
+  staging database;
+- nothing is deployed, no flag is turned on, no secret is set, and no route,
+  capability or migration is added. `apps/web/wrangler.jsonc` is unchanged and
+  still binds the all-zero `certpath-local` placeholder.
+
+**What remains before events can be recorded and pruned:**
+
+1. deploy the staging Worker (an owner-approved deployment; the cron ships with
+   the deployment and stays a no-op until step 2);
+2. turn `PILOT_EVENTS_RETENTION_ENABLED` on (owner decision);
+3. only then consider `PILOT_EVENTS_ENABLED` / `PILOT_SERVER_EVENTS_ENABLED`: the
+   coupling test refuses an events flag that is `"true"` while retention is not,
+   because that would promise a twelve-month period nothing delivers.
+
+Until step 1, the staging `scheduled` handler is exercised only by
+`apps/api/test/pilot-events-retention.test.ts`, which drives it against the real
+`0022` schema in the local runtime. No deployed Worker has run it, so the
+schedule is verified by the committed configuration and that test, not by an
+invocation.
 
 ## What 5C ships
 
@@ -135,7 +177,8 @@ the learner and the Worker deployment all stay out.
 - Enabling the retention prune and the events flags (owner). The enforcement
   itself landed in `0022` (#110); what is left is the decision to turn
   `PILOT_EVENTS_RETENTION_ENABLED`, `PILOT_EVENTS_ENABLED` and
-  `PILOT_SERVER_EVENTS_ENABLED` on.
+  `PILOT_SERVER_EVENTS_ENABLED` on — and, before any of that, deploying the
+  staging Worker that now owns them (#141).
 
 ## Not in 5A
 
