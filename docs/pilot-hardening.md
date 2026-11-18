@@ -6,16 +6,15 @@ each one can be reviewed, approved and rolled back on its own. This file records
 the slices, their order, their migration reservations and the decisions each one
 needs.
 
-Status: **5A approved by the owner and in review; 5B (pilot funnel events) is
-implemented on a draft PR with its design approved by the owner on 17 November
-2026; 5C is narrowed to one staging database with no learner, design approved by
-the owner on 17 November 2026 to implement, and not approved to run.** Nothing in
-Phase 5 has been deployed or provisioned, and both funnel flags and
-`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`. The staging Worker
-(`learner-auth-staging`) does not exist: on 18 November 2026 its database
-`certpath-learner-staging` exists, but the Worker answers `code: 10007` (not
-found). #141 decides that Worker is the events target, **in code only**; see
-§Events target below.
+Status: **5A, 5B and 5C are merged, and the 5C run completed on 18 November
+2026.** That run created and migrated `certpath-learner-staging` (21 applied
+migrations, last `0021_pilot_events.sql`), recorded its id in #134, and exported
+and rehearsed twice to exit 0. **No Worker is deployed, and no secret, route or
+deployment exists**: `learner-auth-staging` answers `code: 10007` (not found),
+checked 18 November 2026. `0022_pilot_events_retention.sql` is not applied to that
+database (see §Retention precondition), and both funnel flags and
+`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`. #141 decides the staging Worker is
+the events target, **in code only**; see §Events target below.
 
 ## Slices
 
@@ -23,7 +22,7 @@ found). #141 decides that Worker is the events target, **in code only**; see
 |---|---|---|---|---|
 | **5A Data-safety tooling** | D1 isolation gate, export + manifest, rehearsed restore, fresh-chain check, `verify` wiring, export runbook | - | none (`db/migrations/checksums.txt` is not a migration) | **Approved 17 Nov 2026** |
 | **5B Pilot funnel events** | `pilot_events` (consent-aware, no personal data), the events that the fake door needs | 5A (export/restore tooling), 5C (a database to write to) | **0021** | **Design approved 17 Nov 2026**; the consent-issuing surface is 5D and `PILOT_SERVER_EVENTS_ENABLED` is unblocked but not enabled |
-| **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Design approved 17 Nov 2026 to implement, NOT approved to run**; [runbook](pilot-provisioning.md) |
+| **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Run completed 18 Nov 2026**: database created and migrated (21 migrations), id recorded in #134, both exports rehearsed to exit 0; [runbook](pilot-provisioning.md) |
 | **5D Fake door** | Price validation without taking payment | 5B (funnel), 5E (hostname) | none | Owner approval: product and pricing rule |
 | **5E Hostname decision** | Canonical pilot hostname and routing | 5C | none | **Owner approval required**: brand, domain, canonical origin |
 | **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor | 5C, ADR 0004 | **0023** | ARC design + owner approval: access policy |
@@ -196,5 +195,6 @@ refund UI, the `needs_support` money policy, receipts cursor) stays out.
 
 No migration or `db/migrations/` change, no checksum change, no dependency, no
 secret, no deploy workflow change, no Worker binding, var or code path, and no
-Cloudflare resource. The `database_id` values stay the all-zero placeholder until
-the owner-approved run records one.
+Cloudflare resource. When the slice landed, every `database_id` was the all-zero
+placeholder; the approved run on 18 November 2026 has since recorded the staging
+id (#134), so only `local` and `pilot` remain placeholders.
