@@ -10,7 +10,8 @@ Status: **5A approved by the owner and in review; 5B (pilot funnel events) is
 implemented on a draft PR with its design approved by the owner on 17 November
 2026; 5C is narrowed to one staging database with no learner, design approved by
 the owner on 17 November 2026 to implement, and not approved to run.** Nothing in
-Phase 5 has been deployed or provisioned, and both funnel flags are `"false"`.
+Phase 5 has been deployed or provisioned, and both funnel flags and
+`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`.
 
 ## Slices
 
@@ -21,7 +22,7 @@ Phase 5 has been deployed or provisioned, and both funnel flags are `"false"`.
 | **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Design approved 17 Nov 2026 to implement, NOT approved to run**; [runbook](pilot-provisioning.md) |
 | **5D Fake door** | Price validation without taking payment | 5B (funnel), 5E (hostname) | none | Owner approval: product and pricing rule |
 | **5E Hostname decision** | Canonical pilot hostname and routing | 5C | none | **Owner approval required**: brand, domain, canonical origin |
-| **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor | 5C, ADR 0004 | **0022** | ARC design + owner approval: access policy |
+| **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor | 5C, ADR 0004 | **0023** | ARC design + owner approval: access policy |
 
 Order: **5A -> 5C -> 5B**, with 5E parallel to 5B and 5D after both. 5F gates the
 first real learner, not the first database.
@@ -29,7 +30,9 @@ first real learner, not the first database.
 ## Migration reservations
 
 - `0021` is reserved for 5B (`pilot_events`).
-- `0022` is reserved for 5F (assurance/MFA).
+- `0022` is taken by the `pilot_events` retention floor (#110), which landed
+  ahead of 5F; see [`docs/pilot-events-retention.md`](pilot-events-retention.md).
+- `0023` is reserved for 5F (assurance/MFA).
 - 5A adds no migration. The only file it adds under `db/migrations/` is
   `checksums.txt`; no existing migration is edited.
 
@@ -80,20 +83,25 @@ answer identically whether the recorder is off or fails.
 ### Retention precondition
 
 The owner decided on 17 November 2026 that `pilot_events` is retained for **12
-months, for both `source = 'browser'` and `source = 'server'`**. That is the
-period, not the enforcement: 0021 ships **no delete path and no delete-floor
-trigger**, and nothing in the codebase deletes from `pilot_events`.
+months, for both `source = 'browser'` and `source = 'server'`**. 0021 shipped the
+period without the enforcement, deliberately.
 
-**Enforcing the 12-month floor is a precondition for enabling
-`PILOT_EVENTS_ENABLED` — it is not part of 5B.** The enforcement lands in its own
-review (clock semantics, D1 clock skew, and what withdrawal does to stored
-history) and needs its own migration: issue #110. Enabling the flag before that
-enforcement exists would create a table with a stated retention period and no
-mechanism that delivers it.
+**The enforcement has landed (#110, `0022`).** `0022_pilot_events_retention.sql`
+adds the `received_at` index and `pilot_events_no_delete`, a floor that compares
+`received_at` with D1's own clock; `apps/api/src/analytics/pilot-events-retention.ts`
+adds a bounded, idempotent prune that the Worker's `scheduled` handler runs only
+when `PILOT_EVENTS_RETENTION_ENABLED` is exactly `"true"` — and it is `"false"`
+here. The withdrawal question that held the review open is resolved: withdrawal
+stops future events and stored history keeps the full window, so there is no
+erasure path and no exception to the floor (owner, 18 November 2026). Design,
+failure modes and rollback: [`docs/pilot-events-retention.md`](pilot-events-retention.md).
 
-The same floor is a precondition for enabling `PILOT_SERVER_EVENTS_ENABLED`: the
-consent question for server rows is resolved (owner, 17 November 2026 — not
-required), but the flag stays `"false"` until the retention floor exists.
+The floor is no longer the blocker for the events flags; the remaining
+precondition is the owner's enablement decision. Both
+`PILOT_EVENTS_ENABLED` and `PILOT_SERVER_EVENTS_ENABLED` stay `"false"` until
+then, and the scheduled prune stays off until the owner turns it on: with it off
+the table accumulates rows and nothing is removed automatically, though every
+in-window delete is still refused by storage.
 
 ## What 5C ships
 
@@ -124,8 +132,10 @@ the learner and the Worker deployment all stay out.
 - 5E: canonical hostname and whether the pilot keeps a `workers.dev` origin
   (owner).
 - 5F: the MFA method that replaces `tester-gate` (ARC, then owner).
-- Scheduling and enforcement of the retention rule (#110): 5A states the rule and
-  ships the tooling; automation is not in scope.
+- Enabling the retention prune and the events flags (owner). The enforcement
+  itself landed in `0022` (#110); what is left is the decision to turn
+  `PILOT_EVENTS_RETENTION_ENABLED`, `PILOT_EVENTS_ENABLED` and
+  `PILOT_SERVER_EVENTS_ENABLED` on.
 
 ## Not in 5A
 

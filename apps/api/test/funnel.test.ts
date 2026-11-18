@@ -201,34 +201,27 @@ describe("readPilotFunnel", () => {
     expect(rows[0]!.conversionRate).toBe(0);
   });
 
-  it("makes a lost event visible: delete one and the gap grows", async () => {
+  it("makes a lost event visible: a checkout whose start event was never written", async () => {
     const from = clock + 90 * day;
     const to = from + day;
     const at = from + 1_000;
     await checkout({ createdAt: at, status: "paid" });
     await checkout({ createdAt: at, status: "paid" });
+    // One start event for two checkouts. A dropped write looks exactly like
+    // this: 0022 refuses to delete a row inside the twelve-month window, so the
+    // gap has to be produced by never writing the event, not by removing one.
     await checkoutStartedEvent({ receivedAt: at });
-    const lost = await checkoutStartedEvent({ receivedAt: at });
 
-    const before = (
+    const row = (
       await readPilotFunnel(database, { from, to, products: null })
     )[0]!;
-    expect(before.eventGap).toBe(0);
-
-    // No delete guard exists in 0021 (retention enforcement is a follow-up), so
-    // this is exactly what a dropped write would look like afterwards.
-    await database
-      .prepare("DELETE FROM pilot_events WHERE event_id = ?")
-      .bind(lost)
-      .run();
-
-    const after = (
-      await readPilotFunnel(database, { from, to, products: null })
-    )[0]!;
-    expect(after.checkoutStartsFromEvents).toBe(1);
-    expect(after.eventGap).toBe(1);
-    // The conversion rate cannot move with the event count.
-    expect(after.conversionRate).toBe(before.conversionRate);
+    expect(row.checkoutsCreated).toBe(2);
+    expect(row.checkoutsPaid).toBe(2);
+    expect(row.checkoutStartsFromEvents).toBe(1);
+    expect(row.eventGap).toBe(1);
+    // The conversion rate is ledger-derived: 2 of 2 paid is still a full rate -
+    // the missing event moves the gap, never the rate.
+    expect(row.conversionRate).toBeCloseTo(1, 10);
   });
 
   it("windows on the server clock, not on the row's own bounds", async () => {

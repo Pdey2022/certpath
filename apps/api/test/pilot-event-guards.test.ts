@@ -13,6 +13,7 @@ import type { SecurityDatabase } from "../src/security/database.ts";
 
 const database: SecurityDatabase = env.DB;
 const clock = Date.parse("2026-02-01T00:00:00.000Z");
+const day = 86_400_000;
 const session = "session_0123456789abcdef";
 
 const columns = [
@@ -404,10 +405,10 @@ describe("rows are append-only", () => {
     expect(await countRows(row.eventId)).toBe(1);
   });
 
-  it("has no delete guard and no delete path (retention is a follow-up)", async () => {
-    // The design ships no delete-floor trigger: retention enforcement is its own
-    // review. This test records that shape so a later migration's guard is a
-    // deliberate change, and `index.test.ts` proves no module issues a DELETE.
+  it("inventories the delete floor 0022 adds", async () => {
+    // 0021 shipped no delete-floor trigger on purpose; 0022 lands it together
+    // with the scheduled prune. The inventory is exact, so a later migration that
+    // adds or drops a trigger has to change this test deliberately.
     const triggers = await database
       .prepare(
         `SELECT name FROM sqlite_master
@@ -419,19 +420,38 @@ describe("rows are append-only", () => {
       "pilot_event_names_no_delete",
       "pilot_event_names_no_update",
       "pilot_events_browser_cannot_claim_server_event",
+      "pilot_events_no_delete",
       "pilot_events_no_replace",
       "pilot_events_no_update",
       "pilot_events_validate_insert",
     ]);
+  });
 
-    const loss = newBrowserRow();
-    await insert(loss);
-    // Deleting is possible, and that is how the funnel test simulates a lost
-    // event: no guard, no floor, no code path.
+  it("lets a twelve-month-old row be deleted while a young one is refused", async () => {
+    // The D1 clock decides, not the fixture clock: both timestamps are relative
+    // to `Date.now()` so "twelve months old" means the same thing the trigger
+    // measures.
+    const now = Date.now();
+    const old = newBrowserRow({
+      occurredAt: now - 366 * day,
+      receivedAt: now - 366 * day,
+    });
+    const young = newBrowserRow();
+    await insert(old);
+    await insert(young);
+
+    await expect(
+      database
+        .prepare("DELETE FROM pilot_events WHERE event_id = ?")
+        .bind(young.eventId)
+        .run(),
+    ).rejects.toThrow(/pilot events are retained for 12 months/);
+    expect(await countRows(young.eventId)).toBe(1);
+
     await database
       .prepare("DELETE FROM pilot_events WHERE event_id = ?")
-      .bind(loss.eventId)
+      .bind(old.eventId)
       .run();
-    expect(await countRows(loss.eventId)).toBe(0);
+    expect(await countRows(old.eventId)).toBe(0);
   });
 });

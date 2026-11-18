@@ -8,6 +8,7 @@
     "./security/question-import-cleanup": "./src/security/question-import-cleanup.ts",
     "./security/question-imports": "./src/security/question-imports.ts",
     "./security/audit-retention": "./src/security/audit-retention.ts",
+    "./analytics/pilot-events-retention": "./src/analytics/pilot-events-retention.ts",
     "./commerce/expire": "./src/commerce/expire.ts"
   },
   "scripts": {

@@ -12,10 +12,15 @@ campaign attribution. Do not send email, credentials, IP/device fingerprints,
 free text, question or answer content, or unnecessary personal data.
 
 Optional tracking requires market-appropriate consent. Consent withdrawal stops
-future optional events and follows the approved retention policy. Events never
-block learning or checkout. Purchase/access events originate from verified
-server processing, not a browser return page. Finance reporting reconciles to
-orders and provider records, not analytics.
+future optional events; it does not delete or shorten the retention of events
+already stored, which keep their full 12-month window (owner decision, 18
+November 2026). That window is enforced in storage: `pilot_events_no_delete`
+refuses any delete of a row inside it, and a scheduled prune removes rows older
+than it — off unless `PILOT_EVENTS_RETENTION_ENABLED` is `"true"`, and the trigger
+enforces the period either way. Events never block learning or checkout.
+Purchase/access events originate from verified server processing, not a browser
+return page. Finance reporting reconciles to orders and provider records, not
+analytics.
 
 ## Event dictionary
 

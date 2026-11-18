@@ -13,11 +13,14 @@ test("health responds without exposing runtime or account data", async () => {
   assert.deepEqual(await response.json(), { status: "ok" });
 });
 
-// AC-10 for Phase 5B: `pilot_events` has no runtime delete path. Retention is an
-// owner decision (12 months, both sources) and its enforcement is a follow-up
-// review, so 5B deliberately ships no `DELETE` and no delete-floor trigger. When
-// the enforcement lands this test changes with it, on purpose.
+// AC-10 for Phase 5B, narrowed by 0022: exactly one module may issue
+// `DELETE FROM pilot_events` - the twelve-month retention prune - and every other
+// module in `apps/api/src` must keep writing no delete. The allowlist is pinned
+// both ways, so it cannot grow silently and cannot go stale.
 const sourceRoot = path.dirname(fileURLToPath(import.meta.url));
+const pilotEventsDeleteAllowlist = new Set([
+  path.join("analytics", "pilot-events-retention.ts"),
+]);
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory).flatMap((entry) => {
@@ -27,14 +30,25 @@ function sourceFiles(directory: string): string[] {
   });
 }
 
-test("no module under apps/api/src deletes from pilot_events", () => {
+test("only the retention prune deletes from pilot_events", () => {
   const offenders = sourceFiles(sourceRoot)
-    // This file names the statement it forbids; it must not count itself.
+    // This file names the statement it allows; it must not count itself.
     .filter((file) => !file.endsWith(`${path.sep}index.test.ts`))
     .filter((file) =>
       /DELETE\s+FROM\s+pilot_events/i.test(readFileSync(file, "utf8")),
     )
-    .map((file) => path.relative(sourceRoot, file));
+    .map((file) => path.relative(sourceRoot, file))
+    .filter((file) => !pilotEventsDeleteAllowlist.has(file));
 
   assert.deepEqual(offenders, []);
+});
+
+test("the deletion allowlist names the module that actually deletes", () => {
+  for (const relative of pilotEventsDeleteAllowlist) {
+    assert.match(
+      readFileSync(path.join(sourceRoot, relative), "utf8"),
+      /DELETE\s+FROM\s+pilot_events/i,
+      `${relative} is allowlisted but issues no DELETE`,
+    );
+  }
 });
