@@ -43,7 +43,7 @@ need an owner or architect decision.
 
 | Decision | Outcome | Record |
 |---|---|---|
-| `pilot_events` retention | **12 months, for both `source = 'browser'` and `source = 'server'`.** This is the period only: 0021 ships no delete path and no delete-floor trigger. Enforcing the floor (clock semantics, D1 skew, withdrawal) is its own review, and it is a **precondition for enabling `PILOT_EVENTS_ENABLED`** — see [`docs/pilot-hardening.md`](pilot-hardening.md) §Retention precondition. | Owner decision, 17 November 2026; `db/migrations/0021_pilot_events.sql` |
+| `pilot_events` retention | **12 months, for both `source = 'browser'` and `source = 'server'`.** This is the period only: 0021 ships no delete path and no delete-floor trigger. Enforcing the floor (clock semantics, D1 skew, withdrawal) is its own review, and it is a **precondition for enabling `PILOT_EVENTS_ENABLED`** — see [`docs/pilot-hardening.md`](pilot-hardening.md) §Retention precondition. **Superseded 18 November 2026: the floor landed in `0022`; see the row below.** | Owner decision, 17 November 2026; `db/migrations/0021_pilot_events.sql`, `db/migrations/0022_pilot_events_retention.sql` |
 | Consent surface | **Explicit opt-in, no banner, 180-day cookie, issued in 5D.** Decided for 5D, not an ADR requirement; it must not stay ambiguous. 5B ships the verifier only (`apps/api/src/analytics/pilot-events.ts`): no banner, no copy, no issuing route, so a real origin has no `pilot_consent` cookie and `POST /api/events` records nothing. | Owner decision, 17 November 2026; [`docs/pilot-hardening.md`](pilot-hardening.md) §What 5B ships |
 
 ## Resolved (17 November 2026, Phase 5C)

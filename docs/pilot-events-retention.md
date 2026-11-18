@@ -82,6 +82,22 @@ The claim is tested, not asserted: `pilot-events-retention.test.ts` shows an
 identical `INSERT OR REPLACE` leaves `received_at` unchanged and a REPLACE that
 moves it aborts.
 
+### 0021's header is stale, on purpose
+
+`db/migrations/0021_pilot_events.sql` still says "No delete guard and no delete
+path, deliberately … 0021 ships no `DELETE` trigger and no module issues
+`DELETE FROM pilot_events`". That sentence described 0021 and is now false; it
+is not edited, and it will stay wrong.
+
+The reason is the migration rule that outranks a stale comment:
+`db/migrations/checksums.txt` pins every applied migration's bytes, and
+`db:chain` fails a changed byte as `migration_checksum_changed`. Rewriting a
+landed migration's header would mean either editing an applied migration or
+silently dropping its checksum line, and both weaken the guarantee the checksum
+exists to give: what 0021 actually shipped, and what a database that applied it
+actually contains. Read this document — not 0021's header — for the current
+state, and read 0022 for the floor that replaced it.
+
 ## The prune
 
 `apps/api/src/analytics/pilot-events-retention.ts` mirrors

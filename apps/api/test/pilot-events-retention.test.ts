@@ -7,7 +7,12 @@ import {
   pilotEventRetentionWindowMs,
   pilotEventsRetentionEnabled,
 } from "../src/analytics/pilot-events-retention.ts";
-import wranglerConfig from "../../web/wrangler.jsonc?raw";
+// Every committed Worker config, so a new `wrangler*.jsonc` that declares the
+// events flags cannot escape the coupling rule below.
+const wranglerConfigs: Record<string, string> = import.meta.glob(
+  "../../web/wrangler*.jsonc",
+  { query: "?raw", import: "default", eager: true },
+);
 
 // 0022's retention floor and the scheduled prune, driven against the real
 // schema. The "12 months old" fixture is `Date.now() - 366 * day` and there is no
@@ -20,6 +25,36 @@ import wranglerConfig from "../../web/wrangler.jsonc?raw";
 const database: SecurityDatabase = env.DB;
 const day = 86_400_000;
 const session = "session_retention_0123456";
+
+const eventsFlags = [
+  "PILOT_EVENTS_ENABLED",
+  "PILOT_SERVER_EVENTS_ENABLED",
+] as const;
+const retentionFlag = "PILOT_EVENTS_RETENTION_ENABLED";
+
+/** A quoted var value from a `wrangler*.jsonc`, comments and all. */
+function declaredFlag(source: string, name: string): string | null {
+  const match = new RegExp(`"${name}"\\s*:\\s*"([^"]*)"`).exec(source);
+  return match ? match[1] : null;
+}
+
+/**
+ * The coupling rule, as a pure function so it can be driven by inputs that do
+ * not exist in the repository. An events flag set to "true" while
+ * `PILOT_EVENTS_RETENTION_ENABLED` is not "true" - including absent - is a
+ * violation: enabling event capture would promise a twelve-month period that
+ * nothing delivers.
+ */
+function couplingViolations(source: string): string[] {
+  const retention = declaredFlag(source, retentionFlag);
+  if (retention === "true") return [];
+  return eventsFlags
+    .filter((name) => declaredFlag(source, name) === "true")
+    .map(
+      (name) =>
+        `${name} is "true" but ${retentionFlag} is ${String(retention)}`,
+    );
+}
 
 const columns = [
   "source",
@@ -355,32 +390,57 @@ describe("PILOT_EVENTS_RETENTION_ENABLED is an exact-string gate", () => {
     expect(pilotEventsRetentionEnabled({})).toBe(false);
   });
 
-  it("refuses an events flag in wrangler.jsonc without the retention flag", () => {
-    // Read from the committed configuration, not from a copy: the retention job
-    // is the only thing that delivers the 12-month period, so enabling event
-    // capture while it is off would promise a period nothing enforces.
-    function flag(name: string): string | null {
-      const match = new RegExp(`"${name}"\\s*:\\s*"([^"]*)"`).exec(
-        wranglerConfig,
-      );
-      return match ? match[1] : null;
-    }
+  it("refuses an events flag in every wrangler config without the retention flag", () => {
+    // Read from the committed configurations, not from copies: the retention
+    // job is the only thing that delivers the 12-month period, so enabling event
+    // capture while it is off would promise a period nothing enforces. The scan
+    // covers every `wrangler*.jsonc`, and a config that declares no events flag
+    // is out of scope by construction rather than by being missed.
+    const covered = Object.entries(wranglerConfigs).filter(([, source]) =>
+      eventsFlags.some((name) => declaredFlag(source, name) !== null),
+    );
+    expect(covered.length).toBeGreaterThan(0);
+    expect(covered.map(([file]) => file).join("\n")).toContain(
+      "wrangler.jsonc",
+    );
 
-    const retention = flag("PILOT_EVENTS_RETENTION_ENABLED");
-    expect(retention).not.toBeNull();
-    // No flag is enabled in this milestone; enabling one is an owner decision
-    // that changes this line on purpose.
-    expect(retention).toBe("false");
-
-    for (const name of ["PILOT_EVENTS_ENABLED", "PILOT_SERVER_EVENTS_ENABLED"]) {
-      const value = flag(name);
-      expect(value, `${name} must be declared`).not.toBeNull();
-      if (value === "true") {
-        expect(
-          retention,
-          `${name} is "true" but PILOT_EVENTS_RETENTION_ENABLED is ${retention}`,
-        ).toBe("true");
-      }
+    for (const [file, source] of covered) {
+      expect(couplingViolations(source), file).toEqual([]);
+      // No flag is enabled in this milestone; enabling one is an owner decision
+      // that changes this assertion on purpose.
+      expect(declaredFlag(source, retentionFlag), file).toBe("false");
     }
+  });
+
+  it("proves the coupling rule bites on an enabled events flag", () => {
+    // The committed configs all hold the rule, so the rule itself would never be
+    // exercised by them alone. These inputs do not exist in the repository on
+    // purpose: if `couplingViolations` is loosened to accept anything, the two
+    // violation cases fail.
+    expect(
+      couplingViolations(
+        `"PILOT_EVENTS_ENABLED": "true"`,
+      ),
+    ).toEqual([
+      'PILOT_EVENTS_ENABLED is "true" but PILOT_EVENTS_RETENTION_ENABLED is null',
+    ]);
+
+    expect(
+      couplingViolations(
+        `"PILOT_EVENTS_RETENTION_ENABLED": "false",
+         "PILOT_SERVER_EVENTS_ENABLED": "true"`,
+      ),
+    ).toEqual([
+      'PILOT_SERVER_EVENTS_ENABLED is "true" but PILOT_EVENTS_RETENTION_ENABLED is false',
+    ]);
+
+    // The one shape the rule must accept: both events flags on, retention on.
+    expect(
+      couplingViolations(
+        `"PILOT_EVENTS_RETENTION_ENABLED": "true",
+         "PILOT_EVENTS_ENABLED": "true",
+         "PILOT_SERVER_EVENTS_ENABLED": "true"`,
+      ),
+    ).toEqual([]);
   });
 });
