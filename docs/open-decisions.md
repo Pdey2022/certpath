@@ -63,7 +63,7 @@ need an owner or architect decision.
 ## Owner decisions still open
 
 - Launch market's tax, consumer, refund and invoicing obligations (currency is USD).
-- Final brand, domain, and canonical production origin.
+- Domain and canonical production origin (brand decided: CertPath, 18 November 2026).
 - Exam launch order beyond CISSP (CISM is prepared but not scheduled).
 - Transactional email provider (Cloudflare Email Workers covers inbound only).
 - Device and session policy (Milestone 5) - required before paid launch.
