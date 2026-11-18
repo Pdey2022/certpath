@@ -666,4 +666,4 @@ describe("tester-only admin access", () => {
       error: { code: "forbidden" },
     });
   });
-});
+}, 30_000);

@@ -60,6 +60,56 @@ function tokenDigestFor(index: number): string {
 }
 
 describe("0023 over existing tester-gate sessions", () => {
+  // This test is deliberately first: it is the only one that exercises the
+  // migration's own triggers rather than the copy the next test restores by
+  // hand. Neutralising `app_sessions_no_tester_gate_*` in `0023` turns it red.
+  it("refuses the retired label with the migration's own trigger", async () => {
+    const identity = await createTestIdentity(database);
+    await grantTestRole(database, identity.userId, "global_admin");
+
+    await expect(
+      database
+        .prepare(
+          `INSERT INTO app_sessions (
+             token_digest, user_id, created_at, expires_at, mfa_method,
+             mfa_verified_at
+           ) VALUES (?, ?, ?, ?, 'tester-gate', ?)`,
+        )
+        .bind(
+          tokenDigestFor(0x11),
+          identity.userId,
+          testNow,
+          testNow + 60 * 60 * 1000,
+          testNow,
+        )
+        .run(),
+    ).rejects.toThrow(/tester-gate assurance is retired/);
+
+    await database
+      .prepare(
+        `INSERT INTO app_sessions (
+           token_digest, user_id, created_at, expires_at, mfa_method,
+           mfa_verified_at
+         ) VALUES (?, ?, ?, ?, 'totp', ?)`,
+      )
+      .bind(
+        tokenDigestFor(0x12),
+        identity.userId,
+        testNow,
+        testNow + 60 * 60 * 1000,
+        testNow,
+      )
+      .run();
+    await expect(
+      database
+        .prepare(
+          `UPDATE app_sessions SET mfa_method = 'tester-gate' WHERE token_digest = ?`,
+        )
+        .bind(tokenDigestFor(0x12))
+        .run(),
+    ).rejects.toThrow(/tester-gate assurance is retired/);
+  });
+
   it("keeps the row, refuses the assurance and blocks a new label", async () => {
     const identity = await createTestIdentity(database);
     await grantTestRole(database, identity.userId, "global_admin");
@@ -102,35 +152,6 @@ describe("0023 over existing tester-gate sessions", () => {
     expect(
       await authorizeStaffSession(database, legacyDigest, testNow, policy),
     ).toEqual({ allowed: false, reason: "mfa-assurance-unsupported" });
-
-    // 3. And the label can never be minted again.
-    await expect(
-      database
-        .prepare(
-          `INSERT INTO app_sessions (
-             token_digest, user_id, created_at, expires_at, mfa_method,
-             mfa_verified_at
-           ) VALUES (?, ?, ?, ?, 'tester-gate', ?)`,
-        )
-        .bind(
-          tokenDigestFor(0xb2),
-          identity.userId,
-          testNow,
-          testNow + 60 * 60 * 1000,
-          testNow,
-        )
-        .run(),
-    ).rejects.toThrow(/tester-gate assurance is retired/);
-
-    // 4. Nor can an existing row be relabelled back to it.
-    await expect(
-      database
-        .prepare(
-          `UPDATE app_sessions SET mfa_method = 'tester-gate' WHERE token_digest = ?`,
-        )
-        .bind(legacyDigest)
-        .run(),
-    ).rejects.toThrow(/tester-gate assurance is retired/);
   });
 
   it("leaves every session in place when the label is absent", async () => {

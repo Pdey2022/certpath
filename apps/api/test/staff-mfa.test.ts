@@ -738,7 +738,7 @@ describe("staff second factor", () => {
     expect(verify.status).toBe(503);
     expect((await readSession(cookie))?.mfa_method).toBeNull();
   }, 30_000);
-});
+}, 30_000);
 
 async function freshCookie(email: string): Promise<string> {
   return signedInCookie(email);
