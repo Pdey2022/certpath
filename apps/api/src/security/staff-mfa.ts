@@ -231,7 +231,7 @@ export async function enrolStaffTotp(
     ok: true,
     secret,
     otpauthUri: otpauthUri(
-      "Exam Prep",
+      "CertPath",
       options.email ?? `staff-${userId}`,
       secret,
     ),

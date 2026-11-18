@@ -11,7 +11,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Second factor | Exam Prep" },
+    { title: "Second factor | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

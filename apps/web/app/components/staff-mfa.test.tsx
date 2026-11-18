@@ -116,7 +116,7 @@ test("enrols with a ticket, shows the secret once, then ten recovery codes", asy
       return jsonResponse({
         secret: "JBSWY3DPEHPK3PXPJBSWY3DP",
         otpauthUri:
-          "otpauth://totp/Exam%20Prep:owner%40example.test?secret=JBSWY3DPEHPK3PXPJBSWY3DP&issuer=Exam%20Prep",
+          "otpauth://totp/CertPath:owner%40example.test?secret=JBSWY3DPEHPK3PXPJBSWY3DP&issuer=CertPath",
         keyVersion: 1,
       });
     }

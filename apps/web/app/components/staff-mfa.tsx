@@ -107,7 +107,7 @@ export function StaffMfaVerify() {
       </a>
       <header className="protected-editor-header">
         <Link className="brand" to="/">
-          Exam Prep
+          CertPath
         </Link>
         <span>Tester-only staff area</span>
       </header>
@@ -284,7 +284,7 @@ export function StaffMfaEnrol() {
       </a>
       <header className="protected-editor-header">
         <Link className="brand" to="/">
-          Exam Prep
+          CertPath
         </Link>
         <span>Tester-only staff area</span>
       </header>
