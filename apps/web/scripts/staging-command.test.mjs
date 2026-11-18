@@ -16,6 +16,7 @@ import {
   STAGING_PILOT_FLAGS,
   assertStagingDeployConfig,
   readStagingGeneratedConfig,
+  wranglerArgs,
 } from "./lib/staging-deploy.mjs";
 
 const CLI = fileURLToPath(new URL("./staging-command.mjs", import.meta.url));
@@ -30,6 +31,7 @@ function stagingConfig() {
     name: "learner-auth-staging",
     main: "index.js",
     compatibility_date: "2026-11-10",
+    triggers: { crons: ["*/5 * * * *"] },
     vars: {
       PILOT_EVENTS_ENABLED: "false",
       PILOT_SERVER_EVENTS_ENABLED: "false",
@@ -63,6 +65,12 @@ function withDatabase(entry) {
   return config;
 }
 
+function withCrons(crons) {
+  const config = stagingConfig();
+  config.triggers = { crons };
+  return config;
+}
+
 function workspace(t, config) {
   const directory = mkdtempSync(path.join(tmpdir(), "certpath-staging-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -83,11 +91,18 @@ function workspace(t, config) {
   return { directory, generated };
 }
 
-function runCli(directory, args) {
+function runCli(directory, args, envOverrides = {}) {
+  // The parent environment is made hermetic on purpose: CLOUDFLARE_ACCOUNT_ID is
+  // deleted, because a value inherited from the developer's shell would make
+  // every deploy case refuse with account_env_mismatch, and a test that passes
+  // only on a clean machine is not a test. The account cases set it explicitly.
+  const env = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CI: "1" };
+  delete env.CLOUDFLARE_ACCOUNT_ID;
+  Object.assign(env, envOverrides);
   const result = spawnSync(process.execPath, [CLI, ...args], {
     cwd: directory,
     encoding: "utf8",
-    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CI: "1" },
+    env,
     maxBuffer: 64 * 1024 * 1024,
   });
   return {
@@ -141,6 +156,16 @@ test("the staging deploy guard refuses every artefact that is not the staging bu
       }),
     },
     {
+      // The Worker reads env.DB; a right database under another binding name is
+      // still a mismatch.
+      code: "staging_database_mismatch",
+      config: withDatabase({
+        binding: "STAGING_DB",
+        database_name: "certpath-learner-staging",
+        database_id: STAGING_ID,
+      }),
+    },
+    {
       code: "staging_database_mismatch",
       config: {
         ...stagingConfig(),
@@ -174,6 +199,25 @@ test("the staging deploy guard refuses every artefact that is not the staging bu
     {
       code: "staging_pilot_flag_enabled",
       config: withVars({ PILOT_EVENTS_ENABLED: "true" }),
+    },
+    {
+      code: "staging_schedule_mismatch",
+      // wrangler.pilot.jsonc / the local config carry no cron; a staging
+      // deploy that ships no schedule is not the artefact this runbook checks
+      // afterwards ("cron listed").
+      config: withCrons([]),
+    },
+    {
+      code: "staging_schedule_mismatch",
+      config: withCrons(["*/5 * * * *", "0 * * * *"]),
+    },
+    {
+      code: "staging_schedule_mismatch",
+      config: (() => {
+        const config = stagingConfig();
+        delete config.triggers;
+        return config;
+      })(),
     },
     {
       code: "staging_pilot_flag_enabled",
@@ -221,11 +265,15 @@ test("dry-run deploys nothing and reports the target it verified", (t) => {
   assert.equal(result.status, 0, result.output);
   assert.match(
     result.output,
-    /Verified staging deploy target: worker learner-auth-staging, database certpath-learner-staging/,
+    /Verified staging deploy target: worker learner-auth-staging, database certpath-learner-staging \(binding DB\)/,
   );
+  assert.match(result.output, /Verified cron schedule: \*\/5 \* \* \* \*/);
   for (const name of STAGING_PILOT_FLAGS) {
     assert.match(result.output, new RegExp(`Verified ${name}="false"`));
   }
+  // No --expect-account and no CLOUDFLARE_ACCOUNT_ID: the command says the
+  // account was not asserted rather than implying it was.
+  assert.match(result.output, /Account: not asserted /);
   assert.match(result.output, /--dry-run: exiting now/);
   // A dry-run must not publish. Wrangler names the published Worker and its URL
   // on a real deploy; neither may appear.
@@ -259,8 +307,95 @@ test("an unknown action is a usage error, exit 2", (t) => {
   assert.equal(result.status, 2, result.output);
   assert.match(
     result.output,
-    /Usage: staging-command\.mjs \[build\|deploy\|dry-run\] \[--allow-pilot-flags\]/,
+    /Usage: staging-command\.mjs \[build\|deploy\|dry-run\] \[--expect-account <account id>\] \[--allow-pilot-flags\]/,
   );
+});
+
+test("a mistyped option is refused, not ignored", (t) => {
+  // A `--expect-acount` typo must not look like a pinned deploy: unknown
+  // arguments are a usage error before the guard or Wrangler runs.
+  const { directory } = workspace(t, stagingConfig());
+
+  const result = runCli(directory, ["dry-run", "--expect-acount", "abc"]);
+
+  assert.equal(result.status, 2, result.output);
+  assert.match(result.output, /error unknown_argument: /);
+  assert.doesNotMatch(result.output, /wrangler \d+\.\d+\.\d+/);
+});
+
+test("a CLOUDFLARE_ACCOUNT_ID in the parent environment is never deployed to silently", (t) => {
+  // ARC B1. Wrangler prefers CLOUDFLARE_ACCOUNT_ID over its stored selection,
+  // so a stale value in the operator's shell would deploy learner-auth-staging
+  // into that account, bound to a database id that does not exist there. The
+  // assertion is local: it must refuse before Wrangler is spawned.
+  const { directory } = workspace(t, stagingConfig());
+  const stale = "11111111-2222-4333-8444-555555555555";
+  const expected = "99999999-8888-4777-8666-555555555555";
+
+  const unconfirmed = runCli(directory, ["dry-run"], {
+    CLOUDFLARE_ACCOUNT_ID: stale,
+  });
+  assert.equal(unconfirmed.status, 1, unconfirmed.output);
+  assert.match(unconfirmed.output, /error account_env_mismatch: /);
+  assert.match(unconfirmed.output, /no --expect-account was given/);
+  assert.doesNotMatch(unconfirmed.output, /wrangler \d+\.\d+\.\d+/);
+  assert.doesNotMatch(unconfirmed.output, /⛅/);
+
+  const mismatched = runCli(
+    directory,
+    ["dry-run", "--expect-account", expected],
+    { CLOUDFLARE_ACCOUNT_ID: stale },
+  );
+  assert.equal(mismatched.status, 1, mismatched.output);
+  assert.match(mismatched.output, /error account_env_mismatch: /);
+  assert.doesNotMatch(mismatched.output, /wrangler \d+\.\d+\.\d+/);
+
+  // Confirmed: the environment agrees with the flag, so the run proceeds and
+  // says which account it pinned.
+  const confirmed = runCli(
+    directory,
+    ["dry-run", "--expect-account", expected],
+    { CLOUDFLARE_ACCOUNT_ID: expected },
+  );
+  assert.equal(confirmed.status, 0, confirmed.output);
+  assert.match(
+    confirmed.output,
+    new RegExp(
+      `Account: CLOUDFLARE_ACCOUNT_ID pinned to ${expected} for this run`,
+    ),
+  );
+  assert.match(confirmed.output, /--dry-run: exiting now/);
+});
+
+test("only dry-run carries --dry-run, and only deploy has no guard-free path", () => {
+  // ARC: every CLI test spawns `dry-run`, so dropping `--dry-run` from the
+  // deploy argument list would turn the happy-path test into an upload. The argv
+  // is pure, so it is asserted here without spawning anything.
+  assert.deepEqual(wranglerArgs("deploy"), [
+    "deploy",
+    "-c",
+    "build/server/wrangler.json",
+  ]);
+  assert.deepEqual(wranglerArgs("dry-run"), [
+    "deploy",
+    "--dry-run",
+    "-c",
+    "build/server/wrangler.json",
+  ]);
+  assert.ok(!wranglerArgs("deploy").includes("--dry-run"));
+  assert.ok(wranglerArgs("dry-run").includes("--dry-run"));
+  for (const action of ["deploy", "dry-run"]) {
+    const args = wranglerArgs(action);
+    assert.deepEqual(args.slice(-2), ["-c", "build/server/wrangler.json"]);
+    assert.equal(args[0], "deploy");
+  }
+  // Only the two guarded actions produce an argv at all.
+  for (const action of ["build", undefined, ""]) {
+    assert.throws(
+      () => wranglerArgs(action),
+      (error) => error instanceof CliError && error.code === "unknown_action",
+    );
+  }
 });
 
 test("the guard helper names each refusal code and returns what it verified", () => {
@@ -295,6 +430,8 @@ test("the guard helper names each refusal code and returns what it verified", ()
   assert.deepEqual(verified, {
     worker: "learner-auth-staging",
     database: "certpath-learner-staging",
+    binding: "DB",
+    schedule: ["*/5 * * * *"],
     flags: {
       PILOT_EVENTS_ENABLED: "false",
       PILOT_SERVER_EVENTS_ENABLED: "false",
@@ -302,6 +439,25 @@ test("the guard helper names each refusal code and returns what it verified", ()
     },
     allowPilotFlags: false,
   });
+
+  // The binding and the schedule are refusals, not just return values.
+  assert.throws(
+    () =>
+      assertStagingDeployConfig(
+        withDatabase({
+          binding: "STAGING_DB",
+          database_name: "certpath-learner-staging",
+          database_id: STAGING_ID,
+        }),
+      ),
+    (error) =>
+      error instanceof CliError && error.code === "staging_database_mismatch",
+  );
+  assert.throws(
+    () => assertStagingDeployConfig(withCrons(["0 * * * *"])),
+    (error) =>
+      error instanceof CliError && error.code === "staging_schedule_mismatch",
+  );
 
   const enabled = withVars({ PILOT_EVENTS_ENABLED: "true" });
   assert.throws(

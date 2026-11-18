@@ -10,13 +10,24 @@
 // spawning Wrangler; `readStagingGeneratedConfig` is the only function that
 // touches the file system and it fails closed on a missing or unparseable file.
 import { existsSync, readFileSync } from "node:fs";
-import { CliError, idClass, normalizeDatabaseId } from "./d1-targets.mjs";
+import {
+  CliError,
+  assertExpectedAccountEnv,
+  idClass,
+  normalizeAccountId,
+  normalizeDatabaseId,
+  wranglerEnv,
+} from "./d1-targets.mjs";
 
 export const STAGING_CONFIG_SUFFIX = "/wrangler.staging.jsonc";
 export const STAGING_WORKER_NAME = "learner-auth-staging";
 export const STAGING_DATABASE_NAME = "certpath-learner-staging";
+export const STAGING_D1_BINDING = "DB";
+// The Worker's only schedule. `wrangler.staging.jsonc` declares it in #141; the
+// deploy ships it, so the guard asserts it rather than trusting the claim.
+export const STAGING_CRON = Object.freeze(["*/5 * * * *"]);
 
-// The three flags #141 declared all "false" in wrangler.staging.jsonc. A
+// The flags #141 declared all "false" in wrangler.staging.jsonc. A
 // deployment must not turn any of them on: the retention prune runs against a
 // table whose floor only exists once 0022 is applied, and the funnel events are
 // gated on a consent path that staging does not exercise yet.
@@ -25,6 +36,97 @@ export const STAGING_PILOT_FLAGS = Object.freeze([
   "PILOT_SERVER_EVENTS_ENABLED",
   "PILOT_EVENTS_RETENTION_ENABLED",
 ]);
+
+/**
+ * Parse the arguments of `deploy` / `dry-run`. Unknown arguments are refused
+ * rather than ignored: a mistyped `--expect-acount` would otherwise leave the
+ * deploy unpinned while looking pinned.
+ */
+export function parseDeployOptions(argv) {
+  const options = { allowPilotFlags: false, expectAccount: null };
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--allow-pilot-flags") {
+      options.allowPilotFlags = true;
+      continue;
+    }
+    if (argument === "--expect-account") {
+      const value = argv[index + 1];
+      index += 1;
+      if (!value || value.startsWith("--")) {
+        throw new CliError(
+          "missing_option_value",
+          "--expect-account needs an account id; it is the only source of the expected id",
+          2,
+        );
+      }
+      options.expectAccount = value;
+      continue;
+    }
+    throw new CliError(
+      "unknown_argument",
+      `Unknown argument ${JSON.stringify(argument)}; usage: staging-command.mjs <build|deploy|dry-run> [--expect-account <account id>] [--allow-pilot-flags]`,
+      2,
+    );
+  }
+  return options;
+}
+
+/**
+ * The child environment for Wrangler, and the account the deploy is pinned to.
+ *
+ * Wrangler resolves the target account from the config, then
+ * `CLOUDFLARE_ACCOUNT_ID`, then a stored selection. An id that is only in the
+ * operator's shell therefore wins over anything the operator believes they
+ * selected, and the deploy lands in that account — bound to a database id that
+ * does not exist there. So a set `CLOUDFLARE_ACCOUNT_ID` is never accepted
+ * silently: it must be confirmed by `--expect-account`, and the child gets that
+ * id pinned (`wranglerEnv`), which removes both fallbacks. The rule and its
+ * helpers are the ones `d1-account-preflight.mjs` already uses.
+ */
+export function deployEnv({ parentEnv = {}, expectAccount = null }) {
+  const envAccountId = normalizeAccountId(parentEnv.CLOUDFLARE_ACCOUNT_ID);
+  const expected = normalizeAccountId(expectAccount);
+
+  if (expected === "") {
+    if (envAccountId !== "") {
+      throw new CliError(
+        "account_env_mismatch",
+        `CLOUDFLARE_ACCOUNT_ID is set to ${envAccountId} and no --expect-account was given; Wrangler prefers the environment variable, so the deploy could land in an account nobody asserted. Pass --expect-account <account id> (or unset the variable) and run again`,
+        1,
+      );
+    }
+    // Nothing to pin and nothing to contradict: Wrangler uses its stored
+    // selection, and the command says so on stdout.
+    return { env: { ...parentEnv }, expectAccount: null, envAccountId: null };
+  }
+
+  // Refuses account_env_mismatch when the environment variable disagrees.
+  assertExpectedAccountEnv({ expectAccount: expected, envAccountId });
+  return {
+    env: wranglerEnv({ parentEnv, expectAccount: expected }),
+    expectAccount: expected,
+    envAccountId: envAccountId === "" ? null : envAccountId,
+  };
+}
+
+/**
+ * The Wrangler argument list, pure so the `--dry-run` that keeps a test run
+ * local cannot be dropped without a test failing. Only `deploy` may upload.
+ */
+export function wranglerArgs(action) {
+  if (action !== "deploy" && action !== "dry-run") {
+    throw new CliError(
+      "unknown_action",
+      `wranglerArgs received ${JSON.stringify(action)}; only deploy and dry-run spawn Wrangler`,
+      2,
+    );
+  }
+  const config = ["-c", "build/server/wrangler.json"];
+  return action === "deploy"
+    ? ["deploy", ...config]
+    : ["deploy", "--dry-run", ...config];
+}
 
 /**
  * Read the generated config, refusing to guess when it is unusable. A missing
@@ -114,6 +216,17 @@ export function assertStagingDeployConfig(
       1,
     );
   }
+  const binding =
+    entry && typeof entry === "object" && typeof entry.binding === "string"
+      ? entry.binding
+      : "";
+  if (binding !== STAGING_D1_BINDING) {
+    throw new CliError(
+      "staging_database_mismatch",
+      `The generated config names the D1 binding ${JSON.stringify(binding)}, not ${STAGING_D1_BINDING}; the Worker reads env.DB, so a differently named binding is a database mismatch even when the database is right`,
+      1,
+    );
+  }
   // `idClass` is the shared rule from lib/d1-targets.mjs: it applies
   // PLACEHOLDER_DATABASE_ID and treats a missing id as a placeholder, so this
   // guard fails closed instead of shipping an artefact whose id is not a
@@ -122,6 +235,22 @@ export function assertStagingDeployConfig(
     throw new CliError(
       "staging_database_placeholder",
       `The generated config binds ${JSON.stringify(normalizeDatabaseId(entry.database_id))} as the ${STAGING_DATABASE_NAME} database_id, which is the all-zero placeholder; record the provisioned id (docs/pilot-provisioning.md) before deploy:staging`,
+      1,
+    );
+  }
+
+  // The cron is part of what the deploy ships, so it is asserted here rather
+  // than left to the operator's memory: a staging Worker with the retention
+  // schedule and no floor, or with someone's probe schedule, is not this target.
+  const crons = generatedConfig.triggers?.crons;
+  const schedule = Array.isArray(crons) ? crons : [];
+  if (
+    schedule.length !== STAGING_CRON.length ||
+    STAGING_CRON.some((cron, index) => schedule[index] !== cron)
+  ) {
+    throw new CliError(
+      "staging_schedule_mismatch",
+      `The generated config carries the cron schedule ${JSON.stringify(schedule)}, not ${JSON.stringify([...STAGING_CRON])}; wrangler.staging.jsonc declares exactly that one schedule (docs/pilot-provisioning.md)`,
       1,
     );
   }
@@ -155,6 +284,8 @@ export function assertStagingDeployConfig(
   return {
     worker: generatedConfig.name,
     database: databaseName,
+    binding,
+    schedule: [...schedule],
     flags,
     allowPilotFlags,
   };

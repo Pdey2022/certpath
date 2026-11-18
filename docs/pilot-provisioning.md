@@ -397,9 +397,17 @@ deployment has a name, a guard and a rollback.
 
 ```powershell
 npm run build:staging     # writes build/server/wrangler.json and asserts the entry
-npm run dry-run:staging   # optional: the guard plus a local bundle; uploads nothing
-npm run deploy:staging    # the guard, then wrangler deploy -c build/server/wrangler.json
+Set-Location apps\web
+npm run dry-run:staging -- --expect-account <account id>   # guards + local bundle; uploads nothing
+npm run deploy:staging -- --expect-account <account id>    # the guards, then wrangler deploy -c build/server/wrangler.json
+Set-Location ..\..
 ```
+
+`--expect-account` is passed from `apps/web`, where the CLI runs: the root
+`npm run deploy:staging` delegates to `@certpath/web` and a trailing
+`-- --expect-account …` stops at the delegating `npm`, exactly as it does for
+`--allow-pilot-flags` (below). From the root the equivalent is
+`npm run deploy:staging --workspace @certpath/web -- --expect-account <account id>`.
 
 `deploy:staging` and `dry-run:staging` read `build/server/wrangler.json` —
 resolved from the working directory, exactly as `-c build/server/wrangler.json`
@@ -410,18 +418,36 @@ holds:
 |---|---|
 | it selected `wrangler.staging.jsonc` | `staging_wrong_config` |
 | the Worker name is `learner-auth-staging` | `staging_wrong_worker` |
-| exactly one `d1_databases` entry, named `certpath-learner-staging` | `staging_database_mismatch` |
+| exactly one `d1_databases` entry, binding `DB`, named `certpath-learner-staging` | `staging_database_mismatch` |
 | its `database_id` is present and is not the all-zero placeholder | `staging_database_placeholder` |
+| `triggers.crons` is exactly `["*/5 * * * *"]` | `staging_schedule_mismatch` |
 | `PILOT_EVENTS_ENABLED`, `PILOT_SERVER_EVENTS_ENABLED` and `PILOT_EVENTS_RETENTION_ENABLED` are each the string `"false"` | `staging_pilot_flag_enabled` |
 | all three flags are present at all | `staging_pilot_flag_missing` |
 | `build/server/wrangler.json` exists | `staging_config_missing` |
 | it parses as a JSON object | `staging_config_unparsed` |
 
-Exit 2 is a usage error (an unknown action). The guard prints what it verified, so
-the operator can see the target and the flag values that were checked:
+The **account** is asserted in the same breath, before any spawn.
+`CLOUDFLARE_ACCOUNT_ID` is never accepted silently: Wrangler prefers it over its
+stored selection, so an id left in the shell would deploy `learner-auth-staging`
+into *that* account, bound to a `database_id` that does not exist there. If the
+variable is set, `--expect-account <account id>` is required and must agree with
+it; the child Wrangler process is then pinned to that id (`wranglerEnv`), which
+removes both fallbacks. Missing or disagreeing is `account_env_mismatch`, exit 1,
+before Wrangler runs:
+
+| Rule the environment must satisfy | Refusal code |
+|---|---|
+| `CLOUDFLARE_ACCOUNT_ID` set and `--expect-account` absent | `account_env_mismatch` |
+| `CLOUDFLARE_ACCOUNT_ID` set and different from `--expect-account` | `account_env_mismatch` |
+| an argument other than `--expect-account` / `--allow-pilot-flags` | `unknown_argument` (exit 2) |
+
+Exit 2 is a usage error (an unknown action or a missing option value). The guards
+print what they verified, so the operator can see the target, the schedule, the
+flag values and the account that was checked:
 
 ```
-Verified staging deploy target: worker learner-auth-staging, database certpath-learner-staging
+Verified staging deploy target: worker learner-auth-staging, database certpath-learner-staging (binding DB)
+Verified cron schedule: */5 * * * *
 Verified PILOT_EVENTS_ENABLED="false"
 Verified PILOT_SERVER_EVENTS_ENABLED="false"
 Verified PILOT_EVENTS_RETENTION_ENABLED="false"
@@ -450,11 +476,18 @@ artefact the guard checked. Every refusal and the accepted path are covered in
 
 ### Preconditions
 
-All six must hold. Any one missing is a stop, not a retry.
+All seven must hold. Any one missing is a stop, not a retry.
 
-1. **`npm run build:staging` exited 0** in this checkout after the last change.
+1. **The account is asserted.** Run with `--expect-account <account id>` — the
+   Certpath account the database was created in (#134) — and make sure a
+   `CLOUDFLARE_ACCOUNT_ID` in the shell either agrees with it or is removed. The
+   command refuses before spawning Wrangler otherwise (`account_env_mismatch`),
+   and when nothing is asserted it prints
+   `Account: not asserted (...)`, which is the line to notice before deploying
+   into whatever Wrangler has stored.
+2. **`npm run build:staging` exited 0** in this checkout after the last change.
    It asserts the bundle entry is `workers/staging-app.ts`.
-2. **The staging database has 22 applied migrations**, last
+3. **The staging database has 22 applied migrations**, last
    `0022_pilot_events_retention.sql` (§Pre-enablement step). The Worker carries a
    `*/5 * * * *` cron; shipping the prune before the floor exists would run a job
    against a table with no floor. Re-read the ledger:
@@ -466,9 +499,9 @@ All six must hold. Any one missing is a stop, not a retry.
    Set-Location ..\..
    ```
 
-3. **`CSRF_HMAC_SECRET` is set** on the Worker, at least 32 random bytes. Without
+4. **`CSRF_HMAC_SECRET` is set** on the Worker, at least 32 random bytes. Without
    it `/api/auth/session/csrf` and `/api/auth/session/logout` answer `503`.
-4. **`STAGING_TESTER_IPS` is set** to the tester's egress IP list. Until it is,
+5. **`STAGING_TESTER_IPS` is set** to the tester's egress IP list. Until it is,
    every request answers `503`; with it, an address not on the list answers
    `403`. Both are hosted secrets, never files or arguments:
 
@@ -482,18 +515,23 @@ All six must hold. Any one missing is a stop, not a retry.
    `wrangler secret put` prompts for the value. **Neither secret is set today**,
    and setting either is its own owner decision, not part of `deploy:staging`.
 
-5. **The three `PILOT_*` flags are `"false"`** in `apps/web/wrangler.staging.jsonc`,
+6. **The three `PILOT_*` flags are `"false"`** in `apps/web/wrangler.staging.jsonc`,
    and so in the built copy. The guard asserts the built copy, which is what
    ships.
-6. **`npm run dry-run:staging` exited 0** and printed the verified lines above.
-   It bundles locally and uploads nothing.
+7. **`npm run dry-run:staging -- --expect-account <account id>` exited 0** (from
+   `apps/web`) and printed the verified lines above, with the account line naming
+   the id it pinned. It bundles locally and uploads nothing.
 
 ### Afterwards: what to check
 
+The read after the deploy names the Worker through `wrangler.staging.jsonc`, not
+through the built config. `build/server/wrangler.json` is a mutable artefact —
+any later `build`, `build:pilot` or `build:site` overwrites it with another
+target's Worker name — so `status`, `rollback` and `delete` must not be pointed
+at it:
+
 ```powershell
-Set-Location apps\web
-npx wrangler deployments status -c build/server/wrangler.json
-Set-Location ..\..
+npx wrangler deployments status -c apps/web/wrangler.staging.jsonc
 ```
 
 Expected: exactly one deployment for `learner-auth-staging`, created by this run.
@@ -530,18 +568,14 @@ A deploy is a remote write and needs the owner's approval like every other step.
 The guard proves the target, not the authorisation to run the command.
 
 ```powershell
-Set-Location apps\web
-npx wrangler rollback -c build/server/wrangler.json
-Set-Location ..\..
+npx wrangler rollback -c apps/web/wrangler.staging.jsonc
 ```
 
 `rollback` returns to the previous version and needs one to exist, so on a first
 deploy there is nothing to roll back to; the rollback is then a delete:
 
 ```powershell
-Set-Location apps\web
-npx wrangler delete -c build/server/wrangler.json
-Set-Location ..\..
+npx wrangler delete -c apps/web/wrangler.staging.jsonc
 ```
 
 `delete` removes the Worker, its cron and its secrets. The **database is
