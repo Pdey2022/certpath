@@ -1,6 +1,6 @@
 # Exam preparation platform — design specification v0.2
 
-Status: confirmed requirements with proposals explicitly labelled, 10 November 2026. Working label: Exam Prep; final brand undecided.
+Status: confirmed requirements with proposals explicitly labelled, 10 November 2026. Brand: CertPath (owner decision, 18 November 2026, PR #161); domain and canonical production origin undecided.
 
 ## 1. Product contract
 
@@ -26,7 +26,7 @@ Every page defines loading, empty, error, offline, expired-access, and permissio
 
 One web app supports mobile, tablet and desktop. Desktop uses a sidebar and complementary dashboard columns; questions retain a comfortable reading width. Breakpoints follow content fit rather than device detection. Verify Chrome, Edge, Firefox and Safari, including Android Chrome and iOS Safari; record supported versions at release. Include 320px, 390px, 768px, 1024px and 1440px viewports plus zoom/text resizing. Do not assume a smaller desktop browser behaves like a phone. Complex admin editing remains usable at narrow widths.
 
-The interactive demo is a visual/navigation reference using synthetic data and the unapproved name certpath. It is not implemented authentication, payments, secure saving, or adaptive testing. Final branding is open. PWA installation is optional; offline exam taking is not initial scope.
+The interactive demo is a visual/navigation reference using synthetic data and the approved brand CertPath. It is not implemented authentication, payments, secure saving, or adaptive testing. PWA installation is optional; offline exam taking is not initial scope.
 
 ## 3. Learner screen map
 
@@ -40,7 +40,7 @@ Top: greeting, selected certification, optional target exam date. Primary card: 
 
 Example mobile layout:
 
-    Exam Prep                         Account
+    CertPath                          Account
     Your next step
     CISSP · Target exam: 18 June
     Continue your practice

@@ -204,3 +204,12 @@ test("Manager permission recovery and content navigation preserve the preview qu
     "/admin/modules?demoRole=manager",
   );
 });
+
+test("workspace shell brands the product as CertPath", async () => {
+  renderPractice();
+  await screen.findByText("Not saved yet");
+  assert.equal(
+    document.querySelector(".workspace-header .brand")?.textContent,
+    "CertPath",
+  );
+});

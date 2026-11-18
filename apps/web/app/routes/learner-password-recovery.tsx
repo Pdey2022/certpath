@@ -11,7 +11,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Reset learner password | Exam Prep" },
+    { title: "Reset learner password | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

@@ -11,7 +11,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Learning dashboard | Exam Prep" },
+    { title: "Learning dashboard | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

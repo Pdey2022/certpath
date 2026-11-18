@@ -113,7 +113,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Protected question editor | Exam Prep" },
+    { title: "Protected question editor | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }
@@ -1254,7 +1254,7 @@ export default function AdminQuestionEditor() {
     <main className="protected-editor-page">
       <a className="skip-link" href="#protected-editor-main">Skip to editor</a>
       <header className="protected-editor-header">
-        <a className="brand" href="/">Exam Prep</a>
+        <a className="brand" href="/">CertPath</a>
         <span>Protected staff content</span>
       </header>
       <div id="protected-editor-main" className="protected-editor-main">

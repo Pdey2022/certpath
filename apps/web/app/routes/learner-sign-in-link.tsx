@@ -12,7 +12,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Confirm sign-in | Exam Prep" },
+    { title: "Confirm sign-in | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

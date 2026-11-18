@@ -11,7 +11,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Staff sign in | Exam Prep" },
+    { title: "Staff sign in | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }
