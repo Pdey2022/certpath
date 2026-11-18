@@ -1,0 +1,1091 @@
+import { env } from "cloudflare:workers";
+import { beforeAll, describe, expect, it } from "vitest";
+import { createApi } from "../src/index.ts";
+import type {
+  D1PreparedStatement,
+  D1Value,
+  SecurityDatabase,
+} from "../src/security/database.ts";
+import { sessionDigest } from "../src/security/http-session.ts";
+import { hashLearnerPassword } from "../src/security/password-hashing.ts";
+import {
+  confirmStaffTotp,
+  redeemStaffRecoveryCode,
+  resetStaffMfa,
+} from "../src/security/staff-mfa.ts";
+import {
+  createEnrolmentTicket,
+  openTotpSeed,
+  readSealKey,
+  sha256Hex,
+  totpCodeAt,
+  totpStepAt,
+} from "../src/security/totp.ts";
+import { createTestIdentity, grantTestRole } from "./factories.ts";
+
+// The 5F test plan, one test per promise:
+//
+//   sign-in mints no assurance            enrolment requires a ticket
+//   verify upgrades the session in place  enrolment cannot overwrite a factor
+//   verify rejects a replayed step        confirm returns ten codes once
+//   verify accepts t-1, rejects t-2       recovery code is single-use
+//   verify refuses a revoked credential   recovery mints no assurance
+//   reset by a Global Admin               a Manager cannot reset
+//
+// Each one is written so that removing its guard turns it red. The replay test
+// is the important one: it replays an observed code on a *second* session, so
+// the assertion is about access, not just about a status code.
+
+const database: SecurityDatabase = env.DB;
+const origin = "https://localhost";
+const csrfSecret = "local-worker-test-csrf-secret-with-enough-entropy";
+const staffRateSecret =
+  "local-worker-test-staff-rate-limit-secret-with-enough-entropy";
+const sealKey = "local-worker-test-staff-mfa-seal-key-with-enough-entropy";
+const staffPassword = "synthetic-tester-password-with-enough-length";
+const testerIps = Array.from({ length: 200 }, (_, index) => `203.0.113.${index + 10}`);
+const testerIp = testerIps[0]!;
+let ipIndex = 0;
+
+function nextIp(): string {
+  const ip = testerIps[ipIndex % testerIps.length]!;
+  ipIndex += 1;
+  return ip;
+}
+
+let clock = Date.now();
+const application = createApi(fetch, () => clock);
+
+const bindings: Record<string, unknown> = {
+  DB: database,
+  PUBLIC_SITE_ORIGIN: origin,
+  CSRF_HMAC_SECRET: csrfSecret,
+  STAFF_RATE_LIMIT_HMAC_SECRET: staffRateSecret,
+  STAFF_MFA_MAX_AGE_MS: String(8 * 60 * 60 * 1000),
+  STAFF_MFA_ALLOWED_METHODS: "totp",
+  STAFF_MFA_SEAL_KEY: sealKey,
+  ADMIN_TESTER_IPS: testerIps.join(","),
+};
+
+let passwordHash = "";
+
+beforeAll(async () => {
+  passwordHash = await hashLearnerPassword(staffPassword);
+});
+
+function url(path: string): string {
+  return `${origin}/api${path}`;
+}
+
+function uniqueEmail(label: string): string {
+  return `${label}-${crypto.randomUUID()}@example.test`;
+}
+
+async function provisionStaff(
+  role: "global_admin" | "manager",
+  email: string,
+): Promise<string> {
+  const identity = await createTestIdentity(database);
+  await grantTestRole(database, identity.userId, role);
+  await database
+    .prepare(
+      `INSERT INTO staff_password_credentials (
+         user_id, email, email_normalized, password_hash, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(identity.userId, email, email, passwordHash, clock, clock)
+    .run();
+  return identity.userId;
+}
+
+async function signIn(
+  email: string,
+  override: Record<string, unknown> = {},
+): Promise<Response> {
+  return application.fetch(
+    new Request(url("/admin/auth/sign-in"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        "CF-Connecting-IP": nextIp(),
+      },
+      body: JSON.stringify({ email, password: staffPassword }),
+    }),
+    { ...bindings, ...override },
+  );
+}
+
+function sessionToken(response: Response): string {
+  const token = response.headers
+    .get("set-cookie")
+    ?.match(/certpath_session=([A-Za-z0-9_-]{43})/)?.[1];
+  if (!token) throw new Error("Staff sign-in response omitted its session cookie");
+  return token;
+}
+
+async function signedInCookie(
+  email: string,
+  override: Record<string, unknown> = {},
+): Promise<string> {
+  const response = await signIn(email, override);
+  expect(response.status).toBe(200);
+  return sessionToken(response);
+}
+
+async function adminCsrf(cookie: string): Promise<string> {
+  const response = await application.fetch(
+    new Request(url("/admin/csrf"), {
+      headers: {
+        Cookie: `certpath_session=${cookie}`,
+        "CF-Connecting-IP": nextIp(),
+      },
+    }),
+    bindings,
+  );
+  expect(response.status).toBe(200);
+  return ((await response.json()) as { csrfToken: string }).csrfToken;
+}
+
+async function postMfa(
+  path: string,
+  cookie: string,
+  body: unknown,
+  override: Record<string, unknown> = {},
+  options: { csrf?: string } = {},
+): Promise<Response> {
+  const token = options.csrf ?? (await adminCsrf(cookie));
+  return application.fetch(
+    new Request(url(`/admin/auth${path}`), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        "CF-Connecting-IP": nextIp(),
+        Cookie: `certpath_session=${cookie}`,
+        "X-CSRF-Token": token,
+      },
+      body: JSON.stringify(body),
+    }),
+    { ...bindings, ...override },
+  );
+}
+
+/** One printed ticket, written straight to storage as provisioning does. */
+async function issueTicket(
+  userId: string,
+  options: { createdAt?: number; expiresAt?: number; revokedAt?: number } = {},
+): Promise<string> {
+  const token = createEnrolmentTicket();
+  const createdAt = options.createdAt ?? clock;
+  await database
+    .prepare(
+      `INSERT INTO staff_mfa_enrolment_tickets (
+         ticket_digest, user_id, created_by_user_id, created_by_ref, created_at,
+         expires_at, consumed_at, consumed_operation_id, revoked_at
+       ) VALUES (?, ?, NULL, 'test-provisioning', ?, ?, NULL, NULL, ?)`,
+    )
+    .bind(
+      await sha256Hex(token),
+      userId,
+      createdAt,
+      options.expiresAt ?? createdAt + 24 * 60 * 60 * 1000,
+      options.revokedAt ?? null,
+    )
+    .run();
+  return token;
+}
+
+async function readCredential(userId: string) {
+  return database
+    .prepare(
+      `SELECT credential_id, secret_ciphertext, secret_iv, last_used_step,
+              confirmed_at, revoked_at
+       FROM staff_totp_credentials
+       WHERE user_id = ? AND revoked_at IS NULL`,
+    )
+    .bind(userId)
+    .first<{
+      credential_id: string;
+      secret_ciphertext: string;
+      secret_iv: string;
+      last_used_step: number;
+      confirmed_at: number | null;
+      revoked_at: number | null;
+    }>();
+}
+
+/** Recovers the seed the route sealed, so codes can be computed honestly. */
+async function seedFor(userId: string): Promise<Uint8Array> {
+  const credential = await readCredential(userId);
+  if (!credential) throw new Error("No credential to open");
+  const key = await readSealKey(sealKey);
+  if (!key) throw new Error("The test seal key is unusable");
+  const seed = await openTotpSeed(
+    key,
+    credential.secret_ciphertext,
+    credential.secret_iv,
+  );
+  if (!seed) throw new Error("The sealed seed did not open");
+  return seed;
+}
+
+function codeAt(seed: Uint8Array, atMs: number): Promise<string> {
+  return totpCodeAt(seed, totpStepAt(atMs));
+}
+
+/**
+ * A view of the same database whose confirm-claim statement runs a callback
+ * first. It is the only way to make the read-then-claim window deterministic:
+ * the callback commits in the gap, after the pre-read and before the UPDATE, which
+ * is exactly the interleaving a Global-Admin reset can produce.
+ */
+function interleaveBeforeAll(
+  statement: D1PreparedStatement,
+  onAll: () => Promise<void>,
+): D1PreparedStatement {
+  return {
+    bind: (...values: D1Value[]) =>
+      interleaveBeforeAll(statement.bind(...values), onAll),
+    first: <T,>() => statement.first<T>(),
+    run: () => statement.run(),
+    all: async <T,>() => {
+      await onAll();
+      return statement.all<T>();
+    },
+  };
+}
+
+function databaseWithClaimInterleave(
+  onClaim: () => Promise<void>,
+): SecurityDatabase {
+  return {
+    withSession: (constraint) => database.withSession(constraint),
+    batch: (statements) => database.batch(statements),
+    prepare(query) {
+      const statement = database.prepare(query);
+      return query.includes("SET confirmed_at = ?")
+        ? interleaveBeforeAll(statement, onClaim)
+        : statement;
+    },
+  };
+}
+
+/** Sign in, enrol with a ticket and confirm. Returns the session + seed. */
+async function enrolConfirmed(
+  email: string,
+  userId: string,
+): Promise<{ cookie: string; seed: Uint8Array; recoveryCodes: string[] }> {
+  const cookie = await signedInCookie(email);
+  const ticket = await issueTicket(userId);
+  const enrolled = await postMfa("/mfa/enrol", cookie, { ticket });
+  expect(enrolled.status).toBe(200);
+  const seed = await seedFor(userId);
+  const confirmed = await postMfa("/mfa/enrol/confirm", cookie, {
+    code: await codeAt(seed, clock),
+  });
+  expect(confirmed.status).toBe(200);
+  const { recoveryCodes } = (await confirmed.json()) as {
+    recoveryCodes: string[];
+  };
+  return { cookie, seed, recoveryCodes };
+}
+
+async function readSession(cookie: string) {
+  return database
+    .prepare(
+      `SELECT mfa_method, mfa_verified_at FROM app_sessions WHERE token_digest = ?`,
+    )
+    .bind(await sessionDigest(cookie))
+    .first<{ mfa_method: string | null; mfa_verified_at: number | null }>();
+}
+
+describe("staff second factor", () => {
+  it("sign-in mints no assurance", async () => {
+    const email = uniqueEmail("mfa-no-assurance");
+    const userId = await provisionStaff("global_admin", email);
+
+    const response = await signIn(email);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ redirectTo: "/admin/mfa/verify" });
+    const cookie = sessionToken(response);
+
+    expect(await readSession(cookie)).toEqual({
+      mfa_method: null,
+      mfa_verified_at: null,
+    });
+
+    const session = await application.fetch(
+      new Request(url("/admin/auth/session"), {
+        headers: {
+          Cookie: `certpath_session=${cookie}`,
+          "CF-Connecting-IP": testerIp,
+        },
+      }),
+      bindings,
+    );
+    expect(session.status).toBe(403);
+    expect(await session.json()).toMatchObject({
+      error: { code: "mfa-assurance-missing" },
+    });
+
+    const credential = await readCredential(userId);
+    expect(credential).toBeNull();
+  });
+
+  it("verify upgrades the session in place", async () => {
+    const email = uniqueEmail("mfa-verify-in-place");
+    const userId = await provisionStaff("global_admin", email);
+    const { cookie, seed } = await enrolConfirmed(email, userId);
+    const tokenDigest = await sessionDigest(cookie);
+
+    const verified = await postMfa("/mfa/verify", cookie, {
+      code: await codeAt(seed, clock),
+    });
+    expect(verified.status).toBe(200);
+    expect(await verified.json()).toEqual({
+      redirectTo: "/admin/question-editor",
+    });
+
+    const session = await readSession(cookie);
+    expect(session?.mfa_method).toBe("totp");
+    expect(session?.mfa_verified_at).toBe(clock);
+    // Same row, not a new session: the upgrade is an UPDATE on the sign-in row.
+    const rows = await database
+      .prepare("SELECT COUNT(*) AS count FROM app_sessions WHERE user_id = ?")
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(rows?.count).toBe(1);
+    const stored = await database
+      .prepare("SELECT user_id FROM app_sessions WHERE token_digest = ?")
+      .bind(tokenDigest)
+      .first<{ user_id: string }>();
+    expect(stored?.user_id).toBe(userId);
+
+    const admin = await application.fetch(
+      new Request(url("/admin/auth/session"), {
+        headers: {
+          Cookie: `certpath_session=${cookie}`,
+          "CF-Connecting-IP": testerIp,
+        },
+      }),
+      bindings,
+    );
+    expect(admin.status).toBe(200);
+  });
+
+  it("verify rejects a replayed step", async () => {
+    const email = uniqueEmail("mfa-replay");
+    const userId = await provisionStaff("global_admin", email);
+    const { cookie, seed } = await enrolConfirmed(email, userId);
+    const code = await codeAt(seed, clock);
+
+    expect((await postMfa("/mfa/verify", cookie, { code })).status).toBe(200);
+
+    // The same code, replayed on a *different* password-only session.
+    const replayCookie = await signedInCookie(email);
+    const replay = await postMfa("/mfa/verify", replayCookie, { code });
+    expect(replay.status).toBe(400);
+    expect(await replay.json()).toMatchObject({
+      error: { code: "invalid_code" },
+    });
+    expect(await readSession(replayCookie)).toEqual({
+      mfa_method: null,
+      mfa_verified_at: null,
+    });
+  });
+
+  it("verify accepts t-1 and rejects t-2", async () => {
+    const acceptedEmail = uniqueEmail("mfa-skew-accepted");
+    const acceptedId = await provisionStaff("global_admin", acceptedEmail);
+    const accepted = await enrolConfirmed(acceptedEmail, acceptedId);
+    const previous = await postMfa("/mfa/verify", accepted.cookie, {
+      code: await codeAt(accepted.seed, clock - 30_000),
+    });
+    expect(previous.status).toBe(200);
+
+    const rejectedEmail = uniqueEmail("mfa-skew-rejected");
+    const rejectedId = await provisionStaff("global_admin", rejectedEmail);
+    const rejected = await enrolConfirmed(rejectedEmail, rejectedId);
+    const tooFar = await postMfa("/mfa/verify", rejected.cookie, {
+      code: await codeAt(rejected.seed, clock - 60_000),
+    });
+    expect(tooFar.status).toBe(400);
+    expect(await tooFar.json()).toMatchObject({
+      error: { code: "invalid_code" },
+    });
+    expect((await readSession(rejected.cookie))?.mfa_method).toBeNull();
+  });
+
+  it("verify refuses a revoked credential", async () => {
+    const email = uniqueEmail("mfa-revoked");
+    const userId = await provisionStaff("global_admin", email);
+    const { cookie, seed } = await enrolConfirmed(email, userId);
+
+    await database
+      .prepare(
+        `UPDATE staff_totp_credentials
+         SET revoked_at = ?, revoked_operation_id = ?
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(clock, `test-revoke:${crypto.randomUUID()}`, userId)
+      .run();
+
+    const verified = await postMfa("/mfa/verify", cookie, {
+      code: await codeAt(seed, clock),
+    });
+    expect(verified.status).toBe(400);
+    expect(await verified.json()).toMatchObject({
+      error: { code: "invalid_code" },
+    });
+    expect((await readSession(cookie))?.mfa_method).toBeNull();
+  });
+
+  it("enrolment requires a ticket", async () => {
+    const noTicketEmail = uniqueEmail("mfa-no-ticket");
+    const noTicketId = await provisionStaff("manager", noTicketEmail);
+    const noTicketCookie = await signedInCookie(noTicketEmail);
+    const withoutTicket = await postMfa("/mfa/enrol", noTicketCookie, {});
+    expect(withoutTicket.status).toBe(403);
+    expect(await withoutTicket.json()).toMatchObject({
+      error: { code: "forbidden" },
+    });
+    expect(await readCredential(noTicketId)).toBeNull();
+
+    // A ticket minted for somebody else does not enrol this account.
+    const foreignEmail = uniqueEmail("mfa-foreign-ticket");
+    const foreignId = await provisionStaff("manager", foreignEmail);
+    const otherId = await provisionStaff("manager", uniqueEmail("mfa-other"));
+    const crossed = await postMfa(
+      "/mfa/enrol",
+      await signedInCookie(foreignEmail),
+      { ticket: await issueTicket(otherId) },
+    );
+    expect(crossed.status).toBe(403);
+    expect(await readCredential(foreignId)).toBeNull();
+
+    const expiredEmail = uniqueEmail("mfa-expired-ticket");
+    const expiredId = await provisionStaff("manager", expiredEmail);
+    const expired = await issueTicket(expiredId, {
+      createdAt: clock - 2000,
+      expiresAt: clock - 1000,
+    });
+    const late = await postMfa("/mfa/enrol", await signedInCookie(expiredEmail), {
+      ticket: expired,
+    });
+    expect(late.status).toBe(410);
+    expect(await late.json()).toMatchObject({ error: { code: "ticket_expired" } });
+
+    // A ticket works once: the second use is refused and no credential appears.
+    const onceEmail = uniqueEmail("mfa-ticket-once");
+    const onceId = await provisionStaff("manager", onceEmail);
+    const onceCookie = await signedInCookie(onceEmail);
+    const consumed = await issueTicket(onceId);
+    expect(
+      (await postMfa("/mfa/enrol", onceCookie, { ticket: consumed })).status,
+    ).toBe(200);
+    const again = await postMfa("/mfa/enrol", onceCookie, { ticket: consumed });
+    expect(again.status).toBe(403);
+    expect(await again.json()).toMatchObject({ error: { code: "forbidden" } });
+  }, 30_000);
+
+  it("enrolment cannot overwrite a confirmed credential without a ticket", async () => {
+    const email = uniqueEmail("mfa-no-overwrite");
+    const userId = await provisionStaff("global_admin", email);
+    await enrolConfirmed(email, userId);
+    const before = await readCredential(userId);
+
+    const cookie = await signedInCookie(email);
+    const withoutTicket = await postMfa("/mfa/enrol", cookie, {});
+    expect(withoutTicket.status).toBe(403);
+
+    // Even a live ticket does not replace a confirmed factor: that is the
+    // reset path, which revokes first and writes its own audit row.
+    const withTicket = await postMfa("/mfa/enrol", cookie, {
+      ticket: await issueTicket(userId),
+    });
+    expect(withTicket.status).toBe(409);
+    expect(await withTicket.json()).toMatchObject({
+      error: { code: "mfa_already_enrolled" },
+    });
+
+    const after = await readCredential(userId);
+    expect(after?.credential_id).toBe(before?.credential_id);
+    expect(after?.secret_ciphertext).toBe(before?.secret_ciphertext);
+    expect(after?.secret_iv).toBe(before?.secret_iv);
+  }, 30_000);
+
+  it("confirm returns ten codes once", async () => {
+    const email = uniqueEmail("mfa-ten-codes");
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await signedInCookie(email);
+    expect(
+      (
+        await postMfa("/mfa/enrol", cookie, {
+          ticket: await issueTicket(userId),
+        })
+      ).status,
+    ).toBe(200);
+    const seed = await seedFor(userId);
+
+    const confirmed = await postMfa("/mfa/enrol/confirm", cookie, {
+      code: await codeAt(seed, clock),
+    });
+    expect(confirmed.status).toBe(200);
+    const { recoveryCodes } = (await confirmed.json()) as {
+      recoveryCodes: string[];
+    };
+    expect(recoveryCodes).toHaveLength(10);
+    expect(new Set(recoveryCodes).size).toBe(10);
+    for (const recoveryCode of recoveryCodes) {
+      expect(recoveryCode).toMatch(/^[0-9A-Z]{5}-[0-9A-Z]{5}$/);
+    }
+
+    const second = await postMfa("/mfa/enrol/confirm", cookie, {
+      code: await codeAt(seed, clock),
+    });
+    expect(second.status).toBe(409);
+
+    const stored = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes WHERE user_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(stored?.count).toBe(10);
+
+    // The ten plaintext codes exist exactly once, in that one response: the
+    // database holds digests and the response body is not cached.
+    const digests = await database
+      .prepare(`SELECT code_digest FROM staff_recovery_codes WHERE user_id = ?`)
+      .bind(userId)
+      .all<{ code_digest: string }>();
+    for (const row of digests.results) {
+      expect(row.code_digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(recoveryCodes).not.toContain(row.code_digest);
+    }
+  });
+
+  it("a lost confirm race leaves the winner's ten codes intact", async () => {
+    const email = uniqueEmail("mfa-confirm-race");
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await signedInCookie(email);
+    expect(
+      (
+        await postMfa("/mfa/enrol", cookie, {
+          ticket: await issueTicket(userId),
+        })
+      ).status,
+    ).toBe(200);
+    const seed = await seedFor(userId);
+    const code = await codeAt(seed, clock);
+
+    // Both requests pass the `confirmed_at !== null` pre-check. Only the claim
+    // decides, and the loser must not touch a single row of the winner's.
+    const [first, second] = await Promise.all([
+      postMfa("/mfa/enrol/confirm", cookie, { code }),
+      postMfa("/mfa/enrol/confirm", cookie, { code }),
+    ]);
+    expect([first.status, second.status].sort((a, b) => a - b)).toEqual([
+      200, 409,
+    ]);
+
+    const live = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes
+         WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(live?.count).toBe(10);
+    const total = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes WHERE user_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(total?.count).toBe(10);
+
+    // Exactly one issued set was recorded, and nothing was revoked: the losing
+    // request did not revoke the winner's codes, nor issue a set nobody saw.
+    const issued = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_recovery_codes_issued' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(issued?.count).toBe(1);
+    const revokedSets = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_recovery_codes_revoked' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(revokedSets?.count).toBe(0);
+  }, 30_000);
+
+  it("a reset between the pre-read and the claim cannot resurrect a code set", async () => {
+    const adminEmail = uniqueEmail("mfa-reset-interleave-admin");
+    const adminId = await provisionStaff("global_admin", adminEmail);
+    const email = uniqueEmail("mfa-reset-interleave");
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await signedInCookie(email);
+    expect(
+      (
+        await postMfa("/mfa/enrol", cookie, {
+          ticket: await issueTicket(userId),
+        })
+      ).status,
+    ).toBe(200);
+    const seed = await seedFor(userId);
+    const key = await readSealKey(sealKey);
+    if (!key) throw new Error("The test seal key is unusable");
+
+    // The confirm reads a live credential, then the reset commits, then the
+    // claim runs. Without `revoked_at IS NULL` in the claim's predicate the
+    // revoked row still matches and ten live codes appear on an account whose
+    // factor, codes and sessions the reset had just destroyed.
+    let resetRan = false;
+    const interleaved = databaseWithClaimInterleave(async () => {
+      const reset = await resetStaffMfa(database, {
+        actorUserId: adminId,
+        targetUserId: userId,
+        reason: "Interleaved reset between read and claim",
+        now: clock,
+      });
+      expect(reset.ok).toBe(true);
+      resetRan = true;
+    });
+
+    const result = await confirmStaffTotp(interleaved, {
+      userId,
+      code: await codeAt(seed, clock),
+      sealKey: key,
+      now: clock,
+    });
+    expect(resetRan).toBe(true);
+    // The refusal, not a success: same answer as a reset that landed before the
+    // read, which is the documented `invalid_code` for "nothing to confirm".
+    expect(result).toEqual({ ok: false, status: 400, code: "invalid_code" });
+
+    const live = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes
+         WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(live?.count).toBe(0);
+    const issued = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_recovery_codes_issued' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(issued?.count).toBe(0);
+
+    // Nothing was mintable from the claimed codes, and the only live ticket is
+    // the one the reset itself printed.
+    const tickets = await database
+      .prepare(
+        `SELECT created_by_user_id, created_by_ref
+         FROM staff_mfa_enrolment_tickets
+         WHERE user_id = ? AND consumed_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .all<{ created_by_user_id: string | null; created_by_ref: string | null }>();
+    expect(tickets.results).toEqual([
+      { created_by_user_id: adminId, created_by_ref: null },
+    ]);
+    const redeemed = await redeemStaffRecoveryCode(database, {
+      userId,
+      recoveryCode: "ABCDE-FGHJ2",
+      now: clock,
+    });
+    expect(redeemed.ok).toBe(false);
+  }, 30_000);
+
+  it("recovery code is single-use", async () => {
+    const email = uniqueEmail("mfa-recovery-once");
+    const userId = await provisionStaff("global_admin", email);
+    const { cookie, recoveryCodes } = await enrolConfirmed(email, userId);
+
+    const first = await postMfa("/mfa/recovery", cookie, {
+      recoveryCode: recoveryCodes[0],
+    });
+    expect(first.status).toBe(200);
+    const body = (await first.json()) as {
+      next: string;
+      ticket: string;
+      expiresAt: number;
+    };
+    expect(body.next).toBe("enrol");
+    expect(body.ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(body.expiresAt).toBe(clock + 24 * 60 * 60 * 1000);
+
+    const second = await postMfa("/mfa/recovery", cookie, {
+      recoveryCode: recoveryCodes[0],
+    });
+    expect(second.status).toBe(409);
+    expect(await second.json()).toMatchObject({
+      error: { code: "recovery_code_used" },
+    });
+
+    // Redeeming revokes the factor; the remaining codes stay unused.
+    expect(await readCredential(userId)).toBeNull();
+    const unused = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes
+         WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(unused?.count).toBe(9);
+
+    // The revocation audit row names the subject and asserts no actor: the
+    // account holder redeemed a code about themselves, which is not a
+    // privileged act and must not be filed as one.
+    const revoked = await database
+      .prepare(
+        `SELECT actor_user_id, subject_id FROM audit_events
+         WHERE action = 'staff_mfa_revoked' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .all<{ actor_user_id: string | null; subject_id: string }>();
+    expect(revoked.results).toEqual([{ actor_user_id: null, subject_id: userId }]);
+    const privileged = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_mfa_reset' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(privileged?.count).toBe(0);
+
+    // Provenance: the ticket is the one this redemption issued, not the printed
+    // one the account enrolled with, and it lives for exactly 24 hours.
+    const recoveryTickets = await database
+      .prepare(
+        `SELECT ticket_digest, created_by_user_id, created_by_ref, created_at,
+                expires_at, consumed_at, revoked_at
+         FROM staff_mfa_enrolment_tickets
+         WHERE user_id = ? AND created_by_ref = 'recovery-code'`,
+      )
+      .bind(userId)
+      .all<{
+        ticket_digest: string;
+        created_by_user_id: string | null;
+        created_by_ref: string;
+        created_at: number;
+        expires_at: number;
+        consumed_at: number | null;
+        revoked_at: number | null;
+      }>();
+    expect(recoveryTickets.results).toEqual([
+      {
+        ticket_digest: expect.any(String),
+        created_by_user_id: null,
+        created_by_ref: "recovery-code",
+        created_at: clock,
+        expires_at: clock + 86_400_000,
+        consumed_at: null,
+        revoked_at: null,
+      },
+    ]);
+    const liveTickets = await database
+      .prepare(
+        `SELECT ticket_digest FROM staff_mfa_enrolment_tickets
+         WHERE user_id = ? AND consumed_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .all<{ ticket_digest: string }>();
+    expect(liveTickets.results).toEqual([
+      { ticket_digest: recoveryTickets.results[0]?.ticket_digest },
+    ]);
+  });
+
+  it("recovery redemption re-enrols with the ticket it returns", async () => {
+    const email = uniqueEmail("mfa-recovery-reenrol");
+    const userId = await provisionStaff("global_admin", email);
+    const { cookie, seed, recoveryCodes } = await enrolConfirmed(email, userId);
+    expect(
+      (await postMfa("/mfa/verify", cookie, { code: await codeAt(seed, clock) }))
+        .status,
+    ).toBe(200);
+
+    const redeemed = await postMfa("/mfa/recovery", cookie, {
+      recoveryCode: recoveryCodes[2],
+    });
+    expect(redeemed.status).toBe(200);
+    const { ticket } = (await redeemed.json()) as { ticket: string };
+    expect(await readCredential(userId)).toBeNull();
+
+    // The paper code is a way back in, not a dead end: the ticket it returned
+    // enrols a replacement factor on the same account without a Global Admin.
+    const enrolled = await postMfa("/mfa/enrol", cookie, { ticket });
+    expect(enrolled.status).toBe(200);
+    const replacement = await seedFor(userId);
+    const confirmed = await postMfa("/mfa/enrol/confirm", cookie, {
+      code: await codeAt(replacement, clock),
+    });
+    expect(confirmed.status).toBe(200);
+
+    // The new set supersedes the old one, and revoking a set is itself an act:
+    // exactly one row for it, with no actor invented.
+    const revokedSets = await database
+      .prepare(
+        `SELECT actor_user_id, subject_id FROM audit_events
+         WHERE action = 'staff_recovery_codes_revoked' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .all<{ actor_user_id: string | null; subject_id: string }>();
+    expect(revokedSets.results).toEqual([
+      { actor_user_id: null, subject_id: userId },
+    ]);
+
+    // A fresh password-only session proves the new factor is the live one.
+    const freshCookie = await signedInCookie(email);
+    expect((await readSession(freshCookie))?.mfa_method).toBeNull();
+    const verified = await postMfa("/mfa/verify", freshCookie, {
+      code: await codeAt(replacement, clock),
+    });
+    expect(verified.status).toBe(200);
+    expect((await readSession(freshCookie))?.mfa_method).toBe("totp");
+
+    // And a password alone still cannot enrol: the same account, a new session,
+    // no ticket.
+    const noTicket = await postMfa("/mfa/enrol", freshCookie, {});
+    expect(noTicket.status).toBe(403);
+    expect(await noTicket.json()).toMatchObject({
+      error: { code: "forbidden" },
+    });
+  }, 30_000);
+
+  it("recovery mints no assurance", async () => {
+    const email = uniqueEmail("mfa-recovery-no-assurance");
+    const userId = await provisionStaff("global_admin", email);
+    const { cookie, recoveryCodes } = await enrolConfirmed(email, userId);
+
+    expect(
+      (
+        await postMfa("/mfa/recovery", cookie, {
+          recoveryCode: recoveryCodes[1],
+        })
+      ).status,
+    ).toBe(200);
+
+    expect(await readSession(cookie)).toEqual({
+      mfa_method: null,
+      mfa_verified_at: null,
+    });
+    const session = await application.fetch(
+      new Request(url("/admin/auth/session"), {
+        headers: {
+          Cookie: `certpath_session=${cookie}`,
+          "CF-Connecting-IP": testerIp,
+        },
+      }),
+      bindings,
+    );
+    expect(session.status).toBe(403);
+    expect(await session.json()).toMatchObject({
+      error: { code: "mfa-assurance-missing" },
+    });
+  });
+
+  it("a Manager cannot reset", async () => {
+    const managerEmail = uniqueEmail("mfa-manager-reset");
+    const managerId = await provisionStaff("manager", managerEmail);
+    const targetEmail = uniqueEmail("mfa-manager-target");
+    const targetId = await provisionStaff("manager", targetEmail);
+    await enrolConfirmed(targetEmail, targetId);
+    const manager = await enrolConfirmed(managerEmail, managerId);
+
+    expect(
+      (
+        await postMfa("/mfa/verify", manager.cookie, {
+          code: await codeAt(manager.seed, clock),
+        })
+      ).status,
+    ).toBe(200);
+
+    const reset = await postMfa("/mfa/reset", manager.cookie, {
+      userId: targetId,
+      reason: "A Manager may never reset a second factor",
+    });
+    expect(reset.status).toBe(403);
+    expect(await reset.json()).toMatchObject({ error: { code: "forbidden" } });
+    expect(await readCredential(targetId)).not.toBeNull();
+  }, 30_000);
+
+  it("reset by a Global Admin revokes everything", async () => {
+    const adminEmail = uniqueEmail("mfa-admin-reset");
+    const adminId = await provisionStaff("global_admin", adminEmail);
+    const targetEmail = uniqueEmail("mfa-reset-target");
+    const targetId = await provisionStaff("manager", targetEmail);
+
+    const target = await enrolConfirmed(targetEmail, targetId);
+    const admin = await enrolConfirmed(adminEmail, adminId);
+    // The actor's own factor must be current; `enrolConfirmed` leaves it
+    // unverified, so verify it first.
+    expect(
+      (
+        await postMfa("/mfa/verify", admin.cookie, {
+          code: await codeAt(admin.seed, clock),
+        })
+      ).status,
+    ).toBe(200);
+
+    const reset = await postMfa("/mfa/reset", admin.cookie, {
+      userId: targetId,
+      reason: "Learner-support phone call; authenticator replaced",
+    });
+    expect(reset.status).toBe(200);
+    const body = (await reset.json()) as { ticket: string; expiresAt: number };
+    expect(body.ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(body.expiresAt).toBe(clock + 24 * 60 * 60 * 1000);
+
+    expect(await readCredential(targetId)).toBeNull();
+    const codes = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(targetId)
+      .first<{ count: number }>();
+    expect(codes?.count).toBe(0);
+    const sessions = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM app_sessions
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(targetId)
+      .first<{ count: number }>();
+    expect(sessions?.count).toBe(0);
+
+    // The audit trail must not lie about who acted. Exactly one reset row, its
+    // actor is the Global Admin, and it carries the operator's own reason.
+    const resets = await database
+      .prepare(
+        `SELECT actor_user_id, subject_type, subject_id, reason
+         FROM audit_events
+         WHERE action = 'staff_mfa_reset' AND subject_id = ?`,
+      )
+      .bind(targetId)
+      .all<{
+        actor_user_id: string | null;
+        subject_type: string;
+        subject_id: string;
+        reason: string;
+      }>();
+    expect(resets.results).toEqual([
+      {
+        actor_user_id: adminId,
+        subject_type: "staff_mfa",
+        subject_id: targetId,
+        reason: "Learner-support phone call; authenticator replaced",
+      },
+    ]);
+    // And no row anywhere claims the target reset themselves.
+    const victimActed = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE actor_user_id = ? AND action = 'staff_mfa_reset'`,
+      )
+      .bind(targetId)
+      .first<{ count: number }>();
+    expect(victimActed?.count).toBe(0);
+
+    // The trigger's own row asserts no actor: it cannot tell a reset from a
+    // self-service redemption, so it names neither.
+    const revoked = await database
+      .prepare(
+        `SELECT actor_user_id, subject_id FROM audit_events
+         WHERE action = 'staff_mfa_revoked' AND subject_id = ?`,
+      )
+      .bind(targetId)
+      .all<{ actor_user_id: string | null; subject_id: string }>();
+    expect(revoked.results).toEqual([
+      { actor_user_id: null, subject_id: targetId },
+    ]);
+
+    // The revoked session really is dead (`invalid-session`), and the printed
+    // ticket really works.
+    const stale = await application.fetch(
+      new Request(url("/admin/auth/session"), {
+        headers: {
+          Cookie: `certpath_session=${target.cookie}`,
+          "CF-Connecting-IP": testerIp,
+        },
+      }),
+      bindings,
+    );
+    expect(stale.status).toBe(403);
+    expect(await stale.json()).toMatchObject({
+      error: { code: "invalid-session" },
+    });
+
+    // A second reset while that ticket is live is a conflict, not a second
+    // printed secret.
+    const retry = await postMfa("/mfa/reset", admin.cookie, {
+      userId: targetId,
+      reason: "Retry",
+    });
+    expect(retry.status).toBe(409);
+
+    const reEnrol = await postMfa("/mfa/enrol", await freshCookie(targetEmail), {
+      ticket: body.ticket,
+    });
+    expect(reEnrol.status).toBe(200);
+  }, 30_000);
+
+  it("answers 503 on every MFA route when the seal key is missing or short", async () => {
+    const email = uniqueEmail("mfa-no-seal-key");
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await signedInCookie(email);
+    const ticket = await issueTicket(userId);
+
+    for (const missing of ["", "too-short-to-seal-a-seed"]) {
+      const enrolled = await postMfa(
+        "/mfa/enrol",
+        cookie,
+        { ticket },
+        { STAFF_MFA_SEAL_KEY: missing },
+      );
+      expect(enrolled.status).toBe(503);
+      expect(await enrolled.json()).toMatchObject({
+        error: { code: "service_unavailable" },
+      });
+    }
+    expect(await readCredential(userId)).toBeNull();
+
+    // A perfectly good enrolment also cannot be confirmed or verified without
+    // the key: the factor is closed, not downgraded to plaintext.
+    expect(
+      (await postMfa("/mfa/enrol", cookie, { ticket })).status,
+    ).toBe(200);
+    const seed = await seedFor(userId);
+    const confirm = await postMfa(
+      "/mfa/enrol/confirm",
+      cookie,
+      { code: await codeAt(seed, clock) },
+      { STAFF_MFA_SEAL_KEY: "" },
+    );
+    expect(confirm.status).toBe(503);
+    const verify = await postMfa(
+      "/mfa/verify",
+      cookie,
+      { code: await codeAt(seed, clock) },
+      { STAFF_MFA_SEAL_KEY: "" },
+    );
+    expect(verify.status).toBe(503);
+    expect((await readSession(cookie))?.mfa_method).toBeNull();
+  }, 30_000);
+}, 30_000);
+
+async function freshCookie(email: string): Promise<string> {
+  return signedInCookie(email);
+}

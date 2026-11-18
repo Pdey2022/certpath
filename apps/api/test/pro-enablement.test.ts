@@ -45,7 +45,7 @@ function tick(milliseconds = 1): void {
 
 const staffPolicy: StaffMfaPolicy = {
   maxAgeMs: 15 * 60 * 1000,
-  allowedMethods: ["tester-gate"],
+  allowedMethods: ["totp"],
 };
 
 const bindings = {
@@ -78,7 +78,7 @@ async function staffActor(
     {
       now: clock,
       expiresAt: clock + 6 * 60 * 60 * 1000,
-      mfaMethod: "tester-gate",
+      mfaMethod: "totp",
     },
   );
   const response = await application.fetch(
@@ -414,7 +414,7 @@ describe("pro enablement statement guard", () => {
       {
         now: clock,
         expiresAt: clock + 6 * 60 * 60 * 1000,
-        mfaMethod: "tester-gate",
+        mfaMethod: "totp",
       },
     );
     const applied = await recordProEnablement(database, {

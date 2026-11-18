@@ -1,11 +1,16 @@
 import {
   csrfResponseSchema,
   staffAdminPreflightResponseSchema,
+  staffMfaConfirmResponseSchema,
+  staffMfaEnrolResponseSchema,
+  staffMfaRecoveryResponseSchema,
   staffSessionResponseSchema,
   staffSignInResponseSchema,
+  staffMfaVerifyResponseSchema,
 } from "@certpath/contracts";
 
 const adminAuthRoot = "/api/admin/auth";
+const adminRoot = "/api/admin";
 const sessionRoot = "/api/auth/session";
 
 export class StaffAuthApiError extends Error {
@@ -101,4 +106,59 @@ export async function signOutStaff() {
   if (response.status !== 204) {
     throw new StaffAuthApiError(response.status, "sign_out_failed");
   }
+}
+
+/**
+ * The second-factor calls. Every one is a POST from the same origin, so each
+ * fetches the admin CSRF token first - the token is minted for a live staff
+ * session, and a password-only session holds one.
+ */
+async function adminCsrfToken(): Promise<string> {
+  const { csrfToken } = await requestJson(
+    adminRoot,
+    "/csrf",
+    csrfResponseSchema,
+  );
+  return csrfToken;
+}
+
+async function postWithCsrf<T>(
+  path: string,
+  body: unknown,
+  schema: { parse(value: unknown): T },
+): Promise<T> {
+  const csrfToken = await adminCsrfToken();
+  return requestJson(adminAuthRoot, path, schema, {
+    method: "POST",
+    headers: { "X-CSRF-Token": csrfToken },
+    body: JSON.stringify(body),
+  });
+}
+
+export function enrolStaffMfa(ticket: string) {
+  return postWithCsrf(
+    "/mfa/enrol",
+    { ticket },
+    staffMfaEnrolResponseSchema,
+  );
+}
+
+export function confirmStaffMfaEnrolment(code: string) {
+  return postWithCsrf(
+    "/mfa/enrol/confirm",
+    { code },
+    staffMfaConfirmResponseSchema,
+  );
+}
+
+export function verifyStaffMfa(code: string) {
+  return postWithCsrf("/mfa/verify", { code }, staffMfaVerifyResponseSchema);
+}
+
+export function redeemStaffMfaRecoveryCode(recoveryCode: string) {
+  return postWithCsrf(
+    "/mfa/recovery",
+    { recoveryCode },
+    staffMfaRecoveryResponseSchema,
+  );
 }

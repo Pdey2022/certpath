@@ -1,8 +1,7 @@
-export type SupportedMfaMethod =
-  | "totp"
-  | "webauthn"
-  | "sms"
-  | "tester-gate";
+// `tester-gate` is deliberately absent: 5F retired it, `0023` refuses the label
+// at `app_sessions`, and a policy that still names it is invalid rather than
+// quietly accepted.
+export type SupportedMfaMethod = "totp" | "webauthn" | "sms";
 
 export interface StaffMfaPolicy {
   maxAgeMs: number;
@@ -21,12 +20,7 @@ export type MfaFailure =
   | "assurance-unsupported"
   | "assurance-stale";
 
-const supportedMethods: readonly string[] = [
-  "totp",
-  "webauthn",
-  "sms",
-  "tester-gate",
-];
+const supportedMethods: readonly string[] = ["totp", "webauthn", "sms"];
 
 export function getMfaFailure(
   assurance: MfaAssurance,

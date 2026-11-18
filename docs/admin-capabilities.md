@@ -441,11 +441,25 @@ carries them. The new modules emit no per-request logging at all.
 
 ## 12. Security dependency: MFA before real learners
 
-Platform-wide learner access is acceptable on the labelled `tester-gate`
-assurance only while the IP allowlist is non-empty, because real MFA is parked.
-**This surface may not be used for real learner data until an approved MFA factor
-replaces `tester-gate` (Phase 5 gate).** `staff-configuration.ts` already refuses
-`tester-gate` without both the allowlist and the owner flag.
+**5F has landed the factor; the deploy has not happened.** The `tester-gate`
+label is retired: password sign-in mints a session with `mfa_method IS NULL`,
+every admin route and every statement guard answers `mfa-assurance-missing` for
+it, and `POST /admin/auth/mfa/verify` upgrades that same session row to
+`('totp', now)` with an in-Worker RFC 6238 code. `tester-gate` is gone from every
+`supportedMfaMethods` list, so a configuration that still names it answers 503,
+and `0023`'s `app_sessions_no_tester_gate_insert`/`_update` triggers refuse the
+label at the table. Re-opening it needs an owner-approved migration that drops
+them - see [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md).
+
+The `ADMIN_TESTER_IPS` allowlist stays as **defence in depth** (owner decision,
+18 November 2026), and it is no longer an assurance: clearing it closes the whole
+surface even for a fully verified session.
+
+**This surface still may not be used for real learner data until the second
+factor is deployed and enrolled for both staff roles.** The code, migration,
+tests and docs are what this slice ships; `STAFF_MFA_ALLOWED_METHODS=totp` and
+`STAFF_MFA_SEAL_KEY` are deploy-time settings, and with the seal key absent every
+MFA route answers 503 rather than storing a seed in clear.
 
 ## 13. Rollback
 
@@ -455,12 +469,20 @@ learner-support router (`application.route("/admin", adminLearnersApi)` in
 gate; no migration is needed to roll back a route. Reversing a *deactivation*
 needs the owner-approved migration described at the top of this document.
 
+For 5F the same apply-only rule holds: unsetting `STAFF_MFA_SEAL_KEY`, or dropping
+`totp` from `STAFF_MFA_ALLOWED_METHODS`, closes the surface with 503/403 and no
+data change. Unmounting `/admin/auth/mfa/*` closes enrolment. The MFA tables and
+the existing sessions are inert while the surface is disabled, and no migration
+is edited to undo any of it.
+
 ## 14. Follow-up issues
 
 1. Admin learner-support UI under `/admin/learners` — UI only, no new server rules.
 2. Per-actor rate limiting for lookup and reveal, plus an alert when one actor's
    reveal count in a day crosses a threshold.
-3. MFA replacement for `tester-gate` as a hard gate before real learner data.
+3. ~~MFA replacement for `tester-gate` as a hard gate before real learner data.~~
+   Built in 5F ([design record](5f-staff-second-factor.md)); the remaining act is
+   the deploy, the two Worker settings and one enrolment per staff account.
 4. HTTP-level Manager denial tests for commerce, access grants, prices and staff —
    those routes arrive in Phase 4. The guarantee is held here at the capability
    layer (matrix denial, `requireCapability`, the `/capabilities` report and the

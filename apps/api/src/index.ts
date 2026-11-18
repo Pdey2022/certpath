@@ -34,6 +34,7 @@ type ApiBindings = {
   PUBLIC_SITE_ORIGIN?: string;
   STAFF_MFA_MAX_AGE_MS?: string;
   STAFF_MFA_ALLOWED_METHODS?: string;
+  STAFF_MFA_SEAL_KEY?: string;
   CSRF_HMAC_SECRET?: string;
   LOCAL_LEARNER_AUTH_ENABLED?: string;
   LOCAL_LEARNER_EMAIL_LINK_ENABLED?: string;

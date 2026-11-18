@@ -1,6 +1,16 @@
 import { Hono, type Context } from "hono";
 import {
   staffAdminPreflightResponseSchema,
+  staffMfaConfirmRequestSchema,
+  staffMfaConfirmResponseSchema,
+  staffMfaEnrolRequestSchema,
+  staffMfaEnrolResponseSchema,
+  staffMfaRecoveryRequestSchema,
+  staffMfaRecoveryResponseSchema,
+  staffMfaResetRequestSchema,
+  staffMfaResetResponseSchema,
+  staffMfaVerifyRequestSchema,
+  staffMfaVerifyResponseSchema,
   staffSessionResponseSchema,
   staffSignInRequestSchema,
   staffSignInResponseSchema,
@@ -8,6 +18,8 @@ import {
 import { adminTesterGate } from "./security/admin-gate.ts";
 import type { SecurityDatabase } from "./security/database.ts";
 import {
+  constantTimeEqual,
+  createCsrfToken,
   LEGACY_SESSION_COOKIE,
   STAGING_SESSION_COOKIE,
   sessionCookie,
@@ -28,9 +40,20 @@ import {
 } from "./security/password-hashing.ts";
 import { authorizeStaffSession } from "./security/repository.ts";
 import {
+  confirmStaffTotp,
+  enrolStaffTotp,
+  readStaffMfaAccount,
+  redeemStaffRecoveryCode,
+  resetStaffMfa,
+  verifyStaffTotp,
+  type StaffMfaFailure,
+} from "./security/staff-mfa.ts";
+import {
   readStaffSecurityConfiguration,
   type StaffSecurityBindings,
+  type StaffSecurityConfiguration,
 } from "./security/staff-configuration.ts";
+import { readSealKey } from "./security/totp.ts";
 
 export type StaffPasswordVerifier = (
   password: string,
@@ -40,6 +63,7 @@ export type StaffPasswordVerifier = (
 type StaffAuthBindings = StaffSecurityBindings & {
   DB: SecurityDatabase;
   STAFF_RATE_LIMIT_HMAC_SECRET?: string;
+  STAFF_MFA_SEAL_KEY?: string;
 };
 
 type StaffAuthContext = Context<{
@@ -48,7 +72,6 @@ type StaffAuthContext = Context<{
 }>;
 
 const staffSessionLifetimeMs = 8 * 60 * 60 * 1000;
-const testerAssuranceMethod = "tester-gate";
 
 interface StaffSignInRow {
   user_id: string;
@@ -59,13 +82,17 @@ interface StaffSignInRow {
 
 function errorResponse(
   context: StaffAuthContext,
-  status: 400 | 401 | 403 | 413 | 415 | 429 | 503,
+  status: 400 | 401 | 403 | 404 | 409 | 410 | 413 | 415 | 429 | 503,
   code: string,
 ) {
   return context.json(
     { error: { code, requestId: context.get("requestId") } },
     status,
   );
+}
+
+function failureResponse(context: StaffAuthContext, failure: StaffMfaFailure) {
+  return errorResponse(context, failure.status, failure.code);
 }
 
 function readConfiguration(env: StaffAuthBindings) {
@@ -78,10 +105,7 @@ function readConfiguration(env: StaffAuthBindings) {
   ) {
     return null;
   }
-  const testerAssurance =
-    env.ADMIN_TESTER_ASSURANCE === "true" &&
-    security.policy.allowedMethods.includes(testerAssuranceMethod);
-  return { ...security, rateSecret, testerAssurance };
+  return { ...security, rateSecret };
 }
 
 async function listStaffCertifications(
@@ -117,6 +141,72 @@ async function listStaffCertifications(
   }));
 }
 
+/**
+ * The double-submit check every staff mutation carries: the request must come
+ * from the configured origin, and `X-CSRF-Token` must be the token this
+ * session's digest produces. A password-only session can read
+ * `GET /api/admin/csrf` (deliberately - it is useless without a capability),
+ * so the MFA routes can be protected before assurance exists.
+ */
+async function mutationProtected(
+  context: StaffAuthContext,
+  configuration: StaffSecurityConfiguration,
+  tokenDigest: string,
+): Promise<boolean> {
+  if (!validRequestOrigin(context.req.raw, configuration.origin, true)) {
+    return false;
+  }
+  const supplied = context.req.header("X-CSRF-Token");
+  if (!supplied || supplied.length > 64) return false;
+  const expected = await createCsrfToken(
+    configuration.origin,
+    tokenDigest,
+    configuration.csrfSecret,
+  );
+  return constantTimeEqual(supplied, expected);
+}
+
+/** One place for the "live session, no assurance required" preamble. */
+async function readUnassuredAccount(
+  context: StaffAuthContext,
+  configuration: StaffSecurityConfiguration,
+  timestamp: number,
+): Promise<
+  | {
+      ok: true;
+      account: { userId: string; email: string | null };
+      tokenDigest: string;
+    }
+  | { ok: false; response: Response }
+> {
+  const rawToken = sessionCookieToken(context.req.header("Cookie") ?? null);
+  if (!rawToken) {
+    return {
+      ok: false,
+      response: errorResponse(context, 401, "unauthenticated"),
+    };
+  }
+  const tokenDigest = await sessionDigest(rawToken);
+  const account = await readStaffMfaAccount(
+    context.env.DB,
+    tokenDigest,
+    timestamp,
+  );
+  if (!account) {
+    return {
+      ok: false,
+      response: errorResponse(context, 401, "unauthenticated"),
+    };
+  }
+  if (!(await mutationProtected(context, configuration, tokenDigest))) {
+    return {
+      ok: false,
+      response: errorResponse(context, 400, "invalid_csrf"),
+    };
+  }
+  return { ok: true, account, tokenDigest };
+}
+
 export function createStaffAuthApi(
   now: () => number = Date.now,
   verifyPassword: StaffPasswordVerifier = verifyLearnerPassword,
@@ -143,20 +233,24 @@ export function createStaffAuthApi(
     const configuration = readConfiguration(context.env);
     return context.json(
       staffAdminPreflightResponseSchema.parse({
-        signInEnabled: configuration?.testerAssurance === true,
-        testerAssuranceEnabled: configuration?.testerAssurance === true,
+        signInEnabled: configuration !== null,
+        mfaMethods:
+          configuration?.policy.allowedMethods.includes("totp") === true
+            ? ["totp"]
+            : [],
+        testerAssuranceEnabled: false,
       }),
     );
   });
 
+  // Password sign-in mints a session and nothing else: `mfa_method` and
+  // `mfa_verified_at` are NULL, so every admin route answers
+  // `mfa-assurance-missing` until `POST /mfa/verify` upgrades this same row.
   api.post("/sign-in", async (context) => {
     const configuration = readConfiguration(context.env);
     if (!configuration) return errorResponse(context, 503, "service_unavailable");
     if (!validRequestOrigin(context.req.raw, configuration.origin, true)) {
       return errorResponse(context, 400, "invalid_origin");
-    }
-    if (!configuration.testerAssurance) {
-      return errorResponse(context, 503, "staff_mfa_unavailable");
     }
     const body = await readJsonBody(context.req.raw);
     if (!body.ok) return errorResponse(context, body.status, "invalid_request");
@@ -223,7 +317,7 @@ export function createStaffAuthApi(
            revocation_operation_id, revoked_by_user_id, mfa_method,
            mfa_verified_at
          )
-         SELECT ?, credentials.user_id, ?, ?, NULL, NULL, NULL, ?, ?
+         SELECT ?, credentials.user_id, ?, ?, NULL, NULL, NULL, NULL, NULL
          FROM staff_password_credentials AS credentials
          JOIN users AS account ON account.id = credentials.user_id
          JOIN staff_roles AS staff
@@ -236,8 +330,6 @@ export function createStaffAuthApi(
         sessionTokenDigest,
         timestamp,
         expiresAt,
-        testerAssuranceMethod,
-        timestamp,
         row.user_id,
         row.password_hash,
       ),
@@ -247,7 +339,7 @@ export function createStaffAuthApi(
            subject_id, certification_id, reason, occurred_at
          )
          SELECT ?, user_id, NULL, 'staff_signed_in', 'user', user_id, NULL,
-                'Staff signed in through the tester gate', ?
+                'Staff signed in with a password; second factor pending', ?
          FROM app_sessions
          WHERE token_digest = ?
          RETURNING operation_id`,
@@ -268,7 +360,7 @@ export function createStaffAuthApi(
       ),
     );
     return context.json(
-      staffSignInResponseSchema.parse({ redirectTo: "/admin/question-editor" }),
+      staffSignInResponseSchema.parse({ redirectTo: "/admin/mfa/verify" }),
     );
   });
 
@@ -296,6 +388,246 @@ export function createStaffAuthApi(
           authorization.userId,
           authorization.role,
         ),
+      }),
+    );
+  });
+
+  // --- Second factor ------------------------------------------------------
+  //
+  // The five routes below authenticate with the *unassured* session: that is
+  // the only way to leave the state a password-only sign-in creates. Each one
+  // repeats the origin, CSRF, rate-limit and (where a seed is touched) seal-key
+  // checks itself, so no route depends on another route's middleware.
+
+  api.post("/mfa/enrol", async (context) => {
+    const configuration = readConfiguration(context.env);
+    if (!configuration) return errorResponse(context, 503, "service_unavailable");
+
+    const timestamp = now();
+    const preamble = await readUnassuredAccount(
+      context,
+      configuration,
+      timestamp,
+    );
+    if (!preamble.ok) return preamble.response;
+    const body = await readJsonBody(context.req.raw);
+    if (!body.ok) return errorResponse(context, 400, "invalid_request");
+    const parsed = staffMfaEnrolRequestSchema.safeParse(body.value);
+    if (!parsed.success) return errorResponse(context, 400, "invalid_request");
+
+    if (
+      !(await consumeLocalRateLimit(
+        context.env.DB,
+        configuration.rateSecret,
+        "staff_mfa_enrol",
+        context.req.raw,
+        preamble.account.email,
+        timestamp,
+      ))
+    ) {
+      return errorResponse(context, 429, "rate_limited");
+    }
+
+    const sealKey = await readSealKey(context.env.STAFF_MFA_SEAL_KEY);
+    if (!sealKey) return errorResponse(context, 503, "service_unavailable");
+
+    const result = await enrolStaffTotp(context.env.DB, {
+      userId: preamble.account.userId,
+      email: preamble.account.email,
+      ticket: parsed.data.ticket,
+      sealKey,
+      now: timestamp,
+    });
+    if (!result.ok) return failureResponse(context, result);
+    return context.json(
+      staffMfaEnrolResponseSchema.parse({
+        secret: result.secret,
+        otpauthUri: result.otpauthUri,
+        keyVersion: result.keyVersion,
+      }),
+    );
+  });
+
+  api.post("/mfa/enrol/confirm", async (context) => {
+    const configuration = readConfiguration(context.env);
+    if (!configuration) return errorResponse(context, 503, "service_unavailable");
+
+    const timestamp = now();
+    const preamble = await readUnassuredAccount(
+      context,
+      configuration,
+      timestamp,
+    );
+    if (!preamble.ok) return preamble.response;
+    const body = await readJsonBody(context.req.raw);
+    if (!body.ok) return errorResponse(context, 400, "invalid_request");
+    const parsed = staffMfaConfirmRequestSchema.safeParse(body.value);
+    if (!parsed.success) return errorResponse(context, 400, "invalid_code");
+
+    if (
+      !(await consumeLocalRateLimit(
+        context.env.DB,
+        configuration.rateSecret,
+        "staff_mfa_verify",
+        context.req.raw,
+        preamble.account.email,
+        timestamp,
+      ))
+    ) {
+      return errorResponse(context, 429, "rate_limited");
+    }
+
+    const sealKey = await readSealKey(context.env.STAFF_MFA_SEAL_KEY);
+    if (!sealKey) return errorResponse(context, 503, "service_unavailable");
+
+    const result = await confirmStaffTotp(context.env.DB, {
+      userId: preamble.account.userId,
+      code: parsed.data.code,
+      sealKey,
+      now: timestamp,
+    });
+    if (!result.ok) return failureResponse(context, result);
+    return context.json(
+      staffMfaConfirmResponseSchema.parse({
+        recoveryCodes: result.recoveryCodes,
+      }),
+    );
+  });
+
+  api.post("/mfa/verify", async (context) => {
+    const configuration = readConfiguration(context.env);
+    if (!configuration) return errorResponse(context, 503, "service_unavailable");
+
+    const timestamp = now();
+    const preamble = await readUnassuredAccount(
+      context,
+      configuration,
+      timestamp,
+    );
+    if (!preamble.ok) return preamble.response;
+    const body = await readJsonBody(context.req.raw);
+    if (!body.ok) return errorResponse(context, 400, "invalid_request");
+    const parsed = staffMfaVerifyRequestSchema.safeParse(body.value);
+    if (!parsed.success) return errorResponse(context, 400, "invalid_code");
+
+    if (
+      !(await consumeLocalRateLimit(
+        context.env.DB,
+        configuration.rateSecret,
+        "staff_mfa_verify",
+        context.req.raw,
+        preamble.account.email,
+        timestamp,
+      ))
+    ) {
+      return errorResponse(context, 429, "rate_limited");
+    }
+
+    const sealKey = await readSealKey(context.env.STAFF_MFA_SEAL_KEY);
+    if (!sealKey) return errorResponse(context, 503, "service_unavailable");
+
+    const result = await verifyStaffTotp(context.env.DB, {
+      userId: preamble.account.userId,
+      tokenDigest: preamble.tokenDigest,
+      code: parsed.data.code,
+      sealKey,
+      now: timestamp,
+    });
+    if (!result.ok) return failureResponse(context, result);
+    return context.json(
+      staffMfaVerifyResponseSchema.parse({
+        redirectTo: "/admin/question-editor",
+      }),
+    );
+  });
+
+  api.post("/mfa/recovery", async (context) => {
+    const configuration = readConfiguration(context.env);
+    if (!configuration) return errorResponse(context, 503, "service_unavailable");
+
+    const timestamp = now();
+    const preamble = await readUnassuredAccount(
+      context,
+      configuration,
+      timestamp,
+    );
+    if (!preamble.ok) return preamble.response;
+    const body = await readJsonBody(context.req.raw);
+    if (!body.ok) return errorResponse(context, 400, "invalid_request");
+    const parsed = staffMfaRecoveryRequestSchema.safeParse(body.value);
+    if (!parsed.success) return errorResponse(context, 400, "invalid_code");
+
+    if (
+      !(await consumeLocalRateLimit(
+        context.env.DB,
+        configuration.rateSecret,
+        "staff_recovery_redeem",
+        context.req.raw,
+        preamble.account.email,
+        timestamp,
+      ))
+    ) {
+      return errorResponse(context, 429, "rate_limited");
+    }
+
+    const result = await redeemStaffRecoveryCode(context.env.DB, {
+      userId: preamble.account.userId,
+      recoveryCode: parsed.data.recoveryCode,
+      now: timestamp,
+    });
+    if (!result.ok) return failureResponse(context, result);
+    return context.json(
+      staffMfaRecoveryResponseSchema.parse({
+        next: "enrol",
+        ticket: result.ticket,
+        expiresAt: result.expiresAt,
+      }),
+    );
+  });
+
+  api.post("/mfa/reset", async (context) => {
+    const configuration = readConfiguration(context.env);
+    if (!configuration) return errorResponse(context, 503, "service_unavailable");
+
+    const rawToken = sessionCookieToken(context.req.header("Cookie") ?? null);
+    if (!rawToken) return errorResponse(context, 401, "unauthenticated");
+    const tokenDigest = await sessionDigest(rawToken);
+    const timestamp = now();
+    if (!(await mutationProtected(context, configuration, tokenDigest))) {
+      return errorResponse(context, 400, "invalid_csrf");
+    }
+
+    // A reset is an assured Global-Admin act: the actor's own second factor
+    // must be current, not merely present.
+    const authorization = await authorizeStaffSession(
+      context.env.DB,
+      tokenDigest,
+      timestamp,
+      configuration.policy,
+    );
+    if (!authorization.allowed || authorization.role !== "global_admin") {
+      return errorResponse(context, 403, "forbidden");
+    }
+
+    const body = await readJsonBody(context.req.raw);
+    if (!body.ok) return errorResponse(context, 400, "invalid_request");
+    const parsed = staffMfaResetRequestSchema.safeParse(body.value);
+    if (!parsed.success) return errorResponse(context, 400, "invalid_request");
+
+    // `reason` is validated (1..500 characters) and never quoted into a message,
+    // an error or a log line. It is written verbatim into the `staff_mfa_reset`
+    // audit row below, which is the only record of who reset whom and why.
+    const result = await resetStaffMfa(context.env.DB, {
+      actorUserId: authorization.userId,
+      targetUserId: parsed.data.userId,
+      reason: parsed.data.reason,
+      now: timestamp,
+    });
+    if (!result.ok) return failureResponse(context, result);
+    return context.json(
+      staffMfaResetResponseSchema.parse({
+        ticket: result.ticket,
+        expiresAt: result.expiresAt,
       }),
     );
   });

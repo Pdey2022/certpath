@@ -7,6 +7,7 @@ import {
   assertRemoteTarget,
   certpathAccountId,
   confirmProvisioning,
+  createProvisioningTickets,
   pinRemoteTarget,
   pinnedDatabaseBinding,
   remoteStaffDatabaseName,
@@ -154,7 +155,9 @@ async function snapshot(): Promise<Record<string, number>> {
   };
 }
 
-function buildIdentifiers(suffix: string): ProvisioningIdentifiers {
+async function buildIdentifiers(
+  suffix: string,
+): Promise<ProvisioningIdentifiers> {
   return {
     emails: [
       `remote-one-${suffix}@example.test`,
@@ -172,6 +175,7 @@ function buildIdentifiers(suffix: string): ProvisioningIdentifiers {
     certificationName: `Remote rehearsal ${suffix}`,
     examVersionKey: "v1",
     hashes: [fakeHash("A"), fakeHash("B"), fakeHash("C")],
+    enrolmentTickets: await createProvisioningTickets(),
     now: 1763150000000,
   };
 }
@@ -188,7 +192,7 @@ async function abortCode(run: () => Promise<unknown>): Promise<string> {
 
 describe("remote staff provisioning", () => {
   it("writes exactly two Global Admins and one scoped Manager through the pinned binding", async () => {
-    const identifiers = buildIdentifiers("happy");
+    const identifiers = await buildIdentifiers("happy");
     const { runner, state } = createMockRunner();
 
     await assertRemoteTarget(runner, verifiedDatabaseId);
@@ -251,7 +255,7 @@ describe("remote staff provisioning", () => {
   });
 
   it("writes nothing to a database swapped in behind the certpath-admin name after preflight", async () => {
-    const identifiers = buildIdentifiers("swapped");
+    const identifiers = await buildIdentifiers("swapped");
     const { runner, state } = createMockRunner();
 
     await assertRemoteTarget(runner, verifiedDatabaseId);
@@ -285,7 +289,7 @@ describe("remote staff provisioning", () => {
   });
 
   it("fails closed when the verified UUID is unavailable", async () => {
-    const identifiers = buildIdentifiers("unavailable");
+    const identifiers = await buildIdentifiers("unavailable");
     const before = await snapshot();
     const { runner, state } = createMockRunner();
     const broken: ProvisioningTarget = {
@@ -346,7 +350,7 @@ describe("remote staff provisioning", () => {
   });
 
   it("writes nothing when a tester account already exists", async () => {
-    const identifiers = buildIdentifiers("existing");
+    const identifiers = await buildIdentifiers("existing");
     const now = 1763150000000;
     const existingUser = crypto.randomUUID();
     await env.DB.prepare(

@@ -28,7 +28,7 @@ the events target, **in code only**; see §Events target below.
 | **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Run completed 17 Nov 2026**: database created (22:25:00Z, `WEUR`) and migrated (21 migrations), id recorded in #134, both exports rehearsed to exit 0; [runbook](pilot-provisioning.md) |
 | **5D Fake door** | Price validation without taking payment | 5B (funnel), 5E (hostname) | none | Owner approval: product and pricing rule |
 | **5E Hostname decision** | Canonical pilot hostname and routing | 5C | none | **Owner approval required**: brand, domain, canonical origin |
-| **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor | 5C, ADR 0004 | **0023** | ARC design + owner approval: access policy |
+| **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor (in-Worker TOTP, recovery codes, Global-Admin reset) | 5C, ADR 0004 | **0023** | **Design approved 18 November 2026**; [design record](5f-staff-second-factor.md). Code, migration, tests and docs land together; the deploy and `STAFF_MFA_SEAL_KEY` are the owner's |
 
 Order: **5A -> 5C -> 5B**, with 5E parallel to 5B and 5D after both. 5F gates the
 first real learner, not the first database.
@@ -38,7 +38,7 @@ first real learner, not the first database.
 - `0021` is reserved for 5B (`pilot_events`).
 - `0022` is taken by the `pilot_events` retention floor (#110), which landed
   ahead of 5F; see [`docs/pilot-events-retention.md`](pilot-events-retention.md).
-- `0023` is reserved for 5F (assurance/MFA).
+- `0023` is taken by 5F (`0023_staff_second_factor.sql`).
 - 5A adds no migration. The only file it adds under `db/migrations/` is
   `checksums.txt`; no existing migration is edited.
 
@@ -177,6 +177,23 @@ resource was created, and the runbook for the run that created it. The one
 resource that run created is the staging database; the pilot database, the
 learner and the Worker deployment stayed out.
 
+## What 5F ships
+
+| Piece | Where |
+|---|---|
+| The design record (verbatim, plus the four owner decisions) | [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md) |
+| TOTP, the sealed seed, recovery codes and tickets | `apps/api/src/security/totp.ts` |
+| The second-factor state machine | `apps/api/src/security/staff-mfa.ts` |
+| `mfa/*` routes under `/admin/auth` | `apps/api/src/staff-auth.ts` |
+| Migration (three tables, eleven triggers, six rate-limit scopes) | `db/migrations/0023_staff_second_factor.sql` |
+| Enrol / verify pages | `apps/web/app/components/staff-mfa.tsx`, `app/routes/admin-mfa-*.tsx` |
+| Enrolment tickets printed beside the passwords | `apps/api/scripts/provision-staff-accounts.ts` |
+
+The second factor is built and tested; it is **not deployed**. `STAFF_MFA_SEAL_KEY`
+is a deploy-time Worker secret that this slice does not set, and with it missing
+every MFA route answers `503 service_unavailable` rather than falling back to a
+plaintext seed.
+
 ## Resolved decisions
 
 | Decision | Outcome | Date |
@@ -190,7 +207,6 @@ learner and the Worker deployment stayed out.
 - 5D: the price point to validate and what "demand" means (owner).
 - 5E: canonical hostname and whether the pilot keeps a `workers.dev` origin
   (owner).
-- 5F: the MFA method that replaces `tester-gate` (ARC, then owner).
 - Enabling the retention prune and the events flags (owner). The enforcement
   itself landed in `0022` (#110); what is left is the decision to turn
   `PILOT_EVENTS_RETENTION_ENABLED`, `PILOT_EVENTS_ENABLED` and

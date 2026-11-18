@@ -9,7 +9,10 @@ export type LocalRateLimitAction =
   | "sign_in_link_request"
   | "sign_in_link_inspect"
   | "sign_in_link_redeem"
-  | "staff_sign_in";
+  | "staff_sign_in"
+  | "staff_mfa_verify"
+  | "staff_mfa_enrol"
+  | "staff_recovery_redeem";
 
 export type JsonBody =
   | { ok: true; value: unknown }
@@ -31,6 +34,11 @@ const ratePolicies: Record<
   sign_in_link_inspect: { windowMs: 15 * 60 * 1000, maxIp: 60 },
   sign_in_link_redeem: { windowMs: 15 * 60 * 1000, maxIp: 20 },
   staff_sign_in: { windowMs: 15 * 60 * 1000, maxIp: 10, maxEmail: 5 },
+  // 5F. Rate limits are the only lockout control (owner decision 1), so these
+  // three windows are the whole defence against guessing a 6-digit code.
+  staff_mfa_verify: { windowMs: 15 * 60 * 1000, maxIp: 10, maxEmail: 5 },
+  staff_mfa_enrol: { windowMs: 60 * 60 * 1000, maxIp: 10, maxEmail: 3 },
+  staff_recovery_redeem: { windowMs: 60 * 60 * 1000, maxIp: 10, maxEmail: 3 },
 };
 
 export function isLocalOrigin(origin: string): boolean {

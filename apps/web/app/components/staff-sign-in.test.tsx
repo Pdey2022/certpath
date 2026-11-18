@@ -40,8 +40,8 @@ function renderSignIn() {
     [
       { path: "/admin/sign-in", element: createElement(StaffSignIn) },
       {
-        path: "/admin/question-editor",
-        element: createElement("p", null, "Editor stub"),
+        path: "/admin/mfa/verify",
+        element: createElement("p", null, "Second factor stub"),
       },
     ],
     { initialEntries: ["/admin/sign-in"] },
@@ -63,7 +63,7 @@ test("explains that staff sign-in is unavailable when the Worker reports it disa
   globalThis.fetch = async (input) => {
     const path = new URL(String(input), browser.location.href).pathname;
     assert.equal(path, "/api/admin/auth/preflight");
-    return jsonResponse({ signInEnabled: false, testerAssuranceEnabled: false });
+    return jsonResponse({ signInEnabled: false, mfaMethods: [], testerAssuranceEnabled: false });
   };
 
   renderSignIn();
@@ -77,10 +77,10 @@ test("posts the individual staff credentials and moves to the protected editor",
   globalThis.fetch = async (input, init) => {
     const path = new URL(String(input), browser.location.href).pathname;
     if (path === "/api/admin/auth/preflight") {
-      return jsonResponse({ signInEnabled: true, testerAssuranceEnabled: true });
+      return jsonResponse({ signInEnabled: true, mfaMethods: ["totp"], testerAssuranceEnabled: false });
     }
     calls.push({ path, body: JSON.parse(String(init?.body)) });
-    return jsonResponse({ redirectTo: "/admin/question-editor" });
+    return jsonResponse({ redirectTo: "/admin/mfa/verify" });
   };
 
   renderSignIn();
@@ -92,7 +92,7 @@ test("posts the individual staff credentials and moves to the protected editor",
   });
   fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
-  await screen.findByText("Editor stub");
+  await screen.findByText("Second factor stub");
   assert.deepEqual(calls, [
     {
       path: "/api/admin/auth/sign-in",
@@ -108,7 +108,7 @@ test("shows a generic message for rejected credentials", async () => {
   globalThis.fetch = async (input) => {
     const path = new URL(String(input), browser.location.href).pathname;
     if (path === "/api/admin/auth/preflight") {
-      return jsonResponse({ signInEnabled: true, testerAssuranceEnabled: true });
+      return jsonResponse({ signInEnabled: true, mfaMethods: ["totp"], testerAssuranceEnabled: false });
     }
     return jsonResponse({ error: { code: "invalid_credentials" } }, 401);
   };
@@ -123,5 +123,5 @@ test("shows a generic message for rejected credentials", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
   await screen.findByText("Email or password is incorrect.");
-  assert.equal(screen.queryByText("Editor stub"), null);
+  assert.equal(screen.queryByText("Second factor stub"), null);
 });

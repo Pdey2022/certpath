@@ -115,11 +115,14 @@ own clock.
 
 ### MFA dependency
 
-Platform-wide learner access is acceptable on the labelled `tester-gate`
-assurance only while the IP allowlist is non-empty, because real MFA is parked.
-This surface may not be used for real learner data until an approved MFA factor
-replaces `tester-gate` (Phase 5 gate). That is a security dependency, not a
-preference.
+Both staff roles require MFA, and 5F has built the factor: an in-Worker RFC 6238
+TOTP code upgrades a password-only session in place, ten one-time recovery codes
+are issued once at enrolment, and a Global-Admin reset replaces a lost factor. The
+`tester-gate` label is retired at the storage layer (`0023`). This surface may not
+be used for real learner data until the deploy, the two Worker settings and one
+enrolment per staff account are done; see
+[`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md). That is a security
+dependency, not a preference.
 
 Milestone 0 renders a non-functional admin shell only. It has no fixture
 identity, role switching, permission enforcement or privileged data.
@@ -136,8 +139,16 @@ Every `/admin` page and `/api/admin` route is behind a client-IP tester allowlis
 that fails closed: an empty allowlist closes the entire admin surface, and an
 unlisted client is refused before any handler or database write.
 
-Both staff roles still require MFA. Real factors are parked, so a labelled
-`tester-gate` assurance is accepted only while the tester allowlist is configured
-and the owner has explicitly enabled it, and it is recorded on every session it
-mints. It must be replaced by an approved factor before any non-tester use; see
-[the tester access review](reviews/admin-tester-access.md).
+Both staff roles require MFA. Since 5F the factor is real: password sign-in
+mints a session with no assurance, and one TOTP code - from the authenticator
+enrolled with a printed ticket - upgrades that same session. Failure is a precise
+`403 mfa-assurance-missing`, `mfa-assurance-unsupported` or `mfa-assurance-stale`
+before any handler runs.
+
+The `tester-gate` assurance is retired in every `supportedMfaMethods` list and
+refused by `0023`'s `app_sessions_no_tester_gate_*` triggers: a configuration
+that still names it answers 503, and no code path can mint the label again. The
+`ADMIN_TESTER_IPS` allowlist is kept as defence in depth and is no longer an
+assurance. The remaining act before non-tester use is the deploy and one
+enrolment per staff account; see
+[the 5F design record](5f-staff-second-factor.md).
