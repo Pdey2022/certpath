@@ -427,10 +427,23 @@ Verified PILOT_SERVER_EVENTS_ENABLED="false"
 Verified PILOT_EVENTS_RETENTION_ENABLED="false"
 ```
 
-`--allow-pilot-flags` is the only override —
-`npm run deploy:staging -- --allow-pilot-flags` — and it permits a flag that is
-not `"false"` for a deliberate, owner-approved flag change, printing
+`--allow-pilot-flags` is the only override, and it permits a flag that is not
+`"false"` for a deliberate, owner-approved flag change, printing
 `Pilot flag override: --allow-pilot-flags (the flags above are not asserted false)`.
+Pass it where the CLI runs — from `apps/web`:
+
+```powershell
+Set-Location apps\web
+npm run deploy:staging -- --allow-pilot-flags
+Set-Location ..\..
+```
+
+`npm run deploy:staging -- --allow-pilot-flags` **from the repository root does
+not reach the CLI**: the root script delegates to `@certpath/web`, so the flag
+stops at the delegating `npm`. That combination is fail-closed — the guard still
+refuses an enabled flag with `staging_pilot_flag_enabled` — but it is a refusal,
+not an applied override. From the root the working form is
+`npm run deploy:staging --workspace @certpath/web -- --allow-pilot-flags`.
 It does not permit a flag to be absent: a build that dropped the vars is not the
 artefact the guard checked. Every refusal and the accepted path are covered in
 `apps/web/scripts/staging-command.test.mjs`; the refusals never spawn `deploy`.
