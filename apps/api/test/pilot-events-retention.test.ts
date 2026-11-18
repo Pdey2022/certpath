@@ -7,10 +7,27 @@ import {
   pilotEventRetentionWindowMs,
   pilotEventsRetentionEnabled,
 } from "../src/analytics/pilot-events-retention.ts";
-// Every committed Worker config, so a new `wrangler*.jsonc` that declares the
-// events flags cannot escape the coupling rule below.
+import { schedulePilotEventRetention } from "../../web/workers/pilot-events-retention-schedule.ts";
+
+// Every committed Worker config, so a new `wrangler*.jsonc` in any workspace
+// that declares the events flags cannot escape the coupling rule below. The
+// patterns are the npm workspaces (`apps/*`, `packages/*`) plus the repository
+// root; the coverage assertions below fail if they stop matching.
 const wranglerConfigs: Record<string, string> = import.meta.glob(
-  "../../web/wrangler*.jsonc",
+  [
+    "../../*/wrangler*.jsonc",
+    "../../../packages/*/wrangler*.jsonc",
+    "../../../wrangler*.jsonc",
+  ],
+  { query: "?raw", import: "default", eager: true },
+);
+
+// The staging entry point, read as text: it imports `./app`, which pulls React
+// Router and the `virtual:react-router/server-build` bundle, so it can be
+// bundled for the Worker but not imported here. Its wiring is asserted below
+// instead.
+const stagingAppSource: Record<string, string> = import.meta.glob(
+  "../../web/workers/staging-app.ts",
   { query: "?raw", import: "default", eager: true },
 );
 
@@ -403,6 +420,12 @@ describe("PILOT_EVENTS_RETENTION_ENABLED is an exact-string gate", () => {
     expect(covered.map(([file]) => file).join("\n")).toContain(
       "wrangler.jsonc",
     );
+    // Staging declares the events flags since #141, so the widened glob must
+    // reach it: a pattern that silently skips the events target would leave
+    // that config's coupling unchecked.
+    expect(covered.map(([file]) => file).join("\n")).toContain(
+      "wrangler.staging.jsonc",
+    );
 
     for (const [file, source] of covered) {
       expect(couplingViolations(source), file).toEqual([]);
@@ -442,5 +465,141 @@ describe("PILOT_EVENTS_RETENTION_ENABLED is an exact-string gate", () => {
          "PILOT_SERVER_EVENTS_ENABLED": "true"`,
       ),
     ).toEqual([]);
+  });
+});
+
+/**
+ * A `pilot_events` access path that records every statement it is asked to
+ * prepare. The prune reaches a row only through `prepare`, so an empty list is
+ * proof that the job read no row.
+ */
+function recordingDatabase(inner: SecurityDatabase) {
+  const statements: string[] = [];
+  const db: SecurityDatabase = {
+    prepare(query) {
+      statements.push(query);
+      return inner.prepare(query);
+    },
+    withSession(constraint) {
+      return inner.withSession(constraint);
+    },
+    batch(items) {
+      return inner.batch(items);
+    },
+  };
+  return { db, statements };
+}
+
+/** A `scheduled` context that keeps the promises the job hands it. */
+function recordingContext() {
+  const pending: Promise<unknown>[] = [];
+  return {
+    pending,
+    ctx: {
+      waitUntil(promise: Promise<unknown>) {
+        pending.push(promise);
+      },
+    },
+  };
+}
+
+// #136, for the Worker #141 made the events target. The staging Worker's
+// `scheduled` handler is `schedulePilotEventRetention` in
+// `apps/web/workers/pilot-events-retention-schedule.ts`, driven here against the
+// same real 0022 schema as the tests above: the flag-off direction is the one
+// that has to fail if the gate moves inside `ctx.waitUntil`, because a no-op
+// that still prepares a statement is not a no-op.
+describe("the staging scheduled handler gates the pilot-event prune", () => {
+  it('prepares no statement and reads no row when the flag is absent or not exactly "true"', async () => {
+    const retained = oldRow();
+    await insert(retained);
+
+    for (const bindings of [
+      {},
+      { PILOT_EVENTS_RETENTION_ENABLED: "false" },
+      { PILOT_EVENTS_RETENTION_ENABLED: "TRUE" },
+      { PILOT_EVENTS_RETENTION_ENABLED: " true" },
+    ]) {
+      const recorded = recordingDatabase(database);
+      const { ctx, pending } = recordingContext();
+
+      schedulePilotEventRetention({ DB: recorded.db, ...bindings }, ctx);
+
+      expect(recorded.statements, JSON.stringify(bindings)).toEqual([]);
+      expect(pending, JSON.stringify(bindings)).toHaveLength(0);
+    }
+
+    expect(await exists(retained)).toBe(1);
+
+    // The row was genuinely prunable, and it leaves the fixture here: the batch
+    // test above counts deletes and would otherwise see this row.
+    expect(await cleanupExpiredPilotEvents(database, Date.now())).toEqual({
+      ok: true,
+      value: { deleted: 1 },
+    });
+  });
+
+  it('runs the prune and deletes only aged rows when the flag is exactly "true"', async () => {
+    const aged = oldRow();
+    const young = newBrowserRow();
+    await insert(aged);
+    await insert(young);
+
+    const recorded = recordingDatabase(database);
+    const { ctx, pending } = recordingContext();
+
+    schedulePilotEventRetention(
+      { DB: recorded.db, PILOT_EVENTS_RETENTION_ENABLED: "true" },
+      ctx,
+    );
+
+    expect(recorded.statements).toHaveLength(1);
+    expect(recorded.statements[0]).toMatch(/^DELETE FROM pilot_events\b/);
+    await Promise.all(pending);
+
+    expect(await exists(aged)).toBe(0);
+    expect(await exists(young)).toBe(1);
+  });
+
+  it("throws only the failure reason when the prune refuses its input", async () => {
+    const aged = oldRow();
+    await insert(aged);
+    const recorded = recordingDatabase(database);
+    const { ctx, pending } = recordingContext();
+
+    schedulePilotEventRetention(
+      { DB: recorded.db, PILOT_EVENTS_RETENTION_ENABLED: "true" },
+      ctx,
+      Number.NaN,
+    );
+
+    // The refusal happens before a statement exists, so no row is read either.
+    expect(recorded.statements).toEqual([]);
+    const failure = await pending[0].catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      "Pilot event retention cleanup failed: invalid-input",
+    );
+    expect(await exists(aged)).toBe(1);
+  });
+
+  it("is wired into the staging entry point beside its cron", () => {
+    const sources = Object.values(stagingAppSource);
+    expect(sources).toHaveLength(1);
+    const source = sources[0];
+    // A `scheduled` handler that never calls the gate - or one that borrowed
+    // `app.ts`'s handler and would also run question-import cleanup, audit
+    // retention and commerce expiry - fails here.
+    expect(source).toMatch(/scheduled\(_controller, env, ctx\)/);
+    expect(source).toMatch(/schedulePilotEventRetention\(env, ctx\)/);
+
+    const staging = Object.entries(wranglerConfigs).find(([file]) =>
+      file.endsWith("/wrangler.staging.jsonc"),
+    );
+    expect(staging, "wrangler.staging.jsonc").toBeDefined();
+    // No cron, no invocation: the declared schedule is part of the delivery.
+    expect(staging?.[1]).toMatch(
+      /"crons"\s*:\s*\[\s*"\*\/5 \* \* \* \*"\s*\]/,
+    );
   });
 });

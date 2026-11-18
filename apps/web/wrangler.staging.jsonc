@@ -3,6 +3,9 @@
 	"name": "learner-auth-staging",
 	"compatibility_date": "2026-11-10",
 	"main": "./workers/staging-app.ts",
+	"triggers": {
+		"crons": ["*/5 * * * *"]
+	},
 	"workers_dev": true,
 	"preview_urls": false,
 	"vars": {
@@ -13,7 +16,10 @@
 		"AWS_REGION": "eu-north-1",
 		"LEARNER_GOOGLE_OIDC_ENABLED": "false",
 		"GOOGLE_OIDC_CLIENT_ID": "",
-		"GOOGLE_OIDC_REDIRECT_URI": ""
+		"GOOGLE_OIDC_REDIRECT_URI": "",
+		"PILOT_EVENTS_ENABLED": "false",
+		"PILOT_SERVER_EVENTS_ENABLED": "false",
+		"PILOT_EVENTS_RETENTION_ENABLED": "false"
 	},
 	"d1_databases": [
 		{

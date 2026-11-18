@@ -7,6 +7,16 @@
 No cloud resources were created or changed, no email was sent, and no account
 was upgraded. PR #15 and the staff MFA/Cognito sandboxes remain untouched.
 
+> **Update, 18 November 2026.** The staging Worker still does not exist
+> (`code: 10007`), so nothing in this review is deployed. Two statements above
+> have since gone stale: the `database_id` in `apps/web/wrangler.staging.jsonc`
+> is the real `certpath-learner-staging` id recorded in #134, not a placeholder;
+> and that config now declares a `*/5 * * * *` cron plus the three pilot event
+> flags, all `"false"` (#141). The cron exists so the staging Worker can prune
+> pilot events once it is deployed — with every flag `"false"` its `scheduled`
+> handler prepares no statement and reads no row — so the "keep cron jobs off"
+> precondition below is about an enablement run, not about the committed config.
+
 ## Readiness summary
 
 The HTTPS sign-in path is implemented for local review only. No Cloudflare or

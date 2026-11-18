@@ -6,12 +6,16 @@ each one can be reviewed, approved and rolled back on its own. This file records
 the slices, their order, their migration reservations and the decisions each one
 needs.
 
-Status: **5A approved by the owner and in review; 5B (pilot funnel events) is
-implemented on a draft PR with its design approved by the owner on 17 November
-2026; 5C is narrowed to one staging database with no learner, design approved by
-the owner on 17 November 2026 to implement, and not approved to run.** Nothing in
-Phase 5 has been deployed or provisioned, and both funnel flags and
-`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`.
+Status: **5A, 5B and 5C are merged, and the 5C run completed on 17 November
+2026.** That run created `certpath-learner-staging` (17 November 2026 at
+22:25:00Z, region `WEUR`) and migrated it through `0021_pilot_events.sql` (21
+applied migrations), recorded its id in #134, and exported and rehearsed twice to
+exit 0. **No Worker is deployed, and no secret, route or
+deployment exists**: `learner-auth-staging` answers `code: 10007` (not found),
+checked 18 November 2026. `0022_pilot_events_retention.sql` is not applied to that
+database (see §Retention precondition), and both funnel flags and
+`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`. #141 decides the staging Worker is
+the events target, **in code only**; see §Events target below.
 
 ## Slices
 
@@ -19,7 +23,7 @@ Phase 5 has been deployed or provisioned, and both funnel flags and
 |---|---|---|---|---|
 | **5A Data-safety tooling** | D1 isolation gate, export + manifest, rehearsed restore, fresh-chain check, `verify` wiring, export runbook | - | none (`db/migrations/checksums.txt` is not a migration) | **Approved 17 Nov 2026** |
 | **5B Pilot funnel events** | `pilot_events` (consent-aware, no personal data), the events that the fake door needs | 5A (export/restore tooling), 5C (a database to write to) | **0021** | **Design approved 17 Nov 2026**; the consent-issuing surface is 5D and `PILOT_SERVER_EVENTS_ENABLED` is unblocked but not enabled |
-| **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Design approved 17 Nov 2026 to implement, NOT approved to run**; [runbook](pilot-provisioning.md) |
+| **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Run completed 17 Nov 2026**: database created (22:25:00Z, `WEUR`) and migrated (21 migrations), id recorded in #134, both exports rehearsed to exit 0; [runbook](pilot-provisioning.md) |
 | **5D Fake door** | Price validation without taking payment | 5B (funnel), 5E (hostname) | none | Owner approval: product and pricing rule |
 | **5E Hostname decision** | Canonical pilot hostname and routing | 5C | none | **Owner approval required**: brand, domain, canonical origin |
 | **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor | 5C, ADR 0004 | **0023** | ARC design + owner approval: access policy |
@@ -101,7 +105,50 @@ precondition is the owner's enablement decision. Both
 `PILOT_EVENTS_ENABLED` and `PILOT_SERVER_EVENTS_ENABLED` stay `"false"` until
 then, and the scheduled prune stays off until the owner turns it on: with it off
 the table accumulates rows and nothing is removed automatically, though every
-in-window delete is still refused by storage.
+in-window delete is still refused by storage. The prune is now also declared for
+the staging Worker, which is the events target — code only, not deployed
+(§Events target below).
+
+### Events target (#141): staging, in code only
+
+Closed by owner decision on 18 November 2026. The Worker that will record and
+prune pilot events is the **staging** Worker, `learner-auth-staging`, configured
+by `apps/web/wrangler.staging.jsonc`:
+
+- the config declares the same `*/5 * * * *` cron as `wrangler.jsonc`, and the
+  three events flags, all `"false"` — `PILOT_EVENTS_ENABLED`,
+  `PILOT_SERVER_EVENTS_ENABLED`, `PILOT_EVENTS_RETENTION_ENABLED`;
+- `apps/web/workers/staging-app.ts` has a `scheduled` handler that calls
+  `schedulePilotEventRetention` in
+  `apps/web/workers/pilot-events-retention-schedule.ts`. With every flag
+  `"false"` the cron fires and does nothing: the gate returns before
+  `ctx.waitUntil`, so no statement is prepared and no row is read;
+- the handler does not reuse `app.ts`'s handler, which would also run
+  question-import cleanup, audit retention and commerce expiry against the
+  staging database;
+- nothing is deployed, no flag is turned on, no secret is set, and no route,
+  capability or migration is added. `apps/web/wrangler.jsonc` is unchanged and
+  still binds the all-zero `certpath-local` placeholder.
+
+**What remains before events can be recorded and pruned:**
+
+1. deploy the staging Worker (an owner-approved deployment; the cron ships with
+   the deployment and stays a no-op until step 3);
+2. apply `0022` to the staging database and prove it: that database was migrated
+   through `0021` (21 rows in `d1_migrations`, verified 18 November 2026) and the
+   retention floor landed afterwards, so its index and delete trigger are not
+   there yet — [`docs/pilot-provisioning.md`](pilot-provisioning.md)
+   §Pre-enablement step;
+3. turn `PILOT_EVENTS_RETENTION_ENABLED` on (owner decision) — not before;
+4. only then consider `PILOT_EVENTS_ENABLED` / `PILOT_SERVER_EVENTS_ENABLED`: the
+   coupling test refuses an events flag that is `"true"` while retention is not,
+   because that would promise a twelve-month period nothing delivers.
+
+Until step 1, the staging `scheduled` handler is exercised only by
+`apps/api/test/pilot-events-retention.test.ts`, which drives it against the real
+`0022` schema in the local runtime. No deployed Worker has run it, so the
+schedule is verified by the committed configuration and that test, not by an
+invocation.
 
 ## What 5C ships
 
@@ -113,10 +160,10 @@ in-window delete is still refused by storage.
 | Synthetic smoke fixture (applied in CI only to a throwaway local D1; never by migrations) | `db/fixtures/synthetic-provision-smoke.sql` |
 | Provisioning design and runbook | [`docs/pilot-provisioning.md`](pilot-provisioning.md) |
 
-5C creates nothing in this PR. It adds the assertions that must pass before a
-resource is created, and the runbook for the run that creates it. The one
-resource that run will ever create is the staging database; the pilot database,
-the learner and the Worker deployment all stay out.
+5C itself created nothing: it added the assertions that had to pass before a
+resource was created, and the runbook for the run that created it. The one
+resource that run created is the staging database; the pilot database, the
+learner and the Worker deployment stayed out.
 
 ## Resolved decisions
 
@@ -135,7 +182,8 @@ the learner and the Worker deployment all stay out.
 - Enabling the retention prune and the events flags (owner). The enforcement
   itself landed in `0022` (#110); what is left is the decision to turn
   `PILOT_EVENTS_RETENTION_ENABLED`, `PILOT_EVENTS_ENABLED` and
-  `PILOT_SERVER_EVENTS_ENABLED` on.
+  `PILOT_SERVER_EVENTS_ENABLED` on — and, before any of that, deploying the
+  staging Worker that now owns them (#141).
 
 ## Not in 5A
 
@@ -148,5 +196,6 @@ refund UI, the `needs_support` money policy, receipts cursor) stays out.
 
 No migration or `db/migrations/` change, no checksum change, no dependency, no
 secret, no deploy workflow change, no Worker binding, var or code path, and no
-Cloudflare resource. The `database_id` values stay the all-zero placeholder until
-the owner-approved run records one.
+Cloudflare resource. When the slice landed, every `database_id` was the all-zero
+placeholder; the approved run on 17 November 2026 has since recorded the staging
+id (#134), so only `local` and `pilot` remain placeholders.

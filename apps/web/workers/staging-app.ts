@@ -1,6 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { stagingTesterGate } from "@certpath/api";
 import app from "./app";
+import { schedulePilotEventRetention } from "./pilot-events-retention-schedule";
 
 type StagingEnv = Env & {
   STAGING_TESTER_IPS?: string;
@@ -8,6 +9,7 @@ type StagingEnv = Env & {
   STAGING_LOCAL_TEST_PASSWORD?: string;
   AWS_ACCESS_KEY_ID?: string;
   AWS_SESSION_TOKEN?: string;
+  PILOT_EVENTS_RETENTION_ENABLED?: string;
 };
 
 export class StagingLambdaVerifierStub extends WorkerEntrypoint<StagingEnv> {
@@ -83,5 +85,12 @@ export default {
       });
     }
     return app.fetch(request, env, ctx);
+  },
+  // The cron in `wrangler.staging.jsonc` is the only schedule this Worker has.
+  // Every pilot flag is `"false"`, so today this handler's one job is a no-op:
+  // the gate returns before `ctx.waitUntil`, so no statement is prepared and no
+  // row is read. The 0022 trigger, not this job, enforces the twelve-month floor.
+  scheduled(_controller, env, ctx) {
+    schedulePilotEventRetention(env, ctx);
   },
 } satisfies ExportedHandler<StagingEnv>;

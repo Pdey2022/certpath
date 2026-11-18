@@ -1,19 +1,39 @@
 # Pilot provisioning (Phase 5C)
 
-Status: **design approved to implement (owner, 17 November 2026); NOT approved to
-run.** Nothing in this document has been executed. No Cloudflare resource exists,
-no Worker is deployed, no secret is set, and every `database_id` in the
-repository is still the all-zero placeholder.
+Status: **the 5C run completed on 17 November 2026, under owner approval given
+that day; further provisioning is NOT approved to run.** The run produced one
+Cloudflare resource: the D1 database `certpath-learner-staging`, created on
+17 November 2026 at 22:25:00Z in region `WEUR` and migrated through
+`0021_pilot_events.sql` (**21 applied migrations**:
+`SELECT COUNT(*), MAX(name) FROM d1_migrations` answers `21` and
+`0021_pilot_events.sql`), with its id recorded in #134. Export #1 (first
+non-empty baseline) and rehearsal #1 exited 0 — `replay: schema 101, data 35,
+triggers 141`; export #2 (data-bearing, after the smoke fixture) and rehearsal #2
+exited 0 — `replay: schema 101, data 43, triggers 141`, with the `audit_events`
+count equal to the manifest.
 
-This is the runbook for the one provisioning run the owner will approve later. It
-is written now, with the tooling and the guards, so that the run is a sequence of
-checked steps rather than an improvisation. Implementing 5C changes no
-Cloudflare state; only an owner-approved execution of this document does.
+No Worker is deployed (`learner-auth-staging` answers `code: 10007`, checked
+18 November 2026), no secret is set and no route exists. Apart from the recorded
+staging id, every `database_id` in the committed Wrangler configs is still the
+all-zero placeholder; test fixtures carry their own literal ids.
+`0022_pilot_events_retention.sql` landed after that migration, so the
+retention floor is **not applied** there yet — see §Pre-enablement step below.
+
+**Not approved to run:** deploying the staging Worker, setting its secrets, or
+applying `0022` remotely. Each is a separate owner decision.
+
+This document is both the record of that run and the from-scratch path for a
+future rebuild. Each step is a checked step rather than an improvisation; only an
+owner-approved execution changes Cloudflare state.
 
 ## What 5C is, narrowed
 
 5C creates **one resource**: the D1 database `certpath-learner-staging` in the
-account that owns the staging Worker (`learner-auth-staging`).
+account where the staging Worker (`learner-auth-staging`) will be deployed. That
+Worker does not exist yet: it answered `code: 10007` (not found) on 18 November
+2026, after the database id was recorded (#134). Its
+`apps/web/wrangler.staging.jsonc` gained a `*/5 * * * *` cron and the three
+pilot event flags, all `"false"`, in #141 — code only, not deployed.
 
 It does **not** create:
 
@@ -22,8 +42,11 @@ It does **not** create:
 - a learner, an invited learner, a credential or a sign-in link — no real learner
   data exists until MFA replaces the tester-gate assurance
   ([`docs/delivery-plan.md`](delivery-plan.md) §Operating constraints);
-- a Worker deployment, a route, a secret or a var change. The staging Worker's
-  vars and the `PILOT_*` / `COMMERCE_ENABLED` flags are untouched.
+- a Worker deployment, a route, a secret or a var change. 5C itself changes no
+  var: the three `PILOT_*` flags in `apps/web/wrangler.staging.jsonc`
+  (`PILOT_EVENTS_ENABLED`, `PILOT_SERVER_EVENTS_ENABLED`,
+  `PILOT_EVENTS_RETENTION_ENABLED`) were declared beforehand, all `"false"`, in
+  #141. No flag is enabled, and none is touched by this run.
 
 The original slice plan also seeded one invited learner and exported the pilot
 database "before its first migration". Both were withdrawn by the owner on
@@ -35,32 +58,44 @@ export).
 ## The order
 
 Do not reorder these steps. Each one is a prerequisite for the next, and the
-guards are placed so a skipped step fails rather than passes.
+guards are placed so a skipped step fails rather than passes. The 5C run followed
+this order on 17 November 2026 and the database it created is still the only
+Cloudflare resource; the table records what the run produced. Every step ran:
+they are kept as the record and as the from-scratch path, and none of their
+remote writes should be re-run without a new approval.
 
-| # | Step | Guard or proof |
+| # | Step | State |
 |---|---|---|
-| 1 | Preflight: account matches, database absent | `npm run db:preflight -- --expect-account <id> --database certpath-learner-staging --expect-absent` |
-| 2 | Create the database | `wrangler d1 create certpath-learner-staging` prints the uuid |
-| 3 | Record the uuid **locally**, apply the chain | `d1_migrations` must equal `db/migrations/*.sql` |
-| 4 | Repo PR with the uuid, merged and pulled | the isolation gate and the export run against the committed config |
-| 5 | Preflight again: database present | `--expect-present` |
-| 6 | Export #1 (first non-empty baseline) | `db:export --target staging` writes dump + manifest |
-| 7 | Rehearse #1 | `db:rehearse` restores it into a scratch local database |
-| 8 | Apply the smoke fixture | `db/fixtures/synthetic-provision-smoke.sql` |
-| 9 | Export #2 | the first data-bearing dump |
-| 10 | Rehearse #2 | the first rehearsal that has seen a real row |
+| 1 | Preflight: account matches, database **absent** (`--expect-absent`) | done 17 November 2026 — exited 0 with `database certpath-learner-staging: absent`, before the create |
+| 2 | Create the database | done 17 November 2026 at 22:25:00Z — created in region `WEUR`; the uuid was recorded in #134 |
+| 3 | Record the uuid **locally**, apply the chain | done — 21 applied migrations, last `0021_pilot_events.sql` |
+| 4 | Repo PR with the uuid, merged and pulled | done — #134 |
+| 5 | Preflight again: database present | done |
+| 6 | Export #1 (first non-empty baseline) | done, exit 0 |
+| 7 | Rehearse #1 | done, exit 0 — `replay: schema 101, data 35, triggers 141` |
+| 8 | Apply the smoke fixture | done — rehearsal #2 carried its data rows |
+| 9 | Export #2 (first data-bearing dump) | done, exit 0 |
+| 10 | Rehearse #2 | done, exit 0 — `replay: schema 101, data 43, triggers 141`, `audit_events` count equal to the manifest |
+
+`0022` is deliberately not in this order: it landed after the run and is the one
+remote step still outstanding — §Pre-enablement step.
+
+A **repeat** run does not start at step 1: `--expect-absent` now fails closed as
+`database_already_exists` against the database step 2 created, so it starts at
+step 3, the migrate step, and uses step 5's `--expect-present` to check the
+account and the database as they are. Step 1 keeps the assertion that ran,
+because that assertion is what made the create safe.
 
 ### 1. Preflight
 
-From the repository root:
+This is the assertion the 5C run made before it created anything. From the
+repository root:
 
 ```powershell
 npm run db:preflight -- --expect-account <account-id> --database certpath-learner-staging --expect-absent
 ```
 
-The expected account id is passed **only** as `--expect-account`; it is never
-read from the environment or from a config. On success the output is exactly
-three lines and nothing else:
+On success the output is exactly three lines and nothing else:
 
 ```
 account: <account name> (<account-id>)
@@ -68,9 +103,16 @@ database certpath-learner-staging: absent
 preflight ok
 ```
 
-The command is read-only. It runs `wrangler whoami --json` and
-`wrangler d1 list --json`, asserts the account and the database, and prints
-neither the raw payload nor a token.
+The run exited 0 with that output on 17 November 2026, before the create.
+
+**A repeat run against the database that now exists** fails closed here as
+`database_already_exists` — the guard doing its job. It starts at step 3, the
+migrate step, as the note under the order says.
+
+The expected account id is passed **only** as `--expect-account`; it is never
+read from the environment or from a config. The command is read-only. It runs
+`wrangler whoami --json` and `wrangler d1 list --json`, asserts the account and the
+database, and prints neither the raw payload nor a token.
 
 Both reads are **pinned** to `--expect-account`: the child environment carries
 that id as `CLOUDFLARE_ACCOUNT_ID`, so neither call can fall back to a stored
@@ -110,6 +152,8 @@ variable says.
 
 ### 2. Create
 
+**Done 17 November 2026 at 22:25:00Z: created in region `WEUR`.**
+
 ```powershell
 Set-Location apps\web
 npx wrangler d1 create certpath-learner-staging
@@ -121,15 +165,16 @@ Set-Location ..\..
 the `database_name` stays `certpath-learner-staging`, and the migration directory
 stays `../../db/migrations`.
 
-If the command reports that the database already exists, stop. That is the
-`--expect-absent` assertion having been wrong, and nothing else in this runbook is
-safe to continue with.
+Never run this against a database that exists. If the command reports that the
+database already exists, stop: the step 1 assertion was bypassed or skipped, and
+nothing after this step is safe to continue with.
 
 ### 3. Record the uuid locally and apply the chain
 
+**Done 17 November 2026: 21 migrations applied, last `0021_pilot_events.sql`.**
 The migration step reads the config, and Wrangler needs a real id there, so the
 uuid is written into `apps/web/wrangler.staging.jsonc` **locally** first. That
-edit is not the repo PR: it is an uncommitted change that exists only so step 3
+edit is not the repo PR: it is an uncommitted change that exists only so this step
 can run.
 
 ```powershell
@@ -269,6 +314,46 @@ dumps and both manifests, and escalate: the next move (accepted limitation, a
 documented restore order, or a change to the export strategy) is an architecture
 decision, not an operator workaround.
 
+## Pre-enablement step: apply `0022` to staging
+
+**Not part of 5C, not approved to run, and it blocks the retention flag.** The
+staging database stopped at `0021`: `SELECT COUNT(*), MAX(name) FROM
+d1_migrations` answers `21` and `0021_pilot_events.sql` (verified 18 November
+2026). `0022_pilot_events_retention.sql` landed after that migration, so
+`pilot_events_received_at_idx` and `pilot_events_no_delete` do not exist on
+staging yet, and nothing there enforces the twelve-month floor.
+
+Until this step is done and proven, `PILOT_EVENTS_RETENTION_ENABLED` stays
+`"false"` on staging. Turning it on first would run a prune against a table with
+no floor — the window would be a promise the database cannot keep, which is the
+one thing [`docs/pilot-events-retention.md`](pilot-events-retention.md) says is
+enforced in storage rather than by the job.
+
+```powershell
+Set-Location apps\web
+npx wrangler d1 migrations apply certpath-learner-staging --remote -c wrangler.staging.jsonc
+Set-Location ..\..
+```
+
+Then prove it, and keep the output with the step's record:
+
+```powershell
+Set-Location apps\web
+npx wrangler d1 execute certpath-learner-staging --remote -c wrangler.staging.jsonc `
+  --command "SELECT COUNT(*) AS applied, MAX(name) AS last FROM d1_migrations"
+Set-Location ..\..
+```
+
+Expected after the step: `22` applied and `0022_pilot_events_retention.sql` as
+the last name. Anything else is a stop, not a retry: `21` means the apply did not
+reach the remote database, and any other last name means the ledger does not
+match `db/migrations/*.sql`.
+
+This is a remote write to the staging database, so it needs the owner's approval
+like every other run step. It changes no repository file: no migration is edited,
+no checksum line changes, and `apps/web/wrangler.staging.jsonc` stays exactly as
+committed.
+
 ## Time Travel
 
 D1 Time Travel keeps **7 days** of history on the Free plan; the 30-day window is
@@ -328,8 +413,8 @@ Proven by a completed run:
   whose hash and counts match it;
 - rehearsal #1 restores that dump into a scratch database with matching counts;
 - the provisioned database accepts a synthetic write and its triggers fire;
-- export #2 contains rows, and rehearsal #2 has been attempted against a
-  data-bearing dump.
+- export #2 contains rows, and rehearsal #2 completed against a data-bearing
+  dump (exit 0, `replay: schema 101, data 43, triggers 141`).
 
 Not proven, and not claimed:
 
