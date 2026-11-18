@@ -182,7 +182,7 @@ learner and the Worker deployment stayed out.
 | Decision | Outcome | Date |
 |---|---|---|
 | Export retention | Keep the last 3 dumps; delete 14 days after the migration is confirmed; never commit or upload a dump | Owner decision, 17 November 2026 |
-| Server-originated event consent | **Not required.** Checkout/settlement server rows are written with `consent = 'not-required'`, carry no session id and need no consent reference; `PILOT_SERVER_EVENTS_ENABLED` is unblocked but stays `"false"` until the retention floor (#110) and an enablement decision | Owner decision, 17 November 2026 |
+| Server-originated event consent | **Not required.** Checkout/settlement server rows are written with `consent = 'not-required'`, carry no session id and need no consent reference; `PILOT_SERVER_EVENTS_ENABLED` is unblocked but stays `"false"` pending an enablement decision: the retention floor (#110) has landed in `0022` and was applied to staging on 18 November 2026, and before any events flag turns on there are two further gates per §Events target (#141) — deploying the staging Worker and the #147 CPU measurement | Owner decision, 17 November 2026; amended 18 November 2026 |
 | 5C scope | **One staging database, no learner.** `certpath-learner-staging` is the only resource 5C will ever create; the pilot database and the invited learner are withdrawn because no real learner data exists until MFA replaces the tester-gate assurance ([`docs/delivery-plan.md`](delivery-plan.md) §Operating constraints) | Owner decision, 17 November 2026 |
 
 ## Open decisions that still block Phase 5
