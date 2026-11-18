@@ -22,6 +22,8 @@
     "build:pilot": "npm run build:pilot --workspace @certpath/web",
     "deploy:pilot": "npm run deploy:pilot --workspace @certpath/web",
     "dry-run:pilot": "npm run dry-run:pilot --workspace @certpath/web",
+    "deploy:staging": "npm run deploy:staging --workspace @certpath/web",
+    "dry-run:staging": "npm run dry-run:staging --workspace @certpath/web",
     "learner:provision": "node apps/api/scripts/provision-learner-sign-in-invite.mjs",
     "staff:provision": "tsx apps/api/scripts/provision-staff-accounts.ts",
     "typecheck": "npm run typecheck --workspaces --if-present",
