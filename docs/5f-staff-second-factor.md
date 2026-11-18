@@ -31,7 +31,9 @@ Two further post-design clarifications, applied as written in the design:
 One correction from ARC's review of 18 November 2026 is marked in place inside the
 record, in the recovery paragraph: the codes carry **49.08 bits** (10 × log₂30),
 not 50, and redemption returns the one printed enrolment ticket as well as
-`{next:"enrol"}`. Everything else below the rule is untouched.
+`{next:"enrol"}`. Two rows are added to the failure-modes table for the same
+review round (a confirm race, and the crash window after the confirm claim).
+Everything else below the rule is untouched.
 
 ---
 
@@ -123,6 +125,8 @@ Logging: codes, seeds, `otpauthUri`, tickets, recovery codes and their digests n
 | Session minted under the old label | `mfa-assurance-unsupported` (403) on every route and inside every statement guard; row kept for history |
 | Attacker with the staff password only | Reaches `mfa/enrol`/`mfa/verify` only; cannot enrol (ticket required), cannot enrol over an existing credential, cannot pass the guards; sign-in is rate-limited |
 | Seal key missing/short | 503 `service_unavailable` on MFA routes; admin surface closed, not downgraded |
+| Two confirmations race *(ARC review, 18 November 2026)* | The `confirmed_at IS NULL` claim is its own statement and only the winner runs the revoke-and-issue batch: exactly one 200, one 409, and the winner's ten codes stay live. |
+| Crash after the confirm claim, before the code insert *(ARC review, 18 November 2026)* | The credential is confirmed and the account has no recovery codes. Nothing is bypassed — sign-in still needs the TOTP code — and the path back to a code set is a Global-Admin reset, which is audited. |
 
 ## Acceptance criteria
 

@@ -221,6 +221,7 @@ type EnrolmentStep =
 
 export function StaffMfaEnrol() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [state, setState] = useState<EnrolmentStep>({ step: "ticket" });
   const [ticket, setTicket] = useState(() => {
     // A ticket issued by a recovery redemption arrives in router state and is
@@ -244,6 +245,9 @@ export function StaffMfaEnrol() {
         secret: result.secret,
         otpauthUri: result.otpauthUri,
       });
+      // The handed-over ticket is spent and must not linger in `history.state`
+      // where a reload or a back-navigation would surface it again.
+      navigate(".", { replace: true, state: null });
     } catch (cause) {
       setError(
         messageForFailure(

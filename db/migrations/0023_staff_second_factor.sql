@@ -208,6 +208,15 @@ BEGIN
   SELECT RAISE(ABORT, 'a recovery code is single-use');
 END;
 
+-- "Exactly one live set per account" is a storage invariant, not a convention of
+-- `confirmStaffTotp`: a revoked code can never be brought back.
+CREATE TRIGGER staff_recovery_codes_no_unrevoke
+BEFORE UPDATE OF revoked_at ON staff_recovery_codes
+WHEN OLD.revoked_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'a revoked recovery code stays revoked');
+END;
+
 CREATE TRIGGER staff_recovery_codes_max_ten_active
 BEFORE INSERT ON staff_recovery_codes
 WHEN (
@@ -248,6 +257,30 @@ BEGIN
     NEW.used_operation_id, NEW.user_id, NULL, 'staff_recovery_code_used',
     'staff_mfa', NEW.user_id, NULL,
     'Staff recovery code redeemed', NEW.used_at
+  );
+END;
+
+-- Revoking a set is an act too, and the file's own header promises a row for
+-- every act. One row per *set*: the operation id is derived from the set's own
+-- identifier, so all ten rows of a revoked set agree and only the first writes.
+-- No actor: a set is revoked when the factor is confirmed or reset, and the row
+-- about the privileged act (if any) is written by the route that performed it.
+CREATE TRIGGER staff_recovery_codes_audit_revoked
+AFTER UPDATE OF revoked_at ON staff_recovery_codes
+WHEN OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_events
+    WHERE operation_id = 'staff-recovery-revoked:' || NEW.set_operation_id
+  )
+BEGIN
+  INSERT INTO audit_events (
+    operation_id, actor_user_id, actor_ref, action, subject_type, subject_id,
+    certification_id, reason, occurred_at
+  ) VALUES (
+    'staff-recovery-revoked:' || NEW.set_operation_id,
+    NULL, 'staff-mfa-trigger', 'staff_recovery_codes_revoked', 'staff_mfa',
+    NEW.user_id, NULL,
+    'Staff recovery codes revoked', NEW.revoked_at
   );
 END;
 

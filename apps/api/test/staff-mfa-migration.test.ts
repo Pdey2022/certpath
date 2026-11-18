@@ -230,6 +230,53 @@ describe("0023 over existing tester-gate sessions", () => {
     expect(forward.meta.changes).toBe(1);
   });
 
+  it("refuses to un-revoke a recovery code", async () => {
+    const identity = await createTestIdentity(database);
+    await grantTestRole(database, identity.userId, "global_admin");
+    const digest = "1".repeat(64);
+    await database
+      .prepare(
+        `INSERT INTO staff_recovery_codes (
+           code_digest, user_id, set_operation_id, created_at
+         ) VALUES (?, ?, ?, ?)`,
+      )
+      .bind(digest, identity.userId, `test-set:${crypto.randomUUID()}`, testNow)
+      .run();
+
+    const revoked = await database
+      .prepare(
+        `UPDATE staff_recovery_codes SET revoked_at = ?
+         WHERE code_digest = ?
+         RETURNING code_digest`,
+      )
+      .bind(testNow, digest)
+      .all<{ code_digest: string }>();
+    // Rows, not `meta.changes`: the revoked-set audit trigger adds to that count.
+    expect(revoked.results).toHaveLength(1);
+
+    const audited = await database
+      .prepare(
+        `SELECT actor_user_id, action FROM audit_events
+         WHERE action = 'staff_recovery_codes_revoked' AND subject_id = ?`,
+      )
+      .bind(identity.userId)
+      .all<{ actor_user_id: string | null; action: string }>();
+    expect(audited.results).toEqual([
+      { actor_user_id: null, action: "staff_recovery_codes_revoked" },
+    ]);
+
+    // "Exactly one live set" is a storage invariant, not a code convention.
+    await expect(
+      database
+        .prepare(
+          `UPDATE staff_recovery_codes SET revoked_at = NULL
+           WHERE code_digest = ?`,
+        )
+        .bind(digest)
+        .run(),
+    ).rejects.toThrow(/revoked recovery code stays revoked/);
+  });
+
   it("refuses a policy that still names tester-gate", async () => {
     const identity = await createTestIdentity(database);
     await grantTestRole(database, identity.userId, "global_admin");

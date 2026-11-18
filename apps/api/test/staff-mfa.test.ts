@@ -520,6 +520,66 @@ describe("staff second factor", () => {
     }
   });
 
+  it("a lost confirm race leaves the winner's ten codes intact", async () => {
+    const email = uniqueEmail("mfa-confirm-race");
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await signedInCookie(email);
+    expect(
+      (
+        await postMfa("/mfa/enrol", cookie, {
+          ticket: await issueTicket(userId),
+        })
+      ).status,
+    ).toBe(200);
+    const seed = await seedFor(userId);
+    const code = await codeAt(seed, clock);
+
+    // Both requests pass the `confirmed_at !== null` pre-check. Only the claim
+    // decides, and the loser must not touch a single row of the winner's.
+    const [first, second] = await Promise.all([
+      postMfa("/mfa/enrol/confirm", cookie, { code }),
+      postMfa("/mfa/enrol/confirm", cookie, { code }),
+    ]);
+    expect([first.status, second.status].sort((a, b) => a - b)).toEqual([
+      200, 409,
+    ]);
+
+    const live = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes
+         WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(live?.count).toBe(10);
+    const total = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM staff_recovery_codes WHERE user_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(total?.count).toBe(10);
+
+    // Exactly one issued set was recorded, and nothing was revoked: the losing
+    // request did not revoke the winner's codes, nor issue a set nobody saw.
+    const issued = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_recovery_codes_issued' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(issued?.count).toBe(1);
+    const revokedSets = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_recovery_codes_revoked' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(revokedSets?.count).toBe(0);
+  }, 30_000);
+
   it("recovery code is single-use", async () => {
     const email = uniqueEmail("mfa-recovery-once");
     const userId = await provisionStaff("global_admin", email);
@@ -576,6 +636,47 @@ describe("staff second factor", () => {
       .bind(userId)
       .first<{ count: number }>();
     expect(privileged?.count).toBe(0);
+
+    // Provenance: the ticket is the one this redemption issued, not the printed
+    // one the account enrolled with, and it lives for exactly 24 hours.
+    const recoveryTickets = await database
+      .prepare(
+        `SELECT ticket_digest, created_by_user_id, created_by_ref, created_at,
+                expires_at, consumed_at, revoked_at
+         FROM staff_mfa_enrolment_tickets
+         WHERE user_id = ? AND created_by_ref = 'recovery-code'`,
+      )
+      .bind(userId)
+      .all<{
+        ticket_digest: string;
+        created_by_user_id: string | null;
+        created_by_ref: string;
+        created_at: number;
+        expires_at: number;
+        consumed_at: number | null;
+        revoked_at: number | null;
+      }>();
+    expect(recoveryTickets.results).toEqual([
+      {
+        ticket_digest: expect.any(String),
+        created_by_user_id: null,
+        created_by_ref: "recovery-code",
+        created_at: clock,
+        expires_at: clock + 86_400_000,
+        consumed_at: null,
+        revoked_at: null,
+      },
+    ]);
+    const liveTickets = await database
+      .prepare(
+        `SELECT ticket_digest FROM staff_mfa_enrolment_tickets
+         WHERE user_id = ? AND consumed_at IS NULL AND revoked_at IS NULL`,
+      )
+      .bind(userId)
+      .all<{ ticket_digest: string }>();
+    expect(liveTickets.results).toEqual([
+      { ticket_digest: recoveryTickets.results[0]?.ticket_digest },
+    ]);
   });
 
   it("recovery redemption re-enrols with the ticket it returns", async () => {
@@ -603,6 +704,19 @@ describe("staff second factor", () => {
       code: await codeAt(replacement, clock),
     });
     expect(confirmed.status).toBe(200);
+
+    // The new set supersedes the old one, and revoking a set is itself an act:
+    // exactly one row for it, with no actor invented.
+    const revokedSets = await database
+      .prepare(
+        `SELECT actor_user_id, subject_id FROM audit_events
+         WHERE action = 'staff_recovery_codes_revoked' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .all<{ actor_user_id: string | null; subject_id: string }>();
+    expect(revokedSets.results).toEqual([
+      { actor_user_id: null, subject_id: userId },
+    ]);
 
     // A fresh password-only session proves the new factor is the live one.
     const freshCookie = await signedInCookie(email);

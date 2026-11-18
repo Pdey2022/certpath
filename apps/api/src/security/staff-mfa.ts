@@ -250,6 +250,12 @@ export type ConfirmResult =
  * one-way transition, so replaying the confirm request cannot do anything, and
  * leaving the step alone means the code the user just typed still works for the
  * `verify` call that follows.
+ *
+ * The claim is a separate statement from the batch that revokes the previous set
+ * and issues the new one, so a lost race answers 409 without touching the
+ * winner's rows. The residual window - a crash after the claim and before the
+ * batch - leaves a confirmed credential with no recovery codes; the way back is a
+ * Global-Admin reset, which is recorded for the operator.
  */
 export async function confirmStaffTotp(
   database: SecurityDatabase,
@@ -294,15 +300,27 @@ export async function confirmStaffTotp(
     values.push(digest, options.userId, setOperationId, options.now);
   }
 
+  // The claim is its own statement, and it is the whole concurrency guard.
+  //
+  // Two confirms can both pass the `confirmed_at !== null` pre-check above; if
+  // the batch ran regardless, the loser's revoke would destroy the ten codes the
+  // winner had just inserted and then issue ten nobody would ever see, before
+  // answering 409. Claiming first means only the winner runs `batch(revoke,
+  // insert)` at all, and the loser leaves the winner's rows untouched.
+  const claimed = await database
+    .prepare(
+      `UPDATE staff_totp_credentials
+       SET confirmed_at = ?
+       WHERE credential_id = ? AND confirmed_at IS NULL
+       RETURNING credential_id`,
+    )
+    .bind(options.now, credential.credential_id)
+    .all<{ credential_id: string }>();
+  if (claimed.results.length !== 1) {
+    return { ok: false, status: 409, code: "mfa_already_enrolled" };
+  }
+
   const results = await database.batch([
-    database
-      .prepare(
-        `UPDATE staff_totp_credentials
-         SET confirmed_at = ?
-         WHERE credential_id = ? AND confirmed_at IS NULL
-         RETURNING credential_id`,
-      )
-      .bind(options.now, credential.credential_id),
     // One live recovery-code set per account. A confirmation supersedes the
     // previous set (revoked, never deleted), which is what lets a replacement
     // factor after a recovery redemption publish its own ten codes without
@@ -327,10 +345,7 @@ export async function confirmStaffTotp(
   ]);
   // Rows, not `meta.changes`: the recovery-code trigger writes its own audit row
   // into the same statement's change count.
-  if (results[0]?.results?.length !== 1) {
-    return { ok: false, status: 409, code: "mfa_already_enrolled" };
-  }
-  if (results[2]?.results?.length !== recoveryCodeCount) {
+  if (results[1]?.results?.length !== recoveryCodeCount) {
     return serviceUnavailable;
   }
   return { ok: true, recoveryCodes: codes };

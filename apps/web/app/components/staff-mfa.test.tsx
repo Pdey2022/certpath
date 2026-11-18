@@ -38,7 +38,11 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function renderAt(path: string, element: React.ReactElement) {
+function renderAt(
+  path: string,
+  element: React.ReactElement,
+  state?: unknown,
+) {
   const router = createMemoryRouter(
     [
       { path: "/admin/mfa/verify", element: createElement(StaffMfaVerify) },
@@ -48,10 +52,10 @@ function renderAt(path: string, element: React.ReactElement) {
         element: createElement("p", null, "Editor stub"),
       },
     ],
-    { initialEntries: [path] },
+    { initialEntries: [{ pathname: path, state }] },
   );
   render(createElement(RouterProvider, { router }));
-  return element;
+  return router;
 }
 test("posts the verification code with the admin CSRF token and opens the editor", async () => {
   const posts: Array<{ path: string; body: unknown; csrf: string | null }> = [];
@@ -99,6 +103,40 @@ test("never echoes a rejected code back into the page", async () => {
     "That code was not accepted. Check your authenticator and enter the current code.",
   );
   assert.equal(browser.document.body.textContent?.includes("654321"), false);
+});
+
+test("pre-fills a handed-over ticket, submits it, and forgets it afterwards", async () => {
+  const posts: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input), browser.location.href).pathname;
+    if (path === "/api/admin/csrf") return jsonResponse({ csrfToken });
+    posts.push(`${path} ${String(init?.body)}`);
+    return jsonResponse({
+      secret: "JBSWY3DPEHPK3PXPJBSWY3DP",
+      otpauthUri:
+        "otpauth://totp/CertPath:owner%40example.test?secret=JBSWY3DPEHPK3PXPJBSWY3DP&issuer=CertPath",
+      keyVersion: 1,
+    });
+  };
+
+  const router = renderAt(
+    "/admin/mfa/enrol",
+    createElement(StaffMfaEnrol),
+    { ticket: "handed-over-ticket" },
+  );
+  const input = (await screen.findByLabelText(
+    "Enrolment ticket",
+  )) as HTMLInputElement;
+  assert.equal(input.value, "handed-over-ticket");
+
+  fireEvent.click(screen.getByRole("button", { name: "Begin enrolment" }));
+  await screen.findByText("JBSWY3DPEHPK3PXPJBSWY3DP");
+
+  assert.deepEqual(posts, [
+    '/api/admin/auth/mfa/enrol {"ticket":"handed-over-ticket"}',
+  ]);
+  // The ticket is spent: it must not survive a reload in `history.state`.
+  assert.equal(router.state.location.state, null);
 });
 
 test("enrols with a ticket, shows the secret once, then ten recovery codes", async () => {
