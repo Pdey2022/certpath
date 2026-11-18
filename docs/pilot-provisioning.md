@@ -4,8 +4,8 @@ Status: **the 5C run completed on 17 November 2026, under owner approval given
 that day; further provisioning is NOT approved to run.** The run produced one
 Cloudflare resource: the D1 database `certpath-learner-staging`, created on
 17 November 2026 at 22:25:00Z in region `WEUR` and migrated through
-`0021_pilot_events.sql` (**21 applied migrations**:
-`SELECT COUNT(*), MAX(name) FROM d1_migrations` answers `21` and
+`0021_pilot_events.sql` (21 applied migrations at the end of that run:
+`SELECT COUNT(*), MAX(name) FROM d1_migrations` answered `21` and
 `0021_pilot_events.sql`), with its id recorded in #134. Export #1 (first
 non-empty baseline) and rehearsal #1 exited 0 — `replay: schema 101, data 35,
 triggers 141`; export #2 (data-bearing, after the smoke fixture) and rehearsal #2
@@ -16,11 +16,15 @@ No Worker is deployed (`learner-auth-staging` answers `code: 10007`, checked
 18 November 2026), no secret is set and no route exists. Apart from the recorded
 staging id, every `database_id` in the committed Wrangler configs is still the
 all-zero placeholder; test fixtures carry their own literal ids.
-`0022_pilot_events_retention.sql` landed after that migration, so the
-retention floor is **not applied** there yet — see §Pre-enablement step below.
+The database now has **22 applied migrations**, last
+`0022_pilot_events_retention.sql`: the retention floor landed after the 5C run
+and was applied remotely on 18 November 2026, under owner approval, so the
+twelve-month floor is enforced there as well — §Pre-enablement step below records
+that run and its evidence.
 
-**Not approved to run:** deploying the staging Worker, setting its secrets, or
-applying `0022` remotely. Each is a separate owner decision.
+**Not approved to run:** deploying the staging Worker or setting its secrets.
+Each is a separate owner decision. (Applying `0022` remotely was such a decision;
+the owner gave it and it ran on 18 November 2026 — §Pre-enablement step.)
 
 This document is both the record of that run and the from-scratch path for a
 future rebuild. Each step is a checked step rather than an improvisation; only an
@@ -68,7 +72,7 @@ remote writes should be re-run without a new approval.
 |---|---|---|
 | 1 | Preflight: account matches, database **absent** (`--expect-absent`) | done 17 November 2026 — exited 0 with `database certpath-learner-staging: absent`, before the create |
 | 2 | Create the database | done 17 November 2026 at 22:25:00Z — created in region `WEUR`; the uuid was recorded in #134 |
-| 3 | Record the uuid **locally**, apply the chain | done — 21 applied migrations, last `0021_pilot_events.sql` |
+| 3 | Record the uuid **locally**, apply the chain | done 17 November 2026 — 21 applied migrations, last `0021_pilot_events.sql` (22 today, §Pre-enablement step) |
 | 4 | Repo PR with the uuid, merged and pulled | done — #134 |
 | 5 | Preflight again: database present | done |
 | 6 | Export #1 (first non-empty baseline) | done, exit 0 |
@@ -77,8 +81,8 @@ remote writes should be re-run without a new approval.
 | 9 | Export #2 (first data-bearing dump) | done, exit 0 |
 | 10 | Rehearse #2 | done, exit 0 — `replay: schema 101, data 43, triggers 141`, `audit_events` count equal to the manifest |
 
-`0022` is deliberately not in this order: it landed after the run and is the one
-remote step still outstanding — §Pre-enablement step.
+`0022` is deliberately not in this order: it landed after the run and was applied
+to the same database separately on 18 November 2026 — §Pre-enablement step.
 
 A **repeat** run does not start at step 1: `--expect-absent` now fails closed as
 `database_already_exists` against the database step 2 created, so it starts at
@@ -314,20 +318,37 @@ dumps and both manifests, and escalate: the next move (accepted limitation, a
 documented restore order, or a change to the export strategy) is an architecture
 decision, not an operator workaround.
 
-## Pre-enablement step: apply `0022` to staging
+## Pre-enablement step: apply `0022` to staging — **done 18 November 2026**
 
-**Not part of 5C, not approved to run, and it blocks the retention flag.** The
-staging database stopped at `0021`: `SELECT COUNT(*), MAX(name) FROM
-d1_migrations` answers `21` and `0021_pilot_events.sql` (verified 18 November
-2026). `0022_pilot_events_retention.sql` landed after that migration, so
-`pilot_events_received_at_idx` and `pilot_events_no_delete` do not exist on
-staging yet, and nothing there enforces the twelve-month floor.
+**Done, under owner approval given for this step, on 18 November 2026.** It was
+not part of 5C and it was the one remote step outstanding after that run: the
+database then stopped at `0021` (21 rows in `d1_migrations`). It now has **22
+applied migrations**, last `0022_pilot_events_retention.sql`, so the staging
+database enforces the twelve-month floor itself.
 
-Until this step is done and proven, `PILOT_EVENTS_RETENTION_ENABLED` stays
-`"false"` on staging. Turning it on first would run a prune against a table with
-no floor — the window would be a promise the database cannot keep, which is the
-one thing [`docs/pilot-events-retention.md`](pilot-events-retention.md) says is
-enforced in storage rather than by the job.
+The preflight ran first and exited 0 with
+`database certpath-learner-staging: present (<uuid>)`, so the write landed in the
+asserted account and database. Evidence from the run:
+
+- `npx wrangler d1 migrations apply certpath-learner-staging --remote -c
+  apps/web/wrangler.staging.jsonc` (repository root) → exit 0,
+  `0022_pilot_events_retention.sql │ ✅`, `Executed 3 commands in 1.55ms`;
+- `SELECT COUNT(*) AS applied, MAX(name) AS last FROM d1_migrations` → `22` and
+  `0022_pilot_events_retention.sql`;
+- `SELECT type, name FROM sqlite_master WHERE name IN
+  ('pilot_events_no_delete','pilot_events_received_at_idx')` → trigger
+  `pilot_events_no_delete`, index `pilot_events_received_at_idx`.
+
+`PILOT_EVENTS_RETENTION_ENABLED` still stays `"false"` on staging, because the
+Worker that would run the prune is not deployed. Turning the flag on before the
+floor existed would have run a prune against a table with no floor — the window
+would be a promise the database cannot keep, which is the one thing
+[`docs/pilot-events-retention.md`](pilot-events-retention.md) says is enforced in
+storage rather than by the job. The order still holds; only its first half is
+now satisfied.
+
+The procedure below is kept as written: it is the correct step for a future
+rebuild, or for any database that stops short of the last migration.
 
 ```powershell
 Set-Location apps\web
@@ -350,9 +371,10 @@ reach the remote database, and any other last name means the ledger does not
 match `db/migrations/*.sql`.
 
 This is a remote write to the staging database, so it needs the owner's approval
-like every other run step. It changes no repository file: no migration is edited,
-no checksum line changes, and `apps/web/wrangler.staging.jsonc` stays exactly as
-committed.
+like every other run step — that approval was given for the 18 November 2026 run,
+and a repeat run would need a new one. It changes no repository file: no migration
+is edited, no checksum line changes, and `apps/web/wrangler.staging.jsonc` stays
+exactly as committed.
 
 ## Time Travel
 

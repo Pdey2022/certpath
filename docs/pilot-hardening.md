@@ -12,8 +12,10 @@ Status: **5A, 5B and 5C are merged, and the 5C run completed on 17 November
 applied migrations), recorded its id in #134, and exported and rehearsed twice to
 exit 0. **No Worker is deployed, and no secret, route or
 deployment exists**: `learner-auth-staging` answers `code: 10007` (not found),
-checked 18 November 2026. `0022_pilot_events_retention.sql` is not applied to that
-database (see §Retention precondition), and both funnel flags and
+checked 18 November 2026. `0022_pilot_events_retention.sql` was applied to that
+database on 18 November 2026, under owner approval, so it now holds **22 applied
+migrations**, last `0022_pilot_events_retention.sql`, and the retention floor is
+enforced there as well (see §Retention precondition); both funnel flags and
 `PILOT_EVENTS_RETENTION_ENABLED` are `"false"`. #141 decides the staging Worker is
 the events target, **in code only**; see §Events target below.
 
@@ -100,6 +102,14 @@ stops future events and stored history keeps the full window, so there is no
 erasure path and no exception to the floor (owner, 18 November 2026). Design,
 failure modes and rollback: [`docs/pilot-events-retention.md`](pilot-events-retention.md).
 
+**The floor is installed in the staging database too.** `0022` was applied
+remotely to `certpath-learner-staging` on 18 November 2026, under owner approval:
+that database now holds **22 applied migrations**, last
+`0022_pilot_events_retention.sql`, and the run verified
+`pilot_events_no_delete` (trigger) and `pilot_events_received_at_idx` (index) in
+`sqlite_master`. Evidence and the stop rule:
+[`docs/pilot-provisioning.md`](pilot-provisioning.md) §Pre-enablement step.
+
 The floor is no longer the blocker for the events flags; the remaining
 precondition is the owner's enablement decision. Both
 `PILOT_EVENTS_ENABLED` and `PILOT_SERVER_EVENTS_ENABLED` stay `"false"` until
@@ -130,15 +140,17 @@ by `apps/web/wrangler.staging.jsonc`:
   capability or migration is added. `apps/web/wrangler.jsonc` is unchanged and
   still binds the all-zero `certpath-local` placeholder.
 
-**What remains before events can be recorded and pruned:**
+**What remains before events can be recorded and pruned:** applying `0022` is
+done (the staging database holds 22 applied migrations, last
+`0022_pilot_events_retention.sql`, 18 November 2026 —
+[`docs/pilot-provisioning.md`](pilot-provisioning.md) §Pre-enablement step). What
+remains:
 
 1. deploy the staging Worker (an owner-approved deployment; the cron ships with
    the deployment and stays a no-op until step 3);
-2. apply `0022` to the staging database and prove it: that database was migrated
-   through `0021` (21 rows in `d1_migrations`, verified 18 November 2026) and the
-   retention floor landed afterwards, so its index and delete trigger are not
-   there yet — [`docs/pilot-provisioning.md`](pilot-provisioning.md)
-   §Pre-enablement step;
+2. measure the cron's CPU cost for a 250-row prune against Free's 10 ms limit
+   (#147) — the prune has never run on a deployed Worker, so the batch's cost
+   against the cap is unproven;
 3. turn `PILOT_EVENTS_RETENTION_ENABLED` on (owner decision) — not before;
 4. only then consider `PILOT_EVENTS_ENABLED` / `PILOT_SERVER_EVENTS_ENABLED`: the
    coupling test refuses an events flag that is `"true"` while retention is not,
