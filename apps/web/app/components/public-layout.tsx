@@ -125,7 +125,7 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
         <header className="public-header">
           <div className="public-header-inner">
             <Link className="brand" to="/">
-              {isPublicReleaseSite ? "CertPath" : "Exam Prep"}
+              CertPath
             </Link>
             <nav className="public-nav" aria-label="Public navigation">
               <Link to="/exams">Exams</Link>
@@ -163,8 +163,8 @@ export function PublicLayout({ children }: { children: React.ReactNode }) {
               <p>{independenceNotice}</p>
             ) : (
               <p>
-                Exam Prep is a working label. Certification listings and content
-                require review before publication.
+                Certification listings and content require review before
+                publication.
               </p>
             )}
           </div>

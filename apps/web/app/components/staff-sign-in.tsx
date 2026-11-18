@@ -93,7 +93,7 @@ export function StaffSignIn() {
       </a>
       <header className="protected-editor-header">
         <Link className="brand" to="/">
-          Exam Prep
+          CertPath
         </Link>
         <span>Tester-only staff area</span>
       </header>

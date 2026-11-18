@@ -226,6 +226,7 @@ test("renders a neutral shell and clearly explains a missing staff session", asy
   const alert = await screen.findByRole("alert");
   assert.match(alert.textContent ?? "", /session is missing, expired, or revoked/);
   assert.equal(document.querySelector(".protected-demo-separation")?.textContent?.includes("do not grant access"), true);
+  assert.equal(document.querySelector(".protected-editor-header .brand")?.textContent, "CertPath");
 });
 
 test("requires explicit latest-revision recovery when detail shows the question advanced after listing", async () => {

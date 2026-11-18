@@ -23,7 +23,7 @@ export function WorkspaceShell({
       </a>
       <header className="workspace-header">
         <Link className="brand" to="/">
-          Exam Prep
+          CertPath
         </Link>
         <p className="workspace-title">{title}</p>
       </header>

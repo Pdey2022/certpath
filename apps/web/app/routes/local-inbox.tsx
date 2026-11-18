@@ -11,7 +11,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Synthetic local inbox | Exam Prep" },
+    { title: "Synthetic local inbox | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

@@ -63,7 +63,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Admin workspace preview | Exam Prep" },
+    { title: "Admin workspace preview | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

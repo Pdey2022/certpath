@@ -12,7 +12,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Timed mock | Exam Prep" },
+    { title: "Timed mock | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

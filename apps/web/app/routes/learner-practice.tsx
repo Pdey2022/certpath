@@ -12,7 +12,7 @@ export function headers() {
 
 export function meta(_: Route.MetaArgs) {
   return [
-    { title: "Protected practice | Exam Prep" },
+    { title: "Protected practice | CertPath" },
     { name: "robots", content: "noindex,nofollow" },
   ];
 }

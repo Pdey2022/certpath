@@ -49,6 +49,16 @@ function renderSignIn() {
   render(createElement(RouterProvider, { router }));
 }
 
+test("brands the staff header as CertPath", async () => {
+  globalThis.fetch = async () =>
+    jsonResponse({ signInEnabled: false, testerAssuranceEnabled: false });
+
+  renderSignIn();
+
+  const brand = screen.getByRole("link", { name: "CertPath" });
+  assert.equal(brand.getAttribute("href"), "/");
+});
+
 test("explains that staff sign-in is unavailable when the Worker reports it disabled", async () => {
   globalThis.fetch = async (input) => {
     const path = new URL(String(input), browser.location.href).pathname;
