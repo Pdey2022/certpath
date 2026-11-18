@@ -6,10 +6,11 @@ each one can be reviewed, approved and rolled back on its own. This file records
 the slices, their order, their migration reservations and the decisions each one
 needs.
 
-Status: **5A, 5B and 5C are merged, and the 5C run completed on 18 November
-2026.** That run created and migrated `certpath-learner-staging` (21 applied
-migrations, last `0021_pilot_events.sql`), recorded its id in #134, and exported
-and rehearsed twice to exit 0. **No Worker is deployed, and no secret, route or
+Status: **5A, 5B and 5C are merged, and the 5C run completed on 17 November
+2026.** That run created `certpath-learner-staging` (17 November 2026 at
+22:25:00Z, region `WEUR`) and migrated it through `0021_pilot_events.sql` (21
+applied migrations), recorded its id in #134, and exported and rehearsed twice to
+exit 0. **No Worker is deployed, and no secret, route or
 deployment exists**: `learner-auth-staging` answers `code: 10007` (not found),
 checked 18 November 2026. `0022_pilot_events_retention.sql` is not applied to that
 database (see §Retention precondition), and both funnel flags and
@@ -22,7 +23,7 @@ the events target, **in code only**; see §Events target below.
 |---|---|---|---|---|
 | **5A Data-safety tooling** | D1 isolation gate, export + manifest, rehearsed restore, fresh-chain check, `verify` wiring, export runbook | - | none (`db/migrations/checksums.txt` is not a migration) | **Approved 17 Nov 2026** |
 | **5B Pilot funnel events** | `pilot_events` (consent-aware, no personal data), the events that the fake door needs | 5A (export/restore tooling), 5C (a database to write to) | **0021** | **Design approved 17 Nov 2026**; the consent-issuing surface is 5D and `PILOT_SERVER_EVENTS_ENABLED` is unblocked but not enabled |
-| **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Run completed 18 Nov 2026**: database created and migrated (21 migrations), id recorded in #134, both exports rehearsed to exit 0; [runbook](pilot-provisioning.md) |
+| **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Run completed 17 Nov 2026**: database created (22:25:00Z, `WEUR`) and migrated (21 migrations), id recorded in #134, both exports rehearsed to exit 0; [runbook](pilot-provisioning.md) |
 | **5D Fake door** | Price validation without taking payment | 5B (funnel), 5E (hostname) | none | Owner approval: product and pricing rule |
 | **5E Hostname decision** | Canonical pilot hostname and routing | 5C | none | **Owner approval required**: brand, domain, canonical origin |
 | **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor | 5C, ADR 0004 | **0023** | ARC design + owner approval: access policy |
@@ -159,10 +160,10 @@ invocation.
 | Synthetic smoke fixture (applied in CI only to a throwaway local D1; never by migrations) | `db/fixtures/synthetic-provision-smoke.sql` |
 | Provisioning design and runbook | [`docs/pilot-provisioning.md`](pilot-provisioning.md) |
 
-5C creates nothing in this PR. It adds the assertions that must pass before a
-resource is created, and the runbook for the run that creates it. The one
-resource that run will ever create is the staging database; the pilot database,
-the learner and the Worker deployment all stay out.
+5C itself created nothing: it added the assertions that had to pass before a
+resource was created, and the runbook for the run that created it. The one
+resource that run created is the staging database; the pilot database, the
+learner and the Worker deployment stayed out.
 
 ## Resolved decisions
 
@@ -196,5 +197,5 @@ refund UI, the `needs_support` money policy, receipts cursor) stays out.
 No migration or `db/migrations/` change, no checksum change, no dependency, no
 secret, no deploy workflow change, no Worker binding, var or code path, and no
 Cloudflare resource. When the slice landed, every `database_id` was the all-zero
-placeholder; the approved run on 18 November 2026 has since recorded the staging
+placeholder; the approved run on 17 November 2026 has since recorded the staging
 id (#134), so only `local` and `pilot` remain placeholders.
