@@ -10,6 +10,12 @@
 //   3. Every later read and write addresses the binding, never the name, so a
 //      database swapped behind the name after preflight receives nothing.
 
+import {
+  createEnrolmentTicket,
+  enrolmentTicketLifetimeMs,
+  sha256Hex,
+} from "./security/totp.ts";
+
 export const certpathAccountId = "ef67137c4d1556f7f51f1cb3f1f420f3";
 export const remoteStaffDatabaseName = "certpath-admin";
 export const localStaffDatabaseName = "certpath-local";
@@ -55,8 +61,36 @@ export type ProvisioningIdentifiers = {
   certificationName: string;
   examVersionKey: string;
   hashes: [string, string, string];
+  /**
+   * One 5F enrolment ticket per account: the printed half of "a password alone
+   * cannot create a second factor". Only the digest is written to D1; the token
+   * is printed once and never stored.
+   */
+  enrolmentTickets: [ProvisioningTicket, ProvisioningTicket, ProvisioningTicket];
   now: number;
 };
+
+export interface ProvisioningTicket {
+  token: string;
+  digest: string;
+}
+
+/** 256-bit tickets, digests ready for the SQL. Runs in Node and in workerd. */
+export async function createProvisioningTickets(): Promise<
+  [ProvisioningTicket, ProvisioningTicket, ProvisioningTicket]
+> {
+  const tokens: [string, string, string] = [
+    createEnrolmentTicket(),
+    createEnrolmentTicket(),
+    createEnrolmentTicket(),
+  ];
+  const digests = await Promise.all(tokens.map((token) => sha256Hex(token)));
+  return [
+    { token: tokens[0], digest: digests[0]! },
+    { token: tokens[1], digest: digests[1]! },
+    { token: tokens[2], digest: digests[2]! },
+  ];
+}
 
 /**
  * Remote writes are opt-in: `--remote` must be paired with the exact database
@@ -338,6 +372,13 @@ export function buildProvisioningStatements(
        ('${operationId("audit-admin-one")}', NULL, 'owner-provisioning-script', 'staff_provisioned', 'user', '${userIds[0]}', NULL, 'Tester Global Admin provisioned', ${now}),
        ('${operationId("audit-admin-two")}', NULL, 'owner-provisioning-script', 'staff_provisioned', 'user', '${userIds[1]}', NULL, 'Tester Global Admin provisioned', ${now}),
        ('${operationId("audit-manager")}', NULL, 'owner-provisioning-script', 'staff_provisioned', 'user', '${userIds[2]}', '${identifiers.certificationId}', 'Tester Manager provisioned for one synthetic exam', ${now});`,
+    `INSERT INTO staff_mfa_enrolment_tickets (
+       ticket_digest, user_id, created_by_user_id, created_by_ref, created_at,
+       expires_at, consumed_at, consumed_operation_id, revoked_at
+     ) VALUES
+       ('${identifiers.enrolmentTickets[0].digest}', '${userIds[0]}', NULL, 'owner-provisioning-script', ${now}, ${now + enrolmentTicketLifetimeMs}, NULL, NULL, NULL),
+       ('${identifiers.enrolmentTickets[1].digest}', '${userIds[1]}', NULL, 'owner-provisioning-script', ${now}, ${now + enrolmentTicketLifetimeMs}, NULL, NULL, NULL),
+       ('${identifiers.enrolmentTickets[2].digest}', '${userIds[2]}', NULL, 'owner-provisioning-script', ${now}, ${now + enrolmentTicketLifetimeMs}, NULL, NULL, NULL);`,
   ];
 }
 
@@ -374,14 +415,22 @@ export async function confirmProvisioning(
          AND role IN ('global_admin', 'manager');
      SELECT COUNT(*) AS count FROM manager_certification_assignments
        WHERE active = 1 AND manager_user_id = '${identifiers.userIds[2]}'
-         AND certification_id = '${identifiers.certificationId}';`,
+         AND certification_id = '${identifiers.certificationId}';
+     SELECT COUNT(*) AS count FROM staff_mfa_enrolment_tickets
+       WHERE consumed_at IS NULL AND revoked_at IS NULL
+         AND user_id IN (${quotedUsers});`,
     "provisioning confirmation",
   );
-  const [credentials, roles, assignments] = counts;
-  if (credentials !== 3 || roles !== 3 || assignments !== 1) {
+  const [credentials, roles, assignments, tickets] = counts;
+  if (
+    credentials !== 3 ||
+    roles !== 3 ||
+    assignments !== 1 ||
+    tickets !== 3
+  ) {
     throw new ProvisioningAbort(
       "unconfirmed",
-      `expected 3 credentials, 3 active roles and 1 assignment, saw ${credentials ?? 0}, ${roles ?? 0}, ${assignments ?? 0}`,
+      `expected 3 credentials, 3 active roles, 1 assignment and 3 enrolment tickets, saw ${credentials ?? 0}, ${roles ?? 0}, ${assignments ?? 0}, ${tickets ?? 0}`,
     );
   }
 }

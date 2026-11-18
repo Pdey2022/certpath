@@ -36,6 +36,7 @@ import {
   assertRemoteTarget,
   certpathAccountId,
   confirmProvisioning,
+  createProvisioningTickets,
   pinRemoteTarget,
   pinnedDatabaseBinding,
   remoteStaffDatabaseName,
@@ -320,6 +321,9 @@ async function main(): Promise<void> {
     certificationName,
     examVersionKey,
     hashes: [hashes[0]!, hashes[1]!, hashes[2]!],
+    // 5F: one printed enrolment ticket per account. Only the digest is written;
+    // the token below is the single time it exists outside the operator's eyes.
+    enrolmentTickets: await createProvisioningTickets(),
     now: Date.now(),
   };
 
@@ -334,13 +338,25 @@ async function main(): Promise<void> {
     `Provisioned the tester staff accounts in ${target.kind === "remote" ? `${remoteStaffDatabaseName} (pinned ${target.expectedDatabaseId})` : `${target.databaseName} (local)`}.`,
   );
   console.log(`Global Admin 1: ${emails[0]} (${identifiers.userIds[0]})`);
+  console.log(
+    `  enrolment ticket: ${identifiers.enrolmentTickets[0].token}`,
+  );
   console.log(`Global Admin 2: ${emails[1]} (${identifiers.userIds[1]})`);
+  console.log(
+    `  enrolment ticket: ${identifiers.enrolmentTickets[1].token}`,
+  );
   console.log(`Manager:        ${emails[2]} (${identifiers.userIds[2]})`);
+  console.log(
+    `  enrolment ticket: ${identifiers.enrolmentTickets[2].token}`,
+  );
   console.log(
     `Synthetic exam: ${certificationSlug} (${identifiers.certificationId}), version ${examVersionKey} (${identifiers.examVersionId})`,
   );
   console.log(
     "Passwords were hashed in this process and were not printed. Store them in your password manager now; they cannot be recovered.",
+  );
+  console.log(
+    "Each enrolment ticket is shown once, works once, and expires in 24 hours. A ticket plus the password is what creates a second factor; a password alone cannot.",
   );
 }
 

@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createApi } from "../src/index.ts";
+import { adminTesterGate } from "../src/security/admin-gate.ts";
 import type { SecurityDatabase } from "../src/security/database.ts";
 import { hashLearnerPassword } from "../src/security/password-hashing.ts";
+import { createTotpSeed, readSealKey, sealTotpSeed, totpCodeAt, totpStepAt } from "../src/security/totp.ts";
 import { createContentScope, validQuestionContent } from "./content-fixtures.ts";
 import { createTestIdentity, grantTestRole } from "./factories.ts";
 
@@ -11,7 +13,8 @@ const origin = "https://localhost";
 const csrfSecret = "local-worker-test-csrf-secret-with-enough-entropy";
 const staffRateSecret =
   "local-worker-test-staff-rate-limit-secret-with-enough-entropy";
-const testerIps = Array.from({ length: 40 }, (_, index) => `203.0.113.${index + 10}`);
+const sealKey = "local-worker-test-staff-mfa-seal-key-with-enough-entropy";
+const testerIps = Array.from({ length: 200 }, (_, index) => `203.0.113.${index + 10}`);
 const testerIp = testerIps[0]!;
 let ipIndex = 0;
 
@@ -30,10 +33,11 @@ const bindings = {
   PUBLIC_SITE_ORIGIN: origin,
   CSRF_HMAC_SECRET: csrfSecret,
   STAFF_RATE_LIMIT_HMAC_SECRET: staffRateSecret,
-  STAFF_MFA_MAX_AGE_MS: "900000",
-  STAFF_MFA_ALLOWED_METHODS: "tester-gate",
+  // Owner decision, 18 November 2026: one verification per session, 8 h.
+  STAFF_MFA_MAX_AGE_MS: String(8 * 60 * 60 * 1000),
+  STAFF_MFA_ALLOWED_METHODS: "totp",
+  STAFF_MFA_SEAL_KEY: sealKey,
   ADMIN_TESTER_IPS: testerIps.join(","),
-  ADMIN_TESTER_ASSURANCE: "true",
 };
 
 let passwordHash = "";
@@ -99,10 +103,84 @@ function sessionToken(response: Response): string {
   return token;
 }
 
-async function staffSession(email: string): Promise<string> {
+/**
+ * A confirmed TOTP credential written straight to storage, so the HTTP tests do
+ * not have to drive enrolment to test everything else. The seed is sealed with
+ * the same key and primitive the route uses, so `verify` exercises the real
+ * AES-256-GCM open path.
+ */
+async function enrolTotpCredential(userId: string): Promise<Uint8Array> {
+  const key = await readSealKey(sealKey);
+  if (!key) throw new Error("The test seal key is unusable");
+  const seed = createTotpSeed();
+  const sealed = await sealTotpSeed(key, seed);
+  await database
+    .prepare(
+      `INSERT INTO staff_totp_credentials (
+         credential_id, user_id, secret_ciphertext, secret_iv, key_version,
+         digits, period_seconds, algorithm, last_used_step, created_at,
+         confirmed_at, created_operation_id, revoked_at, revoked_operation_id
+       ) VALUES (?, ?, ?, ?, 1, 6, 30, 'SHA1', 0, ?, ?, ?, NULL, NULL)`,
+    )
+    .bind(
+      crypto.randomUUID(),
+      userId,
+      sealed.ciphertext,
+      sealed.iv,
+      clock,
+      clock,
+      `test-mfa-enrol:${crypto.randomUUID()}`,
+    )
+    .run();
+  return seed;
+}
+
+async function adminCsrfToken(cookie: string): Promise<string> {
+  const response = await application.fetch(
+    new Request(url("/admin/csrf"), {
+      headers: {
+        Cookie: `certpath_session=${cookie}`,
+        "CF-Connecting-IP": nextIp(),
+      },
+    }),
+    bindings,
+  );
+  expect(response.status).toBe(200);
+  return ((await response.json()) as { csrfToken: string }).csrfToken;
+}
+
+async function verifySecondFactor(
+  cookie: string,
+  seed: Uint8Array,
+  options: { at?: number; ip?: string } = {},
+) {
+  const at = options.at ?? clock;
+  const token = await adminCsrfToken(cookie);
+  return application.fetch(
+    new Request(url("/admin/auth/mfa/verify"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        "CF-Connecting-IP": options.ip ?? nextIp(),
+        Cookie: `certpath_session=${cookie}`,
+        "X-CSRF-Token": token,
+      },
+      body: JSON.stringify({ code: await totpCodeAt(seed, totpStepAt(at)) }),
+    }),
+    bindings,
+  );
+}
+
+/** Sign in, then finish the second factor: the only way to an assured session. */
+async function staffSession(email: string, userId: string): Promise<string> {
   const response = await signIn(email);
   expect(response.status).toBe(200);
-  return sessionToken(response);
+  const cookie = sessionToken(response);
+  const seed = await enrolTotpCredential(userId);
+  const verified = await verifySecondFactor(cookie, seed);
+  expect(verified.status).toBe(200);
+  return cookie;
 }
 
 async function csrfToken(cookie: string): Promise<string> {
@@ -119,7 +197,13 @@ async function csrfToken(cookie: string): Promise<string> {
 async function contentRequest(
   method: "GET" | "POST",
   path: string,
-  options: { cookie?: string; token?: string; body?: unknown; ip?: string } = {},
+  options: {
+    cookie?: string;
+    token?: string;
+    body?: unknown;
+    ip?: string;
+    bindingsOverride?: Record<string, unknown>;
+  } = {},
 ) {
   const headers: Record<string, string> = {
     "CF-Connecting-IP": options.ip ?? testerIp,
@@ -136,7 +220,7 @@ async function contentRequest(
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     }),
-    bindings,
+    { ...bindings, ...options.bindingsOverride },
   );
 }
 
@@ -176,41 +260,98 @@ describe("tester-only admin access", () => {
     expect(audits?.count).toBe(0);
   });
 
-  it("refuses staff sign-in without an approved assurance profile", async () => {
-    const email = uniqueEmail("admin-no-assurance");
-    await provisionStaff("global_admin", email);
+  it("refuses a tester-gate configuration with 503 and writes nothing", async () => {
+    const email = uniqueEmail("admin-tester-gate-refused");
+    const userId = await provisionStaff("global_admin", email);
 
-    const disabled = await signIn(email, {
-      bindingsOverride: {
-        ADMIN_TESTER_ASSURANCE: "false",
-        STAFF_MFA_ALLOWED_METHODS: "totp",
-      },
+    const response = await signIn(email, {
+      bindingsOverride: { STAFF_MFA_ALLOWED_METHODS: "tester-gate" },
     });
-    expect(disabled.status).toBe(503);
-    expect(await disabled.json()).toMatchObject({
-      error: { code: "staff_mfa_unavailable" },
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: { code: "service_unavailable" },
     });
 
     const preflight = await application.fetch(
       new Request(url("/admin/auth/preflight"), {
         headers: { "CF-Connecting-IP": testerIp },
       }),
-      { ...bindings, ADMIN_TESTER_ASSURANCE: "false" },
+      { ...bindings, STAFF_MFA_ALLOWED_METHODS: "tester-gate" },
     );
+    expect(preflight.status).toBe(200);
     expect(await preflight.json()).toEqual({
       signInEnabled: false,
+      mfaMethods: [],
+      testerAssuranceEnabled: false,
+    });
+
+    const sessions = await database
+      .prepare("SELECT COUNT(*) AS count FROM app_sessions WHERE user_id = ?")
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(sessions?.count).toBe(0);
+  });
+
+  it("reports the retired tester assurance as permanently off", async () => {
+    const email = uniqueEmail("admin-preflight");
+    await provisionStaff("global_admin", email);
+
+    const preflight = await application.fetch(
+      new Request(url("/admin/auth/preflight"), {
+        headers: { "CF-Connecting-IP": testerIp },
+      }),
+      bindings,
+    );
+    expect(preflight.status).toBe(200);
+    expect(await preflight.json()).toEqual({
+      signInEnabled: true,
+      mfaMethods: ["totp"],
       testerAssuranceEnabled: false,
     });
   });
 
-  it("signs a provisioned staff account in and records the tester assurance", async () => {
+  it("cannot reach the tester gate once TOTP is enabled", async () => {
+    const email = uniqueEmail("admin-gate-retired");
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await staffSession(email, userId);
+
+    // The allowlist is still the first thing that runs. Clearing it closes the
+    // surface for a fully verified session, exactly as it did before 5F.
+    for (const path of [
+      "/api/admin/auth/session",
+      "/api/admin/csrf",
+      "/api/admin/content/certifications",
+      "/api/admin/learners/lookup",
+    ]) {
+      const gated = adminTesterGate(
+        new Request(url(path), {
+          headers: { "CF-Connecting-IP": testerIp },
+        }),
+        { ADMIN_TESTER_IPS: "" },
+      );
+      expect(gated?.status).toBe(503);
+    }
+
+    const session = await application.fetch(
+      new Request(url("/admin/auth/session"), {
+        headers: {
+          Cookie: `certpath_session=${cookie}`,
+          "CF-Connecting-IP": testerIp,
+        },
+      }),
+      { ...bindings, ADMIN_TESTER_IPS: "" },
+    );
+    expect(session.status).toBe(503);
+  });
+
+  it("signs a provisioned staff account in with a password only", async () => {
     const email = uniqueEmail("admin-sign-in");
     const userId = await provisionStaff("global_admin", email);
 
     const response = await signIn(email);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      redirectTo: "/admin/question-editor",
+      redirectTo: "/admin/mfa/verify",
     });
     const cookie = response.headers.get("set-cookie") ?? "";
     expect(cookie).toContain("HttpOnly");
@@ -219,13 +360,13 @@ describe("tester-only admin access", () => {
 
     const session = await database
       .prepare(
-        `SELECT mfa_method, mfa_verified_at, user_id FROM app_sessions
+        `SELECT mfa_method, mfa_verified_at FROM app_sessions
          WHERE user_id = ?`,
       )
       .bind(userId)
-      .first<{ mfa_method: string; mfa_verified_at: number; user_id: string }>();
-    expect(session?.mfa_method).toBe("tester-gate");
-    expect(session?.mfa_verified_at).toBe(clock);
+      .first<{ mfa_method: string | null; mfa_verified_at: number | null }>();
+    expect(session?.mfa_method).toBeNull();
+    expect(session?.mfa_verified_at).toBeNull();
 
     const audit = await database
       .prepare(
@@ -234,8 +375,12 @@ describe("tester-only admin access", () => {
       )
       .bind(userId)
       .first<{ reason: string }>();
-    expect(audit?.reason).toBe("Staff signed in through the tester gate");
+    expect(audit?.reason).toBe(
+      "Staff signed in with a password; second factor pending",
+    );
 
+    // A password-only session is signed in but not assured: the session read
+    // answers 403 with the precise reason, and the route guard refuses.
     const sessionResponse = await application.fetch(
       new Request(url("/admin/auth/session"), {
         headers: {
@@ -245,10 +390,9 @@ describe("tester-only admin access", () => {
       }),
       bindings,
     );
-    expect(sessionResponse.status).toBe(200);
+    expect(sessionResponse.status).toBe(403);
     expect(await sessionResponse.json()).toMatchObject({
-      userId,
-      role: "global_admin",
+      error: { code: "mfa-assurance-missing" },
     });
   });
 
@@ -309,10 +453,10 @@ describe("tester-only admin access", () => {
     const scope = await createContentScope(database);
     const firstAdmin = uniqueEmail("admin-one");
     const secondAdmin = uniqueEmail("admin-two");
-    await provisionStaff("global_admin", firstAdmin);
-    await provisionStaff("global_admin", secondAdmin);
+    const firstId = await provisionStaff("global_admin", firstAdmin);
+    const secondId = await provisionStaff("global_admin", secondAdmin);
 
-    const firstCookie = await staffSession(firstAdmin);
+    const firstCookie = await staffSession(firstAdmin, firstId);
     const firstToken = await csrfToken(firstCookie);
     const created = await contentRequest(
       "POST",
@@ -331,7 +475,7 @@ describe("tester-only admin access", () => {
     expect(created.status).toBe(201);
     const createdBody = (await created.json()) as { id: string };
 
-    const secondCookie = await staffSession(secondAdmin);
+    const secondCookie = await staffSession(secondAdmin, secondId);
     const secondToken = await csrfToken(secondCookie);
 
     const domains = await contentRequest(
@@ -415,7 +559,7 @@ describe("tester-only admin access", () => {
       )
       .run();
 
-    const cookie = await staffSession(managerEmail);
+    const cookie = await staffSession(managerEmail, managerUserId);
     const token = await csrfToken(cookie);
 
     const certifications = await contentRequest(
@@ -482,8 +626,8 @@ describe("tester-only admin access", () => {
 
   it("exposes no staff-management or billing surface to any staff role", async () => {
     const email = uniqueEmail("admin-absent-routes");
-    await provisionStaff("global_admin", email);
-    const cookie = await staffSession(email);
+    const userId = await provisionStaff("global_admin", email);
+    const cookie = await staffSession(email, userId);
 
     for (const path of [
       "/admin/content/staff",
@@ -506,10 +650,10 @@ describe("tester-only admin access", () => {
 
     const email = uniqueEmail("admin-stale-assurance");
     const userId = await provisionStaff("global_admin", email);
-    const cookie = await staffSession(email);
+    const cookie = await staffSession(email, userId);
     await database
       .prepare("UPDATE app_sessions SET mfa_verified_at = ? WHERE user_id = ?")
-      .bind(clock - 60 * 60 * 1000, userId)
+      .bind(clock - 9 * 60 * 60 * 1000, userId)
       .run();
 
     const stale = await contentRequest(

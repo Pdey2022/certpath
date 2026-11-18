@@ -25,6 +25,9 @@ type AdminAppEnv = Env & {
   AUDIT_RETENTION_ENABLED?: string;
   COMMERCE_ENABLED?: string;
   PILOT_EVENTS_RETENTION_ENABLED?: string;
+  STAFF_MFA_MAX_AGE_MS?: string;
+  STAFF_MFA_ALLOWED_METHODS?: string;
+  CSRF_HMAC_SECRET?: string;
 };
 
 function staffSignInRedirect(request: Request): Response {
@@ -38,12 +41,31 @@ function staffSignInRedirect(request: Request): Response {
   });
 }
 
+function staffMfaRedirect(request: Request): Response {
+  return new Response(null, {
+    status: 307,
+    headers: {
+      Location: new URL("/admin/mfa/verify", request.url).toString(),
+      "Cache-Control": "no-store",
+      "X-Robots-Tag": "noindex, nofollow",
+    },
+  });
+}
+
+/**
+ * The two pages a password-only staff session may render. Everything else on
+ * the admin surface needs assurance, because the APIs under it do: an HTML
+ * shell that renders while every call inside it answers 403 is a dead page.
+ */
+const staffMfaPaths = new Set(["/admin/mfa/enrol", "/admin/mfa/verify"]);
+
 export default {
   async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
 
     // Every admin page and admin API sits behind the tester allowlist, and every
-    // admin page also needs a live staff session before any HTML is rendered.
+    // admin page also needs a live staff session with current MFA assurance
+    // before any HTML is rendered.
     if (isAdminSurfacePath(pathname)) {
       const rejected = adminTesterGate(request, env);
       if (rejected) return rejected;
@@ -54,8 +76,15 @@ export default {
           env.DB,
           request.headers.get("cookie"),
           Date.now(),
+          env,
         );
         if (!session) return staffSignInRedirect(request);
+        if (
+          session.status === "assurance-required" &&
+          !staffMfaPaths.has(pathname)
+        ) {
+          return staffMfaRedirect(request);
+        }
       }
     }
 

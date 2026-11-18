@@ -26,7 +26,7 @@ const bindings = {
   LOCAL_LEARNER_AUTH_ENABLED: "false",
   LOCAL_TEST_MAIL_ENABLED: "false",
   STAFF_MFA_MAX_AGE_MS: "900000",
-  STAFF_MFA_ALLOWED_METHODS: "tester-gate",
+  STAFF_MFA_ALLOWED_METHODS: "totp",
   ADMIN_TESTER_IPS: testerIps.join(","),
   ADMIN_TESTER_ASSURANCE: "true",
 };
@@ -54,7 +54,7 @@ async function staffActor(role: "global_admin" | "manager"): Promise<StaffActor>
     {
       now: clock,
       expiresAt: clock + 6 * 60 * 60 * 1000,
-      mfaMethod: "tester-gate",
+      mfaMethod: "totp",
     },
   );
   const response = await application.fetch(

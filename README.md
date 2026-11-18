@@ -100,22 +100,31 @@ npm run staff:provision -- --admins "owner@example.test,deputy@example.test" --m
 Then add these values to `apps/web/.dev.vars` and restart `npm run dev`:
 
 ```
-STAFF_MFA_MAX_AGE_MS=900000
-STAFF_MFA_ALLOWED_METHODS=tester-gate
+STAFF_MFA_MAX_AGE_MS=28800000
+STAFF_MFA_ALLOWED_METHODS=totp
+STAFF_MFA_SEAL_KEY=REPLACE_WITH_A_LOCAL_VALUE_OF_AT_LEAST_32_CHARACTERS
 STAFF_RATE_LIMIT_HMAC_SECRET=REPLACE_WITH_A_DIFFERENT_RANDOM_LOCAL_VALUE
 ADMIN_TESTER_IPS=127.0.0.1,::1,localhost
-ADMIN_TESTER_ASSURANCE=true
 ADMIN_TESTER_LOCAL=true
 ```
 
-Open `/admin/sign-in`, sign in with one of the provisioned accounts, and the
-panel opens at `/admin/question-editor`. An empty `ADMIN_TESTER_IPS` closes every
-admin page and API with `503`; that is the rollback switch. Staff MFA is parked,
-so the `tester-gate` assurance is accepted only while the allowlist and
-`ADMIN_TESTER_ASSURANCE` are both set, and every session it mints records that
-method. Passwords are never printed, logged, or stored outside the local
-database. See [the tester access review](docs/reviews/admin-tester-access.md) for
-the Workers Free capacity finding and rollback steps.
+Open `/admin/sign-in` and sign in with one of the provisioned accounts. The
+password only creates the session: the panel sends you to `/admin/mfa/verify`,
+and the session carries no assurance until a TOTP code from an enrolled
+authenticator upgrades it. Enrol at `/admin/mfa/enrol` with the enrolment ticket
+the provisioning script printed beside that account's password — a password alone
+cannot create a factor. Ten one-time recovery codes are shown once at enrolment.
+
+An empty `ADMIN_TESTER_IPS` closes every admin page and API with `503`, even for
+a fully verified session; that is the rollback switch, and it is defence in depth
+rather than an assurance. The retired `tester-gate` label is refused by both the
+configuration and the `0023` triggers. If `STAFF_MFA_SEAL_KEY` is missing or
+shorter than 32 characters every MFA route answers `503` rather than storing a
+seed in clear. Passwords and tickets are never logged, and no secret is stored
+outside the local database. See
+[the 5F design record](docs/5f-staff-second-factor.md) and
+[the tester access review](docs/reviews/admin-tester-access.md) for the Workers
+Free capacity finding and rollback steps.
 
 ## Verification
 

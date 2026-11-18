@@ -60,6 +60,16 @@ need an owner or architect decision.
 | Enforcing the twelve-month `pilot_events` retention | **Landed in `0022`.** `pilot_events_no_delete` refuses any delete of a row inside the window using D1's own clock, `pilot_events_received_at_idx` serves the prune's access path, and `cleanupExpiredPilotEvents` removes at most 250 expired rows per run from the Worker's `scheduled` handler. The job runs only when `PILOT_EVENTS_RETENTION_ENABLED` is exactly `"true"`; it is `"false"`. The trigger, not the job, is the guarantee. `0022` takes the number 5F had reserved; 5F moves to `0023`. | Owner decision, 18 November 2026; `db/migrations/0022_pilot_events_retention.sql`, [`docs/pilot-events-retention.md`](pilot-events-retention.md) |
 | Consent withdrawal and stored history | **Withdrawal stops future events only.** Events already stored keep their full twelve-month retention: there is no erasure path, no exception to the floor, and no `withdrawal_operation_id` column. A withdrawal is a consent decision with no retention consequence. `docs/analytics-events.md`'s withdrawal sentence now says exactly this. | Owner decision, 18 November 2026 |
 
+## Resolved (18 November 2026, Phase 5F — staff second factor)
+
+| Decision | Outcome | Record |
+|---|---|---|
+| Lockout policy (design's owner decision 3) | **No account lock. Rate limits only.** No lock or lockout column, no "unlock" route and no counter that can deny a correct code for ever. `staff_mfa_verify` (10/ip, 5/email per 15 min), `staff_mfa_enrol` (10/ip, 3/email per hour) and `staff_recovery_redeem` (10/ip, 3/email per hour) are the whole control; a Global-Admin reset is the recovery path, not an unlock. | Owner decision, 18 November 2026; [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md) |
+| `STAFF_MFA_MAX_AGE_MS` (design's owner decision 4) | **8 hours** — one verification per staff session, matching the session lifetime. | Owner decision, 18 November 2026 |
+| `ADMIN_TESTER_IPS` (design's owner decision 2) | **Kept as defence in depth.** The IP allowlist still gates every `/admin` and `/api/admin` path and is *not* an assurance. `stagingTesterGate` and learner traffic are untouched. | Owner decision, 18 November 2026 |
+| Retention of MFA audit rows (design's owner decision 1) | **The existing flat twelve-month floor.** `staff_mfa_*` rows inherit `audit_events` retention; no second regime, no new prune and no retention trigger in `0023`. | Owner decision, 18 November 2026 |
+| Re-opening the `tester-gate` assurance | **Refused as a "restore the weaker assurance" change.** It needs an owner-approved migration that drops `app_sessions_no_tester_gate_insert`/`_update`. | ARC, [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md) §Rollback or disable path |
+
 ## Owner decisions still open
 
 - Launch market's tax, consumer, refund and invoicing obligations (currency is USD).
@@ -101,7 +111,11 @@ need an owner or architect decision.
   [`docs/data-export-and-restore.md`](data-export-and-restore.md); scheduling a
   dump and enforcing its retention are still open.
 - Real MFA method to replace the tester-gate assurance before real learner data.
-- Production secret rotation without invalidating sessions.
+  **Resolved 18 November 2026**: in-Worker TOTP, owner-approved with the 5F design;
+  see [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md). What remains
+  is the deploy and the two Worker settings, not a decision.
+- Production secret rotation without invalidating sessions. `key_version` on
+  `staff_totp_credentials` exists for it, and MFA-step re-wrapping is still open.
 - Whether the production admin panel runs on the same Worker as learner traffic.
 - CAT item-calibration approach and exposure control (Phase 6 sizing).
 
