@@ -7,6 +7,10 @@ import {
 } from "@certpath/api";
 import { cleanupExpiredQuestionImports } from "@certpath/api/security/question-import-cleanup";
 import { cleanupExpiredAuditEvents } from "@certpath/api/security/audit-retention";
+import {
+  cleanupExpiredPilotEvents,
+  pilotEventsRetentionEnabled,
+} from "@certpath/api/analytics/pilot-events-retention";
 import { expireStaleCheckouts } from "@certpath/api/commerce/expire";
 import { cloudflareContext } from "../app/lib/cloudflare-context";
 
@@ -20,6 +24,7 @@ type AdminAppEnv = Env & {
   ADMIN_TESTER_LOCAL?: string;
   AUDIT_RETENTION_ENABLED?: string;
   COMMERCE_ENABLED?: string;
+  PILOT_EVENTS_RETENTION_ENABLED?: string;
 };
 
 function staffSignInRedirect(request: Request): Response {
@@ -80,6 +85,23 @@ export default {
           const result = await cleanupExpiredAuditEvents(env.DB, Date.now());
           if (!result.ok) {
             throw new Error(`Audit retention cleanup failed: ${result.reason}`);
+          }
+        })(),
+      );
+    }
+    // Pilot event retention runs in its own waitUntil, and only when the flag is
+    // exactly "true": with it off this job prepares no statement and reads no
+    // row. The 0022 delete trigger - not this job - enforces the twelve-month
+    // floor. Only the failure reason is ever reported; no event id, session id or
+    // row value is logged.
+    if (pilotEventsRetentionEnabled(env)) {
+      ctx.waitUntil(
+        (async () => {
+          const result = await cleanupExpiredPilotEvents(env.DB, Date.now());
+          if (!result.ok) {
+            throw new Error(
+              `Pilot event retention cleanup failed: ${result.reason}`,
+            );
           }
         })(),
       );

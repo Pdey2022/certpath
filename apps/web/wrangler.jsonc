@@ -17,7 +17,8 @@
 		"COMMERCE_ENABLED": "false",
 		"PAYMENT_PROVIDER": "none",
 		"PILOT_EVENTS_ENABLED": "false",
-		"PILOT_SERVER_EVENTS_ENABLED": "false"
+		"PILOT_SERVER_EVENTS_ENABLED": "false",
+		"PILOT_EVENTS_RETENTION_ENABLED": "false"
 	},
 	"d1_databases": [
 		{

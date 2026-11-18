@@ -287,9 +287,15 @@ and rehearse both. See [`docs/pilot-provisioning.md`](pilot-provisioning.md).
 
 ## Limitations
 
-- No scheduling, no automatic retention enforcement, no remote restore. The
-  rehearsal is local-only; restoring a remote D1 is a separate, owner-approved
-  step.
+- No scheduling, no remote restore. The rehearsal is local-only; restoring a
+  remote D1 is a separate, owner-approved step.
+- **A dump taken after the `pilot_events` prune can never recover what retention
+  removed.** Rows older than twelve months are deleted by the prune described in
+  [`docs/pilot-events-retention.md`](pilot-events-retention.md), so they are absent
+  from every dump exported afterwards — that is the retention policy working, not
+  a restore gap. Only a dump taken before the prune ran contains them, and
+  restoring one rolls the database back to that earlier state rather than
+  recovering the rows into the current one.
 - **Dump provenance is not checked against the migration chain (issue #103).**
   The rehearsal proves the restore matches its manifest, not that the manifest
   belongs to `db/migrations/`. A dump whose `migrations[]` is empty, or is not a

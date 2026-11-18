@@ -53,6 +53,13 @@ need an owner or architect decision.
 | Consent for server-originated funnel events (`checkout_started`, `purchase_confirmed`, `pro_activated`) | **Not required.** An order-linked server row describes the account's own purchase, not a browsing session: it carries no session id, no identity linkage and `consent = 'not-required'`, and no consent reference is added. `PILOT_SERVER_EVENTS_ENABLED` is therefore **unblocked**, but it stays `"false"` until the 12-month retention floor (#110) exists and an enablement decision is taken. | Owner decision, 17 November 2026; `db/migrations/0021_pilot_events.sql` |
 | 5C provisioning scope | **One database only: `certpath-learner-staging`. No learner, no pilot database, no Worker, no secret.** The original slice seeded one invited learner and exported the pilot database; the learner contradicts [`docs/delivery-plan.md`](delivery-plan.md) §Operating constraints ("no real learner data until MFA replaces the tester-gate assurance", 5F), so the learner and the pilot database stay out. The account/plan posture is answered by the same decision: Free plan, $0 stop rule, 7-day Time Travel window. | Owner decision, 17 November 2026; [`docs/pilot-provisioning.md`](pilot-provisioning.md) |
 
+## Resolved (18 November 2026, `pilot_events` retention, #110)
+
+| Decision | Outcome | Record |
+|---|---|---|
+| Enforcing the twelve-month `pilot_events` retention | **Landed in `0022`.** `pilot_events_no_delete` refuses any delete of a row inside the window using D1's own clock, `pilot_events_received_at_idx` serves the prune's access path, and `cleanupExpiredPilotEvents` removes at most 250 expired rows per run from the Worker's `scheduled` handler. The job runs only when `PILOT_EVENTS_RETENTION_ENABLED` is exactly `"true"`; it is `"false"`. The trigger, not the job, is the guarantee. `0022` takes the number 5F had reserved; 5F moves to `0023`. | Owner decision, 18 November 2026; `db/migrations/0022_pilot_events_retention.sql`, [`docs/pilot-events-retention.md`](pilot-events-retention.md) |
+| Consent withdrawal and stored history | **Withdrawal stops future events only.** Events already stored keep their full twelve-month retention: there is no erasure path, no exception to the floor, and no `withdrawal_operation_id` column. A withdrawal is a consent decision with no retention consequence. `docs/analytics-events.md`'s withdrawal sentence now says exactly this. | Owner decision, 18 November 2026 |
+
 ## Owner decisions still open
 
 - Launch market's tax, consumer, refund and invoicing obligations (currency is USD).
