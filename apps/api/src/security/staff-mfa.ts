@@ -303,6 +303,19 @@ export async function confirmStaffTotp(
          RETURNING credential_id`,
       )
       .bind(options.now, credential.credential_id),
+    // One live recovery-code set per account. A confirmation supersedes the
+    // previous set (revoked, never deleted), which is what lets a replacement
+    // factor after a recovery redemption publish its own ten codes without
+    // tripping `staff_recovery_codes_max_ten_active`. The unused codes stay
+    // valid during the gap, so an account that loses the ticket it was handed
+    // can still redeem another one.
+    database
+      .prepare(
+        `UPDATE staff_recovery_codes
+         SET revoked_at = ?
+         WHERE user_id = ? AND revoked_at IS NULL AND used_at IS NULL`,
+      )
+      .bind(options.now, options.userId),
     database
       .prepare(
         `INSERT INTO staff_recovery_codes (
@@ -317,7 +330,7 @@ export async function confirmStaffTotp(
   if (results[0]?.results?.length !== 1) {
     return { ok: false, status: 409, code: "mfa_already_enrolled" };
   }
-  if (results[1]?.results?.length !== recoveryCodeCount) {
+  if (results[2]?.results?.length !== recoveryCodeCount) {
     return serviceUnavailable;
   }
   return { ok: true, recoveryCodes: codes };
@@ -391,13 +404,19 @@ export async function verifyStaffTotp(
   return { ok: true };
 }
 
-export type RecoveryResult = { ok: true } | StaffMfaFailure;
+export type RecoveryResult =
+  | { ok: true; ticket: string; expiresAt: number }
+  | StaffMfaFailure;
 
 /**
  * Redeems one recovery code. It mints **no** assurance: it revokes the current
- * credential and sends the caller back to enrolment, because a paper code that
+ * credential, issues exactly one printed enrolment ticket so the account can
+ * enrol a replacement, and sends the caller back to enrolment. A paper code that
  * granted admin access would be a weaker second factor than the TOTP it
- * replaces.
+ * replaces; a paper code that led nowhere would make the ten codes a dead end.
+ *
+ * The ticket and the revocation are one batch, so a redemption either leaves the
+ * account with no factor *and* a way back, or with neither.
  */
 export async function redeemStaffRecoveryCode(
   database: SecurityDatabase,
@@ -433,15 +452,33 @@ export async function redeemStaffRecoveryCode(
       : invalidCode;
   }
 
-  await database
-    .prepare(
-      `UPDATE staff_totp_credentials
-       SET revoked_at = ?, revoked_operation_id = ?
-       WHERE user_id = ? AND revoked_at IS NULL`,
-    )
-    .bind(options.now, operationId("staff-recovery-reset"), options.userId)
-    .run();
-  return { ok: true };
+  const ticket = createEnrolmentTicket();
+  const ticketDigest = await sha256Hex(ticket);
+  const expiresAt = options.now + enrolmentTicketLifetimeMs;
+  const results = await database.batch([
+    database
+      .prepare(
+        `UPDATE staff_totp_credentials
+         SET revoked_at = ?, revoked_operation_id = ?
+         WHERE user_id = ? AND revoked_at IS NULL`,
+      )
+      .bind(options.now, operationId("staff-recovery-reset"), options.userId),
+    // `created_by_ref` rather than `created_by_user_id`: the account holder
+    // produced this ticket with a code they held, and no privileged actor was
+    // involved. It is a printed secret like any other, valid for 24 h and once.
+    database
+      .prepare(
+        `INSERT INTO staff_mfa_enrolment_tickets (
+           ticket_digest, user_id, created_by_user_id, created_by_ref,
+           created_at, expires_at, consumed_at, consumed_operation_id,
+           revoked_at
+         ) VALUES (?, ?, NULL, 'recovery-code', ?, ?, NULL, NULL, NULL)
+         RETURNING ticket_digest`,
+      )
+      .bind(ticketDigest, options.userId, options.now, expiresAt),
+  ]);
+  if (results[1]?.results?.length !== 1) return serviceUnavailable;
+  return { ok: true, ticket, expiresAt };
 }
 
 export type ResetResult =
@@ -454,10 +491,21 @@ export type ResetResult =
  * Revokes the credential, the outstanding recovery codes and every live session,
  * then returns one printed enrolment ticket. A retry while that ticket is still
  * live answers 409 rather than minting a second printed secret.
+ *
+ * The `staff_mfa_reset` audit row is written here, with the actor and the
+ * operator's own words. The trigger that fires on the revocation asserts no
+ * actor deliberately (see `0023`): it cannot tell a reset from a self-service
+ * recovery redemption, and naming the subject as the actor would be a false
+ * record of a privileged act.
  */
 export async function resetStaffMfa(
   database: SecurityDatabase,
-  options: { actorUserId: string; targetUserId: string; now: number },
+  options: {
+    actorUserId: string;
+    targetUserId: string;
+    reason: string;
+    now: number;
+  },
 ): Promise<ResetResult> {
   if (options.actorUserId === options.targetUserId) return forbidden;
 
@@ -529,7 +577,23 @@ export async function resetStaffMfa(
         options.now,
         expiresAt,
       ),
+    database
+      .prepare(
+        `INSERT INTO audit_events (
+           operation_id, actor_user_id, actor_ref, action, subject_type,
+           subject_id, certification_id, reason, occurred_at
+         ) VALUES (?, ?, NULL, 'staff_mfa_reset', 'staff_mfa', ?, NULL, ?, ?)
+         RETURNING operation_id`,
+      )
+      .bind(
+        operationId("staff-mfa-reset-audit"),
+        options.actorUserId,
+        options.targetUserId,
+        options.reason,
+        options.now,
+      ),
   ]);
   if (results[3]?.results?.length !== 1) return serviceUnavailable;
+  if (results[4]?.results?.length !== 1) return serviceUnavailable;
   return { ok: true, ticket, expiresAt };
 }

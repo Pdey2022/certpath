@@ -576,7 +576,13 @@ export function createStaffAuthApi(
       now: timestamp,
     });
     if (!result.ok) return failureResponse(context, result);
-    return context.json(staffMfaRecoveryResponseSchema.parse({ next: "enrol" }));
+    return context.json(
+      staffMfaRecoveryResponseSchema.parse({
+        next: "enrol",
+        ticket: result.ticket,
+        expiresAt: result.expiresAt,
+      }),
+    );
   });
 
   api.post("/mfa/reset", async (context) => {
@@ -608,9 +614,13 @@ export function createStaffAuthApi(
     const parsed = staffMfaResetRequestSchema.safeParse(body.value);
     if (!parsed.success) return errorResponse(context, 400, "invalid_request");
 
+    // `reason` is validated (1..500 characters) and never quoted into a message,
+    // an error or a log line. It is written verbatim into the `staff_mfa_reset`
+    // audit row below, which is the only record of who reset whom and why.
     const result = await resetStaffMfa(context.env.DB, {
       actorUserId: authorization.userId,
       targetUserId: parsed.data.userId,
+      reason: parsed.data.reason,
       now: timestamp,
     });
     if (!result.ok) return failureResponse(context, result);

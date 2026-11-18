@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import {
   confirmStaffMfaEnrolment,
   enrolStaffMfa,
@@ -79,9 +79,14 @@ export function StaffMfaVerify() {
     setBusy(true);
     setError("");
     try {
-      await redeemStaffMfaRecoveryCode(recoveryCode.trim());
+      const result = await redeemStaffMfaRecoveryCode(recoveryCode.trim());
       setRecoveryCode("");
-      navigate("/admin/mfa/enrol", { replace: true });
+      // The one-time ticket travels in router state, never in storage: the
+      // enrolment page pre-fills it, the user confirms, and it is gone.
+      navigate("/admin/mfa/enrol", {
+        replace: true,
+        state: { ticket: result.ticket },
+      });
     } catch (cause) {
       setError(
         messageForFailure(
@@ -215,8 +220,14 @@ type EnrolmentStep =
   | { step: "codes"; recoveryCodes: string[] };
 
 export function StaffMfaEnrol() {
+  const location = useLocation();
   const [state, setState] = useState<EnrolmentStep>({ step: "ticket" });
-  const [ticket, setTicket] = useState("");
+  const [ticket, setTicket] = useState(() => {
+    // A ticket issued by a recovery redemption arrives in router state and is
+    // pre-filled; the user may still paste a printed one instead.
+    const handedOver = (location.state as { ticket?: unknown } | null)?.ticket;
+    return typeof handedOver === "string" ? handedOver : "";
+  });
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

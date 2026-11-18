@@ -78,8 +78,15 @@ export const staffMfaRecoveryRequestSchema = z
   .object({ recoveryCode })
   .strict();
 
+// A recovery code mints no assurance: it revokes the factor and returns exactly
+// one printed enrolment ticket, so redeeming a paper code is a way back in rather
+// than a way to admin access.
 export const staffMfaRecoveryResponseSchema = z
-  .object({ next: z.literal("enrol") })
+  .object({
+    next: z.literal("enrol"),
+    ticket: z.string().min(32).max(128),
+    expiresAt: z.number().int().positive(),
+  })
   .strict();
 
 export const staffMfaResetRequestSchema = z

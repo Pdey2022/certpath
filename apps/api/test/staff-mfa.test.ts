@@ -529,7 +529,14 @@ describe("staff second factor", () => {
       recoveryCode: recoveryCodes[0],
     });
     expect(first.status).toBe(200);
-    expect(await first.json()).toEqual({ next: "enrol" });
+    const body = (await first.json()) as {
+      next: string;
+      ticket: string;
+      expiresAt: number;
+    };
+    expect(body.next).toBe("enrol");
+    expect(body.ticket).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(body.expiresAt).toBe(clock + 24 * 60 * 60 * 1000);
 
     const second = await postMfa("/mfa/recovery", cookie, {
       recoveryCode: recoveryCodes[0],
@@ -549,7 +556,71 @@ describe("staff second factor", () => {
       .bind(userId)
       .first<{ count: number }>();
     expect(unused?.count).toBe(9);
+
+    // The revocation audit row names the subject and asserts no actor: the
+    // account holder redeemed a code about themselves, which is not a
+    // privileged act and must not be filed as one.
+    const revoked = await database
+      .prepare(
+        `SELECT actor_user_id, subject_id FROM audit_events
+         WHERE action = 'staff_mfa_revoked' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .all<{ actor_user_id: string | null; subject_id: string }>();
+    expect(revoked.results).toEqual([{ actor_user_id: null, subject_id: userId }]);
+    const privileged = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE action = 'staff_mfa_reset' AND subject_id = ?`,
+      )
+      .bind(userId)
+      .first<{ count: number }>();
+    expect(privileged?.count).toBe(0);
   });
+
+  it("recovery redemption re-enrols with the ticket it returns", async () => {
+    const email = uniqueEmail("mfa-recovery-reenrol");
+    const userId = await provisionStaff("global_admin", email);
+    const { cookie, seed, recoveryCodes } = await enrolConfirmed(email, userId);
+    expect(
+      (await postMfa("/mfa/verify", cookie, { code: await codeAt(seed, clock) }))
+        .status,
+    ).toBe(200);
+
+    const redeemed = await postMfa("/mfa/recovery", cookie, {
+      recoveryCode: recoveryCodes[2],
+    });
+    expect(redeemed.status).toBe(200);
+    const { ticket } = (await redeemed.json()) as { ticket: string };
+    expect(await readCredential(userId)).toBeNull();
+
+    // The paper code is a way back in, not a dead end: the ticket it returned
+    // enrols a replacement factor on the same account without a Global Admin.
+    const enrolled = await postMfa("/mfa/enrol", cookie, { ticket });
+    expect(enrolled.status).toBe(200);
+    const replacement = await seedFor(userId);
+    const confirmed = await postMfa("/mfa/enrol/confirm", cookie, {
+      code: await codeAt(replacement, clock),
+    });
+    expect(confirmed.status).toBe(200);
+
+    // A fresh password-only session proves the new factor is the live one.
+    const freshCookie = await signedInCookie(email);
+    expect((await readSession(freshCookie))?.mfa_method).toBeNull();
+    const verified = await postMfa("/mfa/verify", freshCookie, {
+      code: await codeAt(replacement, clock),
+    });
+    expect(verified.status).toBe(200);
+    expect((await readSession(freshCookie))?.mfa_method).toBe("totp");
+
+    // And a password alone still cannot enrol: the same account, a new session,
+    // no ticket.
+    const noTicket = await postMfa("/mfa/enrol", freshCookie, {});
+    expect(noTicket.status).toBe(403);
+    expect(await noTicket.json()).toMatchObject({
+      error: { code: "forbidden" },
+    });
+  }, 30_000);
 
   it("recovery mints no assurance", async () => {
     const email = uniqueEmail("mfa-recovery-no-assurance");
@@ -653,18 +724,51 @@ describe("staff second factor", () => {
       .first<{ count: number }>();
     expect(sessions?.count).toBe(0);
 
-    const audit = await database
+    // The audit trail must not lie about who acted. Exactly one reset row, its
+    // actor is the Global Admin, and it carries the operator's own reason.
+    const resets = await database
       .prepare(
-        `SELECT action, subject_type, subject_id FROM audit_events
+        `SELECT actor_user_id, subject_type, subject_id, reason
+         FROM audit_events
          WHERE action = 'staff_mfa_reset' AND subject_id = ?`,
       )
       .bind(targetId)
-      .first<{ action: string; subject_type: string; subject_id: string }>();
-    expect(audit).toMatchObject({
-      action: "staff_mfa_reset",
-      subject_type: "staff_mfa",
-      subject_id: targetId,
-    });
+      .all<{
+        actor_user_id: string | null;
+        subject_type: string;
+        subject_id: string;
+        reason: string;
+      }>();
+    expect(resets.results).toEqual([
+      {
+        actor_user_id: adminId,
+        subject_type: "staff_mfa",
+        subject_id: targetId,
+        reason: "Learner-support phone call; authenticator replaced",
+      },
+    ]);
+    // And no row anywhere claims the target reset themselves.
+    const victimActed = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE actor_user_id = ? AND action = 'staff_mfa_reset'`,
+      )
+      .bind(targetId)
+      .first<{ count: number }>();
+    expect(victimActed?.count).toBe(0);
+
+    // The trigger's own row asserts no actor: it cannot tell a reset from a
+    // self-service redemption, so it names neither.
+    const revoked = await database
+      .prepare(
+        `SELECT actor_user_id, subject_id FROM audit_events
+         WHERE action = 'staff_mfa_revoked' AND subject_id = ?`,
+      )
+      .bind(targetId)
+      .all<{ actor_user_id: string | null; subject_id: string }>();
+    expect(revoked.results).toEqual([
+      { actor_user_id: null, subject_id: targetId },
+    ]);
 
     // The revoked session really is dead (`invalid-session`), and the printed
     // ticket really works.

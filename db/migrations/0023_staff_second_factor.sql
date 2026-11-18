@@ -170,6 +170,13 @@ BEGIN
   );
 END;
 
+-- The revocation row asserts **no actor**. `NEW.user_id` is the account whose
+-- factor was revoked, and this trigger fires both for a Global-Admin reset and
+-- for a self-service recovery redemption: writing the subject into
+-- `actor_user_id` would put "the victim reset themselves" into a durable record
+-- for one of them. The actor of a privileged act is written by `resetStaffMfa`
+-- as its own `staff_mfa_reset` row; a recovery redemption is self-service and
+-- carries no privileged actor at all.
 CREATE TRIGGER staff_totp_credentials_audit_revoke
 AFTER UPDATE OF revoked_at ON staff_totp_credentials
 WHEN OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL
@@ -178,9 +185,9 @@ BEGIN
     operation_id, actor_user_id, actor_ref, action, subject_type, subject_id,
     certification_id, reason, occurred_at
   ) VALUES (
-    NEW.revoked_operation_id, NEW.user_id, NULL, 'staff_mfa_reset',
+    NEW.revoked_operation_id, NULL, 'staff-mfa-trigger', 'staff_mfa_revoked',
     'staff_mfa', NEW.user_id, NULL,
-    'Staff second factor reset', NEW.revoked_at
+    'Staff second factor revoked', NEW.revoked_at
   );
 END;
 
