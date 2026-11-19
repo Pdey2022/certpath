@@ -9,7 +9,12 @@
 // Wrangler argv, kept pure so the `--dry-run` that keeps a test run local cannot
 // be dropped without a test failing.
 import { existsSync, readFileSync } from "node:fs";
-import { CliError, idClass, normalizeDatabaseId } from "./d1-targets.mjs";
+import {
+  CliError,
+  DEPLOYED_COMMIT_PATTERN,
+  idClass,
+  normalizeDatabaseId,
+} from "./d1-targets.mjs";
 
 export const PILOT_WORKER_NAME = "certpath-pilot";
 export const PILOT_DATABASE_NAME = "certpath-pilot";
@@ -17,11 +22,6 @@ export const PILOT_D1_BINDING = "DB";
 export const PILOT_CONFIG_SUFFIX = "/wrangler.pilot.jsonc";
 export const PILOT_USAGE =
   "pilot-command.mjs <build|deploy|dry-run> [--expect-account <account id>]";
-
-// The publish job stamps the deployed commit before it deploys. A full or short
-// commit is the only shape it writes; anything else means the stamp step was
-// skipped and the artefact cannot be tied to a commit.
-const DEPLOYED_COMMIT = /^[0-9a-f]{7,40}$/;
 
 /**
  * Parse the arguments of `deploy` / `dry-run`. Unknown arguments are refused
@@ -176,7 +176,7 @@ export function assertPilotDeployConfig(generatedConfig) {
   }
 
   const stamp = vars["DEPLOYED_COMMIT"];
-  if (typeof stamp !== "string" || !DEPLOYED_COMMIT.test(stamp)) {
+  if (typeof stamp !== "string" || !DEPLOYED_COMMIT_PATTERN.test(stamp)) {
     throw new CliError(
       "pilot_deploy_stamp_missing",
       `The generated pilot config carries DEPLOYED_COMMIT ${JSON.stringify(stamp ?? null)}; the publish job stamps the deployed commit (apps/web/scripts/stamp-deployed-commit.mjs) before it deploys, and an artefact without one cannot be tied to a commit`,

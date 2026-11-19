@@ -14,14 +14,14 @@
 // `--commit` defaults to $DEPLOYED_COMMIT. Exit codes: 0 stamped, 1 refusal,
 // 2 usage.
 import { readFileSync, writeFileSync } from "node:fs";
-import { CliError } from "./lib/d1-targets.mjs";
+import { CliError, DEPLOYED_COMMIT_PATTERN } from "./lib/d1-targets.mjs";
 
-// A short (7-12) or full (40) git commit, nothing else. The value becomes a
-// Worker var, so a mistyped CI variable is refused instead of shipped — and a
-// Cloudflare account id is exactly 32 hex characters, which is why the middle
-// of the range is not accepted: it would let an account id through as a commit.
-const SHORT_COMMIT = /^[0-9a-f]{7,12}$/;
-const FULL_COMMIT = /^[0-9a-f]{40}$/;
+// The shape rule is shared with the deploy guards (`DEPLOYED_COMMIT_PATTERN`),
+// so tightening it here also tightens what they accept. This writer adds one
+// refusal of its own, because it is the only thing that writes the var: a
+// Cloudflare account id is exactly 32 hex characters and matches the shared
+// pattern, so it is refused by length as well as by shape.
+const ACCOUNT_ID_LENGTH = 32;
 
 function usage() {
   return [
@@ -80,10 +80,13 @@ function main() {
     throw new CliError("missing_argument", usage(), 2);
   }
   const commit = typeof options.commit === "string" ? options.commit.trim() : "";
-  if (!SHORT_COMMIT.test(commit) && !FULL_COMMIT.test(commit)) {
+  if (
+    !DEPLOYED_COMMIT_PATTERN.test(commit) ||
+    commit.length === ACCOUNT_ID_LENGTH
+  ) {
     throw new CliError(
       "commit_invalid",
-      `DEPLOYED_COMMIT must be a 7-12 character short commit or a full 40-character commit, not ${JSON.stringify(commit)}; the value becomes a Worker var, and a Cloudflare account id (32 characters) is not a commit`,
+      `DEPLOYED_COMMIT must be a 7-40 character commit and must not be a 32-character Cloudflare account id, not ${JSON.stringify(commit)}; the value becomes a Worker var`,
       1,
     );
   }

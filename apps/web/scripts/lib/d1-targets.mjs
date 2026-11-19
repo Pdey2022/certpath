@@ -917,6 +917,15 @@ export function deployEnv({
 }
 
 /**
+ * The shape of the DEPLOYED_COMMIT the publish jobs stamp into a deploy
+ * artefact. Every deploy guard checks it (`staging`, `pilot`, `site`), and
+ * `stamp-deployed-commit.mjs` is the only writer - it imports this rule and
+ * adds one stricter refusal on top, so tightening the writer also tightens the
+ * guards.
+ */
+export const DEPLOYED_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/;
+
+/**
  * The one line a deploy CLI prints about the account it is pinned to. Both
  * deploy CLIs print the same sentence, so an operator reading a log cannot tell
  * two different assurances apart.

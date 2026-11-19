@@ -10,7 +10,12 @@
 // spawning Wrangler; `readStagingGeneratedConfig` is the only function that
 // touches the file system and it fails closed on a missing or unparseable file.
 import { existsSync, readFileSync } from "node:fs";
-import { CliError, idClass, normalizeDatabaseId } from "./d1-targets.mjs";
+import {
+  CliError,
+  DEPLOYED_COMMIT_PATTERN,
+  idClass,
+  normalizeDatabaseId,
+} from "./d1-targets.mjs";
 
 export const STAGING_CONFIG_SUFFIX = "/wrangler.staging.jsonc";
 export const STAGING_WORKER_NAME = "learner-auth-staging";
@@ -30,9 +35,6 @@ export const STAGING_PILOT_FLAGS = Object.freeze([
   "PILOT_EVENTS_RETENTION_ENABLED",
 ]);
 
-// The stamp the publish job writes before it deploys. A short (7-12) or full
-// (40) commit, matching stamp-deployed-commit.mjs.
-const DEPLOYED_COMMIT = /^[0-9a-f]{7,40}$/;
 
 /**
  * Parse the arguments of `deploy` / `dry-run`. Unknown arguments are refused
@@ -245,7 +247,7 @@ export function assertStagingDeployConfig(
   // that step was skipped, and the docs' promise that every publish stamps
   // DEPLOYED_COMMIT would be false for this run.
   const stamp = vars["DEPLOYED_COMMIT"];
-  if (typeof stamp !== "string" || !DEPLOYED_COMMIT.test(stamp)) {
+  if (typeof stamp !== "string" || !DEPLOYED_COMMIT_PATTERN.test(stamp)) {
     throw new CliError(
       "staging_deploy_stamp_missing",
       `The generated staging config carries DEPLOYED_COMMIT ${JSON.stringify(stamp ?? null)}; the publish job stamps the deployed commit before it deploys, and an artefact without one cannot be tied to a commit`,
