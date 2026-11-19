@@ -834,6 +834,50 @@ test("the schema gate CLI refuses before Wrangler is spawned", () => {
   assert.doesNotMatch(notProvisioned.output, /⛅/);
 });
 
+test("the schema gate refuses a config that compares a different migrations directory", (t) => {
+  // Wrangler prints "No migrations to apply!" relative to the config's own
+  // migrations_dir. A config pointing elsewhere would give a clean line for a
+  // chain this repository does not review, and the gate would pass a deploy
+  // whose real migration is pending - so the directory is checked before the
+  // read. The fixture is otherwise a valid target (real id, right database), so
+  // the row fails if the directory rule is removed.
+  const directory = mkdtempSync(path.join(tmpdir(), "certpath-gate-config-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "wrangler.staging.jsonc");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      name: "learner-auth-staging",
+      d1_databases: [
+        {
+          binding: "DB",
+          database_name: "certpath-learner-staging",
+          database_id: "c52e398f-4280-40a6-8244-854186dc6ef2",
+          migrations_dir: "../somewhere-else",
+        },
+      ],
+    }),
+  );
+
+  const result = runGate(
+    [
+      "--config",
+      file,
+      "--database",
+      "certpath-learner-staging",
+      "--mode",
+      "skip",
+      "--expect-account",
+      ACCOUNT_ID,
+    ],
+    { CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+  );
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /error migrations_dir_mismatch: /);
+  assert.match(result.output, /somewhere-else/);
+  assert.doesNotMatch(result.output, /⛅/);
+});
+
 // The publish jobs stamp the deployed commit into the generated config they
 // deploy. The value becomes a public Worker var, so the rule that only a hex
 // commit may be stamped is asserted here: without it, a mistyped CI variable

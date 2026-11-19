@@ -124,6 +124,24 @@ function readTarget(configPath, database) {
     );
   }
   const entry = readD1Entry(text, path.basename(configPath));
+
+  // Wrangler compares the database against the config's own migrations_dir. If
+  // that points anywhere but this repository's db/migrations, the clean line it
+  // prints is about a different chain, and the gate would pass a deploy whose
+  // real migration is pending. The config's value is relative to the config
+  // file, which is how Wrangler resolves it.
+  const declaredDir =
+    entry.migrationsDir === ""
+      ? "(none)"
+      : path.resolve(path.dirname(configPath), entry.migrationsDir);
+  if (declaredDir !== migrationsDir) {
+    throw new CliError(
+      "migrations_dir_mismatch",
+      `${path.basename(configPath)} declares migrations_dir ${JSON.stringify(entry.migrationsDir)}, which resolves to ${declaredDir}, not ${migrationsDir}; the gate would compare against a chain this repository does not review`,
+      1,
+    );
+  }
+
   if (entry.databaseName !== database) {
     throw new CliError(
       "database_mismatch",

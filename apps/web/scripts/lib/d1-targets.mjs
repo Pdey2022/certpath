@@ -215,6 +215,12 @@ export function readD1Entry(text, label = "config") {
       typeof entry.database_name === "string" ? entry.database_name : "",
     databaseId,
     idClass: idClass(databaseId),
+    // Where Wrangler looks for migrations, relative to this config file. A
+    // deploy gate that compares against db/migrations must know the database it
+    // is gating uses that directory, or Wrangler could print "No migrations to
+    // apply!" for a different chain and the gate would pass on nothing.
+    migrationsDir:
+      typeof entry.migrations_dir === "string" ? entry.migrations_dir : "",
   };
 }
 
