@@ -135,16 +135,17 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run deploy:site
-      # `deploy:pilot` takes no --expect-account (it is the pilot script, not
-      # the guarded staging one); the pinned CLOUDFLARE_ACCOUNT_ID above is the
-      # only account Wrangler can resolve, because the credentials step refused
-      # any other value.
+      # The pilot path carries the same account assertion as staging: the script
+      # refuses to deploy without --expect-account and refuses an environment
+      # that disagrees, so the pin is not only the workflow's environment check.
+      # The root script is an `npm run --workspace` hop, and npm would swallow
+      # the flag on the way through; naming the workspace forwards it.
       - name: Deploy certpath-pilot
         if: inputs.target == 'app'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npm run deploy:pilot
+        run: npm run deploy:pilot --workspace @certpath/web -- --expect-account "$EXPECTED_ACCOUNT_ID"
       - name: Deployment status
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

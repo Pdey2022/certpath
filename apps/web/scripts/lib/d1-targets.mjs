@@ -850,6 +850,78 @@ export function assertExpectedAccountEnv({ expectAccount, envAccountId = null })
 }
 
 /**
+ * The child environment for a deploy, and the account the run is pinned to.
+ * Shared by every deploy CLI (`staging-command.mjs`, `pilot-command.mjs`) so
+ * the rule is written once: the staging deploy guard (#149) and the pilot
+ * deploy guard are the same rule, not two similar ones.
+ *
+ * Wrangler resolves the target account from the config, then
+ * `CLOUDFLARE_ACCOUNT_ID`, then a stored selection. An id that is only in the
+ * operator's shell therefore wins over anything the operator believes they
+ * selected, and the deploy lands in that account — bound to a database id that
+ * does not exist there.
+ *
+ * `deploy` is the one irreversible action here, so it always requires the id:
+ * with `requireAccount` the flag is mandatory even when the environment is
+ * silent, because a silent environment means Wrangler's stored selection decides
+ * where the Worker and its cron are created. `dry-run` uploads nothing, so it
+ * may omit the flag and then reports that the account was not asserted.
+ *
+ * When an id is supplied it must agree with the environment, and the child gets
+ * it pinned (`wranglerEnv`), which removes both fallbacks.
+ */
+export function deployEnv({
+  parentEnv = {},
+  expectAccount = null,
+  requireAccount = false,
+}) {
+  const envAccountId = normalizeAccountId(parentEnv.CLOUDFLARE_ACCOUNT_ID);
+  const expected = normalizeAccountId(expectAccount);
+
+  if (expected === "") {
+    if (requireAccount) {
+      const environment = envAccountId
+        ? ` CLOUDFLARE_ACCOUNT_ID is set to ${envAccountId}; that is not a source of truth, but it is the value to confirm: pass it as --expect-account once you have checked it is the Certpath account.`
+        : " With CLOUDFLARE_ACCOUNT_ID unset Wrangler falls back to its stored selection, which is not an assertion about anything.";
+      throw new CliError(
+        "account_not_asserted",
+        `deploy must name the account it writes to: pass --expect-account <account id>.${environment} A deploy creates the Worker and its cron, so it is the one action here that cannot be undone by re-running it.`,
+        2,
+      );
+    }
+    if (envAccountId !== "") {
+      throw new CliError(
+        "account_env_mismatch",
+        `CLOUDFLARE_ACCOUNT_ID is set to ${envAccountId} and no --expect-account was given; Wrangler prefers the environment variable, so the run could land in an account nobody asserted. Pass --expect-account <account id> (or unset the variable) and run again`,
+        1,
+      );
+    }
+    // Nothing to pin and nothing to contradict — a `dry-run`, which uploads
+    // nothing and says on stdout that the account was not asserted.
+    return { env: { ...parentEnv }, expectAccount: null, envAccountId: null };
+  }
+
+  // Refuses account_env_mismatch when the environment variable disagrees.
+  assertExpectedAccountEnv({ expectAccount: expected, envAccountId });
+  return {
+    env: wranglerEnv({ parentEnv, expectAccount: expected }),
+    expectAccount: expected,
+    envAccountId: envAccountId === "" ? null : envAccountId,
+  };
+}
+
+/**
+ * The one line a deploy CLI prints about the account it is pinned to. Both
+ * deploy CLIs print the same sentence, so an operator reading a log cannot tell
+ * two different assurances apart.
+ */
+export function describeAccountPin({ expectAccount }) {
+  return expectAccount
+    ? `Account: CLOUDFLARE_ACCOUNT_ID pinned to ${expectAccount} for this run`
+    : "Account: not asserted (no --expect-account and CLOUDFLARE_ACCOUNT_ID unset; Wrangler uses its stored selection)";
+}
+
+/**
  * Read only `accounts[].{id,name}` from `wrangler whoami --json`. Everything
  * else in that payload (token, email, permissions) is deliberately dropped so
  * no caller can print it.

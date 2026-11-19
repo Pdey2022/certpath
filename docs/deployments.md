@@ -15,7 +15,7 @@ this branch publish nothing.
 |---|---|---|---|
 | Public site | `certpath-site` | push to `main`, after `verify` | `npm run build:site` -> stamp -> `npm run deploy:site` |
 | Staging app | `learner-auth-staging` | push to `main`, after `verify` and the migration gate | `npm run build:staging` -> stamp -> `npm run deploy:staging -- --expect-account ...` |
-| Production | `certpath-site` or `certpath-pilot` | `workflow_dispatch` only, protected `production` environment | `deploy-production.yml`, after its own `verify` job |
+| Production | `certpath-site` or `certpath-pilot` | `workflow_dispatch` only, protected `production` environment | `deploy-production.yml`, after its own `verify` job; the `app` target runs the migration gate, then `npm run deploy:pilot -- --expect-account ...` |
 
 - Pull requests, `workflow_dispatch` of `CI`, and any other ref deploy nothing:
   both jobs carry an explicit `if:` guard rather than relying on a default.
@@ -26,10 +26,33 @@ this branch publish nothing.
 - The staging publish is a separate job from the site publish, so a skipped or
   failed staging deploy does not stop the site.
 - The root scripts are themselves `npm run --workspace` hops, and npm swallows
-  an option passed through two hops. The workflow therefore names the workspace
+  an option passed through two hops. The workflows therefore name the workspace
   once — `npm run deploy:staging --workspace @certpath/web -- --expect-account
-  <id>` — which is the same command as `npm run deploy:staging --
-  --expect-account <id>` run from `apps/web`.
+  <id>` (and the same for `deploy:pilot`) — which is the same command as
+  `npm run deploy:staging -- --expect-account <id>` run from `apps/web`.
+
+### Account pinning
+
+Both app deploys assert the account on the command line, with one shared rule
+(`deployEnv` in `apps/web/scripts/lib/d1-targets.mjs`, used by
+`staging-command.mjs` and `pilot-command.mjs`):
+
+| Action | `--expect-account` | `CLOUDFLARE_ACCOUNT_ID` set but different |
+|---|---|---|
+| `deploy` (staging or pilot) | **required**; absent is exit 2 `account_not_asserted`, before Wrangler is spawned | refused, exit 1 `account_env_mismatch` |
+| `dry-run` | optional; the run prints `Account: not asserted ...` when it is omitted | refused, exit 1 `account_env_mismatch` - a value nobody asserted must not decide where a read lands |
+| `build` | not accepted at all | not read |
+
+`--allow-pilot-flags` is a staging-only override; the pilot CLI refuses it as an
+unknown argument, so a pilot deploy has no way to waive an assertion. The public
+site's `deploy:site` carries no script-level guard: its account comes from
+`CLOUDFLARE_ACCOUNT_ID`, which the workflow asserts equals
+`ef67137c4d1556f7f51f1cb3f1f420f3` before the step runs.
+
+The pilot **database** is not provisioned: `wrangler.pilot.jsonc` still carries
+the all-zero `database_id`, so the production `app` dispatch fails loudly at the
+migration gate (`database_not_provisioned`) before any build or deploy. The
+account guard above is independent of that and does not weaken it.
 
 ## The migration gate
 

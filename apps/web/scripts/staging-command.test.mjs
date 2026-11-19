@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { CliError } from "./lib/d1-targets.mjs";
+import { CliError, deployEnv } from "./lib/d1-targets.mjs";
 import {
   describeMigrationGate,
   exitCodeForAction,
@@ -27,7 +27,6 @@ import {
 import {
   STAGING_PILOT_FLAGS,
   assertStagingDeployConfig,
-  deployEnv,
   readStagingGeneratedConfig,
   wranglerArgs,
 } from "./lib/staging-deploy.mjs";
