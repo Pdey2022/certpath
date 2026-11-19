@@ -19,10 +19,15 @@ this branch publish nothing.
 
 - Pull requests, `workflow_dispatch` of `CI`, and any other ref deploy nothing:
   both jobs carry an explicit `if:` guard rather than relying on a default.
-- Each target has its own `concurrency` group (`publish-certpath-site`,
-  `publish-learner-auth-staging`, `deploy-production-<target>`), so two merges
-  queue instead of deploying at once, and an in-flight deploy is never
-  cancelled by a later one.
+- Each Worker has one `concurrency` group, shared by both workflows:
+  `deploy-certpath-site`, `deploy-learner-auth-staging`, `deploy-certpath-pilot`.
+  Two merges queue instead of deploying at once, an in-flight deploy is never
+  cancelled by a later one, and a manual site dispatch cannot race the merge
+  that is publishing `certpath-site`.
+- The production deploy job runs only from `refs/heads/main`. A dispatch from
+  another ref runs `verify` and then skips the deploy job — that is a guard, not
+  a supported way to ship. Allowing a non-`main` production deploy is an open
+  owner decision, not a default.
 - The staging publish is a separate job from the site publish, so a skipped or
   failed staging deploy does not stop the site.
 - The root scripts are themselves `npm run --workspace` hops, and npm swallows
@@ -97,7 +102,7 @@ The owner creates these once, in **Settings -> Secrets and variables -> Actions*
 
 | Secret | Value | Used for |
 |---|---|---|
-| `CLOUDFLARE_API_TOKEN` | an API token for the Certpath account with **Workers Scripts:Edit** and **D1:Edit** (D1:Read for the migration gate and exports) | every deploy, the gate, `wrangler deployments status` |
+| `CLOUDFLARE_API_TOKEN` | an API token for the Certpath account with **Workers Scripts:Edit** and **D1:Read** | every deploy, the migration gate, `wrangler deployments status` |
 | `CLOUDFLARE_ACCOUNT_ID` | `ef67137c4d1556f7f51f1cb3f1f420f3` (the Certpath account) | pinning Wrangler to that account |
 
 If either secret is absent, or the account id is not the Certpath account, every
@@ -106,6 +111,11 @@ missing or wrong value and linking here. The account id is not itself a secret �
 it is pinned in the workflows — but the token is, and it is never written to a
 file, passed as an argument, printed in a log or committed. The gate and the
 deploy scripts redact it from anything Wrangler prints.
+
+**The pipeline cannot write to D1.** No workflow runs `d1 migrations apply`, so
+`D1:Read` is all the deploy token needs. Applying a migration by hand is a
+separate, owner-only credential with **D1:Edit**; it is never stored in Actions
+secrets, never used by a workflow, and never held by the deploy token.
 
 Production also needs an **environment** named `production`
 (**Settings -> Environments**) with required reviewers (and, if desired, a
@@ -124,6 +134,14 @@ commit (`${GITHUB_SHA::7}`), by rewriting the generated
 and it is **not** exposed on `/api/health`: the public API surface is unchanged,
 and `apps/api/src/index.test.ts` still asserts that health returns exactly
 `{"status":"ok"}`.
+
+Both deploy CLIs assert the stamp before they deploy: an artefact whose
+`DEPLOYED_COMMIT` is not commit-shaped is refused (`staging_deploy_stamp_missing`
+/ `pilot_deploy_stamp_missing`), so a skipped stamp fails the job instead of
+shipping a Worker nobody can identify. The pilot CLI also refuses an artefact
+that is not the pilot build (`assertPilotDeployConfig`), which is what stops
+`npm run build:staging && npm run deploy:pilot` from shipping the staging Worker
+under the pilot name.
 
 Where to read it:
 

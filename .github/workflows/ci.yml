@@ -69,7 +69,7 @@ jobs:
     # One deploy at a time per target: two merges in a row queue instead of
     # racing, and an in-flight deploy is never cancelled by a later one.
     concurrency:
-      group: publish-certpath-site
+      group: deploy-certpath-site
       cancel-in-progress: false
     env:
       EXPECTED_ACCOUNT_ID: ef67137c4d1556f7f51f1cb3f1f420f3
@@ -92,7 +92,7 @@ jobs:
           set -euo pipefail
           failed=0
           if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-            echo "::error title=CLOUDFLARE_API_TOKEN is missing::Create the repository secret CLOUDFLARE_API_TOKEN (Workers Scripts:Edit, D1:Edit for the Certpath account). See docs/deployments.md."
+            echo "::error title=CLOUDFLARE_API_TOKEN is missing::Create the repository secret CLOUDFLARE_API_TOKEN (Workers Scripts:Edit and D1:Read for the Certpath account; the pipeline never applies a migration, so it does not need D1:Edit). See docs/deployments.md."
             failed=1
           fi
           if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
@@ -138,7 +138,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
-      group: publish-learner-auth-staging
+      group: deploy-learner-auth-staging
       cancel-in-progress: false
     env:
       EXPECTED_ACCOUNT_ID: ef67137c4d1556f7f51f1cb3f1f420f3
@@ -160,7 +160,7 @@ jobs:
           set -euo pipefail
           failed=0
           if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-            echo "::error title=CLOUDFLARE_API_TOKEN is missing::Create the repository secret CLOUDFLARE_API_TOKEN (Workers Scripts:Edit, D1:Edit for the Certpath account). See docs/deployments.md."
+            echo "::error title=CLOUDFLARE_API_TOKEN is missing::Create the repository secret CLOUDFLARE_API_TOKEN (Workers Scripts:Edit and D1:Read for the Certpath account; the pipeline never applies a migration, so it does not need D1:Edit). See docs/deployments.md."
             failed=1
           fi
           if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
