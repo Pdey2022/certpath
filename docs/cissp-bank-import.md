@@ -2,7 +2,10 @@
 
 Status: owner-approved plan for Phase 2 of the CISSP content work. This slice
 builds the converter only. It performs **no** migration, import, deployment,
-provisioning or database write.
+provisioning or write to any deployed or content database. The repository's
+existing `db:chain` check runs inside `npm run verify` against a fresh,
+disposable local database; it adds no migration and touches no deployed
+database.
 
 The source file stays local. `docs/CISSP questoins/` is git-ignored, the
 converter writes only outside the repository, and every generated CSV stays out
@@ -173,5 +176,7 @@ code, the repo-write refusal, `.partial` cleanup after a write failure, and the
 absence of question text from `manifest.json`, `taxonomy-report.json` and
 `rejections.txt`.
 
-No migration, import, deployment, provisioning or database write is part of
-this slice.
+No migration, import, deployment, provisioning or write to a deployed or
+content database is part of this slice. The only database activity is the
+repository's existing `db:chain` migration check, which `npm run verify` always
+runs against a fresh, disposable local database.
