@@ -48,6 +48,9 @@ function stagingConfig() {
       PILOT_EVENTS_ENABLED: "false",
       PILOT_SERVER_EVENTS_ENABLED: "false",
       PILOT_EVENTS_RETENTION_ENABLED: "false",
+      // The publish job stamps this before it deploys; the guard refuses an
+      // artefact without it, because then the run cannot be tied to a commit.
+      DEPLOYED_COMMIT: "280d53b",
     },
     d1_databases: [
       {
@@ -108,8 +111,15 @@ function runCli(directory, args, envOverrides = {}) {
   // deleted, because a value inherited from the developer's shell would make
   // every deploy case refuse with account_env_mismatch, and a test that passes
   // only on a clean machine is not a test. The account cases set it explicitly.
+  // The legacy key/email pair, an API-base override and the token are cleared
+  // too: an invalid token is the second lock, so a deploy row that reached a
+  // spawn could not authenticate instead of uploading.
   const env = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CI: "1" };
   delete env.CLOUDFLARE_ACCOUNT_ID;
+  delete env.CLOUDFLARE_API_KEY;
+  delete env.CLOUDFLARE_EMAIL;
+  delete env.CLOUDFLARE_API_BASE_URL;
+  env.CLOUDFLARE_API_TOKEN = "certpath-test-token-not-a-credential";
   Object.assign(env, envOverrides);
   const result = spawnSync(process.execPath, [CLI, ...args], {
     cwd: directory,
@@ -238,6 +248,17 @@ test("the staging deploy guard refuses every artefact that is not the staging bu
     {
       code: "staging_pilot_flag_missing",
       config: withoutVar("PILOT_SERVER_EVENTS_ENABLED"),
+    },
+    {
+      // The publish jobs stamp DEPLOYED_COMMIT before deploying. An artefact
+      // without it is one this pipeline did not produce, and the docs' promise
+      // that every publish stamps the commit would be false.
+      code: "staging_deploy_stamp_missing",
+      config: withoutVar("DEPLOYED_COMMIT"),
+    },
+    {
+      code: "staging_deploy_stamp_missing",
+      config: withVars({ DEPLOYED_COMMIT: "not-a-commit" }),
     },
   ];
 
@@ -538,6 +559,7 @@ test("the guard helper names each refusal code and returns what it verified", ()
       PILOT_SERVER_EVENTS_ENABLED: "false",
       PILOT_EVENTS_RETENTION_ENABLED: "false",
     },
+    stamp: "280d53b",
     allowPilotFlags: false,
   });
 
@@ -590,8 +612,14 @@ const GATE_CLI = fileURLToPath(
 const ACCOUNT_ID = "ef67137c4d1556f7f51f1cb3f1f420f3";
 
 function runGate(args, envOverrides = {}) {
+  // Same hermetic parent as runCli: a stored account or credential must not
+  // change which refusal a case exercises.
   const env = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CI: "1" };
   delete env.CLOUDFLARE_ACCOUNT_ID;
+  delete env.CLOUDFLARE_API_KEY;
+  delete env.CLOUDFLARE_EMAIL;
+  delete env.CLOUDFLARE_API_BASE_URL;
+  env.CLOUDFLARE_API_TOKEN = "certpath-test-token-not-a-credential";
   Object.assign(env, envOverrides);
   const result = spawnSync(process.execPath, [GATE_CLI, ...args], {
     cwd: fileURLToPath(new URL(".", import.meta.url)),

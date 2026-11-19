@@ -1,16 +1,23 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CliError, deployEnv, describeAccountPin } from "./lib/d1-targets.mjs";
 import {
   PILOT_USAGE,
+  assertPilotDeployConfig,
   parsePilotDeployOptions,
   pilotWranglerArgs,
+  readPilotGeneratedConfig,
 } from "./lib/pilot-deploy.mjs";
 
 const action = process.argv[2];
 const env = { ...process.env, VITE_CERTPATH_PILOT: "true" };
+
+// The artefact Wrangler is pointed at, resolved the same way Wrangler resolves
+// `-c build/server/wrangler.json`: relative to the working directory.
+const GENERATED_CONFIG = path.resolve("build", "server", "wrangler.json");
 
 function find(...relativePaths) {
   for (const path of relativePaths) {
@@ -79,6 +86,17 @@ try {
       expectAccount: options.expectAccount,
       requireAccount: action === "deploy",
     });
+    // Account first (it decides where the write lands), then the artefact: every
+    // build target writes build/server/wrangler.json, so the deploy must prove
+    // the file it is about to ship is the pilot build.
+    const verified = assertPilotDeployConfig(
+      readPilotGeneratedConfig(GENERATED_CONFIG),
+    );
+    console.log(
+      `Verified pilot deploy target: worker ${verified.worker}, database ${verified.database} (binding ${verified.binding})`,
+    );
+    console.log(`Verified INDEXING_ENABLED=${JSON.stringify(verified.indexing)}`);
+    console.log(`Verified DEPLOYED_COMMIT=${verified.stamp}`);
     console.log(describeAccountPin(account));
 
     const result = spawnSync(

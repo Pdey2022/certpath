@@ -323,11 +323,25 @@ test("preview deploy refuses another target's artefact before spawning Wrangler"
   const buildDirectory = path.join(directory, "build", "server");
   mkdirSync(buildDirectory, { recursive: true });
   const generatedPath = path.join(buildDirectory, "wrangler.json");
+  // `deploy` is spawned on purpose, so the environment must not be able to
+  // authenticate whatever a regressed guard lets through: an invalid API token
+  // and no account id mean a spawn fails at the API instead of uploading. The
+  // rows below drive artefacts the guard refuses, so a spawn should not happen
+  // at all - the invalid token is the belt to that braces.
   const deploy = () =>
     spawnSync(process.execPath, [SCRIPTS.preview, "deploy"], {
       cwd: directory,
       encoding: "utf8",
-      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+        FORCE_COLOR: "0",
+        CLOUDFLARE_API_TOKEN: "certpath-test-token-not-a-credential",
+        CLOUDFLARE_ACCOUNT_ID: "",
+        CLOUDFLARE_API_KEY: "",
+        CLOUDFLARE_EMAIL: "",
+        CLOUDFLARE_API_BASE_URL: "",
+      },
       maxBuffer: 64 * 1024 * 1024,
     });
 

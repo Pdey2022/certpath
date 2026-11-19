@@ -16,29 +16,34 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CliError } from "./lib/d1-targets.mjs";
 import {
+  assertPilotDeployConfig,
   parsePilotDeployOptions,
   pilotWranglerArgs,
+  readPilotGeneratedConfig,
 } from "./lib/pilot-deploy.mjs";
 
 const CLI = fileURLToPath(new URL("./pilot-command.mjs", import.meta.url));
 
-// Shaped like the artefact `npm run build:pilot` writes, trimmed to what
-// Wrangler needs for a local `--dry-run`. The database id is still the all-zero
-// placeholder, exactly as `wrangler.pilot.jsonc` carries it: the account guard
-// is independent of provisioning, and the placeholder is the schema gate's
-// refusal, not this one's.
+// Shaped like the artefact `npm run build:pilot` writes once the pilot database
+// is provisioned: the stamp the publish job adds, the non-indexable flag and a
+// real database id. The real `wrangler.pilot.jsonc` still carries the all-zero
+// placeholder, which is why the guard's placeholder refusal is tested
+// separately below and why `npm run dry-run:pilot` refuses today.
 function pilotConfig() {
   return {
     configPath: "C:\\repo\\apps\\web\\wrangler.pilot.jsonc",
     name: "certpath-pilot",
     main: "index.js",
     compatibility_date: "2026-11-10",
-    vars: { INDEXING_ENABLED: "false" },
+    vars: {
+      INDEXING_ENABLED: "false",
+      DEPLOYED_COMMIT: "280d53b",
+    },
     d1_databases: [
       {
         binding: "DB",
         database_name: "certpath-pilot",
-        database_id: "00000000-0000-0000-0000-000000000000",
+        database_id: "11111111-1111-4111-8111-111111111111",
       },
     ],
   };
@@ -61,12 +66,11 @@ function workspace(t, config = pilotConfig()) {
   return directory;
 }
 
-// An artefact whose `main` does not exist: if a `deploy` row ever reaches
-// Wrangler, it stops at bundling, locally, before the upload. Used only by rows
-// that must not be able to deploy even if the guard under test regresses.
-function brokenWorkspace(t) {
-  const directory = workspace(t, { ...pilotConfig(), main: "missing-entry.js" });
-  return directory;
+// An artefact the *next* guard refuses (the staging Worker name): if the
+// account rule under test regresses, the run stops at the artefact guard
+// instead of spawning a real `wrangler deploy`. Same trick as the staging suite.
+function workspaceRefusedByArtefactGuard(t) {
+  return workspace(t, { ...pilotConfig(), name: "learner-auth-staging" });
 }
 
 function runCli(directory, args, envOverrides = {}) {
@@ -76,6 +80,9 @@ function runCli(directory, args, envOverrides = {}) {
   // a test. The account cases set it explicitly.
   const env = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CI: "1" };
   delete env.CLOUDFLARE_ACCOUNT_ID;
+  delete env.CLOUDFLARE_API_KEY;
+  delete env.CLOUDFLARE_EMAIL;
+  delete env.CLOUDFLARE_API_BASE_URL;
   // Second lock on the same door: an invalid API token, so that even if the
   // account rule regressed and a `deploy` row spawned Wrangler, the spawn could
   // not authenticate - it fails at the API instead of uploading. The staging
@@ -104,14 +111,10 @@ test("pilot deploy requires --expect-account, before Wrangler is spawned", (t) =
   // decides where certpath-pilot is created. A silent environment is not an
   // assertion, and neither is a populated one.
   //
-  // These rows drive `deploy`, unlike the staging suite's, because this CLI has
-  // no artefact guard behind the account guard. Two locks keep a regression
-  // from uploading: the artefact's entry point does not exist, so a spawned
-  // Wrangler fails while bundling before any API call, and runCli supplies an
-  // invalid API token, so it could not authenticate if it got that far. A
-  // regression still fails the rows below - the banner appears - it just cannot
-  // deploy anything on the way.
-  const directory = brokenWorkspace(t);
+  // These rows drive `deploy`, and the artefact is one the artefact guard
+  // refuses, so a regression in the account rule stops at the next guard rather
+  // than at a real upload. runCli's invalid API token is a second lock.
+  const directory = workspaceRefusedByArtefactGuard(t);
 
   const missing = runCli(directory, ["deploy"]);
   assert.equal(missing.status, 2, missing.output);
@@ -141,6 +144,17 @@ test("pilot deploy requires --expect-account, before Wrangler is spawned", (t) =
   assert.match(disagreeing.output, /error account_env_mismatch: /);
   assert.doesNotMatch(disagreeing.output, /wrangler \d+\.\d+\.\d+/);
   assert.doesNotMatch(disagreeing.output, /⛅/);
+
+  // With the account in order, the run reaches the artefact guard - which is
+  // the ordering the rows above rely on, stated as a positive.
+  const agreed = runCli(
+    directory,
+    ["deploy", "--expect-account", EXPECTED],
+    { CLOUDFLARE_ACCOUNT_ID: EXPECTED },
+  );
+  assert.equal(agreed.status, 1, agreed.output);
+  assert.match(agreed.output, /error pilot_wrong_worker: /);
+  assert.doesNotMatch(agreed.output, /⛅/);
 });
 
 test("a CLOUDFLARE_ACCOUNT_ID in the parent environment is never deployed to silently", (t) => {
@@ -230,6 +244,97 @@ test("an unknown action is a usage error, exit 2", (t) => {
   assert.match(
     result.output,
     /Usage: pilot-command\.mjs <build\|deploy\|dry-run> \[--expect-account <account id>\]/,
+  );
+});
+
+test("the pilot artefact guard refuses anything that is not the pilot build", (t) => {
+  // `npm run build:staging && npm run deploy:pilot` is the accident this guard
+  // exists for: every build target writes build/server/wrangler.json. Reverting
+  // any rule below fails its row, and the placeholder row is the one that keeps
+  // this refusal loud until certpath-pilot is provisioned.
+  const config = pilotConfig();
+  assert.deepEqual(assertPilotDeployConfig(config), {
+    worker: "certpath-pilot",
+    database: "certpath-pilot",
+    binding: "DB",
+    indexing: "false",
+    stamp: "280d53b",
+  });
+
+  const cases = [
+    [{ ...config, configPath: "C:\\repo\\apps\\web\\wrangler.staging.jsonc" }, "pilot_wrong_config"],
+    [{ ...config, configPath: undefined }, "pilot_wrong_config"],
+    [{ ...config, name: "learner-auth-staging" }, "pilot_wrong_worker"],
+    [{ ...config, d1_databases: [] }, "pilot_database_mismatch"],
+    [
+      {
+        ...config,
+        d1_databases: [
+          {
+            binding: "STAGING_DB",
+            database_name: "certpath-pilot",
+            database_id: "11111111-1111-4111-8111-111111111111",
+          },
+        ],
+      },
+      "pilot_database_mismatch",
+    ],
+    [
+      {
+        ...config,
+        d1_databases: [
+          {
+            binding: "DB",
+            database_name: "certpath-learner-staging",
+            database_id: "11111111-1111-4111-8111-111111111111",
+          },
+        ],
+      },
+      "pilot_database_mismatch",
+    ],
+    [
+      {
+        ...config,
+        d1_databases: [
+          {
+            binding: "DB",
+            database_name: "certpath-pilot",
+            database_id: "00000000-0000-0000-0000-000000000000",
+          },
+        ],
+      },
+      "pilot_database_placeholder",
+    ],
+    [
+      { ...config, d1_databases: [{ binding: "DB", database_name: "certpath-pilot" }] },
+      "pilot_database_placeholder",
+    ],
+    [{ ...config, vars: { ...config.vars, INDEXING_ENABLED: "true" } }, "pilot_indexing_enabled"],
+    [{ ...config, vars: { INDEXING_ENABLED: "false" } }, "pilot_deploy_stamp_missing"],
+    // `280d53` is one character short of the shortest commit the stamp writes.
+    [{ ...config, vars: { ...config.vars, DEPLOYED_COMMIT: "280d53" } }, "pilot_deploy_stamp_missing"],
+  ];
+  for (const [value, code] of cases) {
+    assert.throws(
+      () => assertPilotDeployConfig(value),
+      (error) => error instanceof CliError && error.code === code,
+      `expected ${code} for ${JSON.stringify(value)}`,
+    );
+  }
+
+  // The reader names its own refusals, so a deploy with no pilot build fails
+  // loudly instead of shipping whatever the previous build left behind.
+  const directory = mkdtempSync(path.join(tmpdir(), "certpath-pilot-lib-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  assert.throws(
+    () => readPilotGeneratedConfig(path.join(directory, "absent.json")),
+    (error) => error instanceof CliError && error.code === "pilot_config_missing",
+  );
+  const unparseable = path.join(directory, "wrangler.json");
+  writeFileSync(unparseable, "not json");
+  assert.throws(
+    () => readPilotGeneratedConfig(unparseable),
+    (error) => error instanceof CliError && error.code === "pilot_config_unparsed",
   );
 });
 

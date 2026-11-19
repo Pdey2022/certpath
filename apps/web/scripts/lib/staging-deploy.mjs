@@ -30,6 +30,10 @@ export const STAGING_PILOT_FLAGS = Object.freeze([
   "PILOT_EVENTS_RETENTION_ENABLED",
 ]);
 
+// The stamp the publish job writes before it deploys. A short (7-12) or full
+// (40) commit, matching stamp-deployed-commit.mjs.
+const DEPLOYED_COMMIT = /^[0-9a-f]{7,40}$/;
+
 /**
  * Parse the arguments of `deploy` / `dry-run`. Unknown arguments are refused
  * rather than ignored: a mistyped `--expect-acount` would otherwise leave the
@@ -236,12 +240,26 @@ export function assertStagingDeployConfig(
     flags[name] = value;
   }
 
+  // The publish job stamps the deployed commit before it deploys
+  // (stamp-deployed-commit.mjs). An artefact without a commit-shaped stamp means
+  // that step was skipped, and the docs' promise that every publish stamps
+  // DEPLOYED_COMMIT would be false for this run.
+  const stamp = vars["DEPLOYED_COMMIT"];
+  if (typeof stamp !== "string" || !DEPLOYED_COMMIT.test(stamp)) {
+    throw new CliError(
+      "staging_deploy_stamp_missing",
+      `The generated staging config carries DEPLOYED_COMMIT ${JSON.stringify(stamp ?? null)}; the publish job stamps the deployed commit before it deploys, and an artefact without one cannot be tied to a commit`,
+      1,
+    );
+  }
+
   return {
     worker: generatedConfig.name,
     database: databaseName,
     binding,
     schedule: [...schedule],
     flags,
+    stamp,
     allowPilotFlags,
   };
 }
