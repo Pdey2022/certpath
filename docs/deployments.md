@@ -140,13 +140,17 @@ and it is **not** exposed on `/api/health`: the public API surface is unchanged,
 and `apps/api/src/index.test.ts` still asserts that health returns exactly
 `{"status":"ok"}`.
 
-Both deploy CLIs assert the stamp before they deploy: an artefact whose
+All three deploy CLIs assert the stamp before they deploy: an artefact whose
 `DEPLOYED_COMMIT` is not commit-shaped is refused (`staging_deploy_stamp_missing`
-/ `pilot_deploy_stamp_missing`), so a skipped stamp fails the job instead of
-shipping a Worker nobody can identify. The pilot CLI also refuses an artefact
-that is not the pilot build (`assertPilotDeployConfig`), which is what stops
-`npm run build:staging && npm run deploy:pilot` from shipping the staging Worker
-under the pilot name.
+/ `pilot_deploy_stamp_missing` / `site_deploy_stamp_missing`), so a skipped stamp
+fails the job instead of shipping a Worker nobody can identify. Each CLI also
+refuses an artefact that is not its own build (`assertStagingDeployConfig`,
+`assertPilotDeployConfig`, `assertSiteDeployConfig`): every build target writes
+`build/server/wrangler.json`, so without that check `npm run build:pilot &&
+npm run deploy:site` would publish the `certpath-pilot` Worker under the public
+origin, and `build:staging && deploy:pilot` would ship the staging Worker under
+the pilot name. The site guard additionally asserts the *absence* of any
+`d1_databases` binding, because the public site is D1-free.
 
 Where to read it:
 
