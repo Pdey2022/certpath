@@ -16,3 +16,9 @@ coverage/
 worker-configuration.d.ts
 *.log
 exports/
+
+# Local study material, not repository content. Question text that has not been
+# through the import contract (`docs/question-bank-import-export.md`) and the
+# author/reviewer split must never enter history, even as a sample.
+docs/CISSP questoins/
+desktop.ini
