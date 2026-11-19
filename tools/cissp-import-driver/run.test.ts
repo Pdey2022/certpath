@@ -39,6 +39,7 @@ type ConfirmBehaviour =
   // The three Stage 3/4 mutations that commit and then lose the answer. Each
   // one must be reconciled by observation, never re-sent blind.
   | "submit-then-500"
+  | "submit-500-no-commit"
   | "publish-then-500"
   // Preview refusals that must keep their own code instead of collapsing into
   // PREVIEW_REJECTED.
@@ -189,6 +190,11 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
       const action = revisionMatch[3];
       if (action === "/submit") {
         submitCount += 1;
+        if (behaviour === "submit-500-no-commit") {
+          // The call did not land: the revision stays where it was, so every
+          // observation still sees draft.
+          return json({ error: { code: "service_unavailable", requestId: "stub-13" } }, 500);
+        }
         question.state = "submitted";
         if (behaviour === "submit-then-500") {
           return json({ error: { code: "service_unavailable", requestId: "stub-9" } }, 500);
@@ -460,6 +466,34 @@ test("a publish that commits and then answers 500 is observed, not re-sent", asy
   assert.equal(stub.publicationReads, 1);
   assert.equal(checkpoint.questions[0]!.state, "published");
   assert.equal(checkpoint.questions[0]!.pointerVersion, 1);
+});
+
+test("a submit that never lands stops after one reconciliation, with the intent still set", async () => {
+  // The bound is what stops a run grinding against a broken server: one
+  // observation is allowed, a second conflict is not. This row is the one that
+  // proves `recoveries > 1` actually bites - without it the guard could be
+  // deleted and every other test would stay green.
+  const { harness, stub } = buildHarness("submit-500-no-commit", 1);
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload", "publish"]),
+    (error: unknown) =>
+      error instanceof DriverError &&
+      error.code === "WORKFLOW_CONFLICT" &&
+      /second conflict/.test(error.message),
+  );
+
+  // Exactly two submits: the first, then the one re-issued after the single
+  // permitted observation - and then the stop.
+  assert.equal(stub.submitCount, 2);
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(checkpoint.questions[0]!.inFlight, "submit");
+  assert.equal(checkpoint.questions[0]!.state, "draft");
+  assert.equal(checkpoint.counters.recoveries, 1);
+  assert.equal(checkpoint.counters.http5xx, 2);
+  // The stop is what is recorded, not the last 5xx: the operator's next action
+  // depends on knowing the run stopped, and the 5xx count is beside it.
+  assert.equal(checkpoint.lastError?.code, "WORKFLOW_CONFLICT");
 });
 
 test("a stop from the observation branch keeps the in-flight intent on disk", async () => {
