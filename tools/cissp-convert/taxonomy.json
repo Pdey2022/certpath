@@ -1,0 +1,421 @@
+{
+  "formatVersion": "certpath-cissp-taxonomy-v1",
+  "certificationKey": "cissp",
+  "domains": [
+    {
+      "id": "cissp-d1",
+      "title": "Security and Risk Management",
+      "sourcePrefixes": ["Domain 1: Security and Risk Management"],
+      "expectedQuestions": 211,
+      "topics": [
+        {
+          "id": "cissp-d1-risk-management",
+          "slug": "risk-management",
+          "title": "Risk Management",
+          "expectedQuestions": 190,
+          "sourceLabels": [
+            { "label": "Risk management", "expectedQuestions": 189 },
+            { "label": "Risk terminology", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d1-governance-and-compliance",
+          "slug": "governance-and-compliance",
+          "title": "Governance and Compliance",
+          "expectedQuestions": 11,
+          "sourceLabels": [
+            { "label": "Governance and policy", "expectedQuestions": 7 },
+            { "label": "Governance and Compliance", "expectedQuestions": 1 },
+            { "label": "Change management", "expectedQuestions": 1 },
+            { "label": "Legal, regulatory and investigations", "expectedQuestions": 1 },
+            { "label": "Audit Ethics", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d1-third-party-and-cloud-risk",
+          "slug": "third-party-and-cloud-risk",
+          "title": "Third-Party and Cloud Risk",
+          "expectedQuestions": 6,
+          "sourceLabels": [
+            { "label": "Supplier risk management", "expectedQuestions": 4 },
+            { "label": "Third-party risk management", "expectedQuestions": 1 },
+            { "label": "Cloud risk and third-party management", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d1-cloud-governance",
+          "slug": "cloud-governance",
+          "title": "Cloud Governance",
+          "expectedQuestions": 3,
+          "sourceLabels": [
+            { "label": "Cloud governance and shared responsibility", "expectedQuestions": 3 }
+          ]
+        },
+        {
+          "id": "cissp-d1-security-awareness",
+          "slug": "security-awareness",
+          "title": "Security Awareness",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Security awareness and training", "expectedQuestions": 1 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cissp-d2",
+      "title": "Asset Security",
+      "sourcePrefixes": ["Domain 2: Asset Security"],
+      "expectedQuestions": 54,
+      "topics": [
+        {
+          "id": "cissp-d2-asset-management",
+          "slug": "asset-management",
+          "title": "Asset Management",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Asset Management", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d2-data-classification",
+          "slug": "data-classification",
+          "title": "Data Classification",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Data Classification", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d2-data-roles",
+          "slug": "data-roles",
+          "title": "Data Roles",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Data roles and responsibilities", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d2-general",
+          "slug": "general",
+          "title": "General",
+          "expectedQuestions": 51,
+          "sourceLabels": [
+            { "label": "Asset", "expectedQuestions": 51 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cissp-d3",
+      "title": "Security Architecture and Engineering",
+      "sourcePrefixes": ["Domain 3: Security Architecture and Engineering"],
+      "expectedQuestions": 25,
+      "topics": [
+        {
+          "id": "cissp-d3-physical-security",
+          "slug": "physical-security",
+          "title": "Physical Security",
+          "expectedQuestions": 8,
+          "sourceLabels": [
+            { "label": "Physical and environmental security", "expectedQuestions": 8 }
+          ]
+        },
+        {
+          "id": "cissp-d3-resilience",
+          "slug": "resilience",
+          "title": "Resilience",
+          "expectedQuestions": 2,
+          "sourceLabels": [
+            { "label": "Availability and Resilience", "expectedQuestions": 1 },
+            { "label": "Storage Resilience", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d3-digital-signatures",
+          "slug": "digital-signatures",
+          "title": "Digital Signatures",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Digital Signatures", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d3-general",
+          "slug": "general",
+          "title": "General",
+          "expectedQuestions": 14,
+          "sourceLabels": [
+            { "label": "Security", "expectedQuestions": 14 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cissp-d4",
+      "title": "Communication and Network Security",
+      "sourcePrefixes": ["Domain 4: Communication and Network Security"],
+      "expectedQuestions": 65,
+      "topics": [
+        {
+          "id": "cissp-d4-network-security",
+          "slug": "network-security",
+          "title": "Network Security",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Network security", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d4-cloud-segmentation",
+          "slug": "cloud-segmentation",
+          "title": "Cloud Segmentation",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Cloud network segmentation and logical isolation", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d4-general",
+          "slug": "general",
+          "title": "General",
+          "expectedQuestions": 63,
+          "sourceLabels": [
+            { "label": "Communication", "expectedQuestions": 62 },
+            { "label": "NAC", "expectedQuestions": 1 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cissp-d5",
+      "title": "Identity and Access Management",
+      "sourcePrefixes": [
+        "Domain 5: Identity and Access Management",
+        "Domain 5: IAM"
+      ],
+      "expectedQuestions": 35,
+      "topics": [
+        {
+          "id": "cissp-d5-access-control",
+          "slug": "access-control",
+          "title": "Access Control",
+          "expectedQuestions": 6,
+          "sourceLabels": [
+            { "label": "Access control", "expectedQuestions": 6 }
+          ]
+        },
+        {
+          "id": "cissp-d5-authentication-and-federation",
+          "slug": "authentication-and-federation",
+          "title": "Authentication and Federation",
+          "expectedQuestions": 5,
+          "sourceLabels": [
+            { "label": "Authentication", "expectedQuestions": 2 },
+            { "label": "Federated Identity", "expectedQuestions": 1 },
+            { "label": "Federated Identity Security", "expectedQuestions": 1 },
+            { "label": "Federated identity", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d5-identity-management",
+          "slug": "identity-management",
+          "title": "Identity Management",
+          "expectedQuestions": 2,
+          "sourceLabels": [
+            { "label": "Identity management", "expectedQuestions": 2 }
+          ]
+        },
+        {
+          "id": "cissp-d5-authorization-least-privilege",
+          "slug": "authorization-least-privilege",
+          "title": "Authorization and Least Privilege",
+          "expectedQuestions": 3,
+          "sourceLabels": [
+            { "label": "Least Privilege", "expectedQuestions": 1 },
+            { "label": "Segregation of Duties", "expectedQuestions": 1 },
+            { "label": "Attribute Based Access Control", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d5-general",
+          "slug": "general",
+          "title": "General",
+          "expectedQuestions": 19,
+          "sourceLabels": [
+            { "label": "Identity", "expectedQuestions": 19 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cissp-d6",
+      "title": "Security Assessment and Testing",
+      "sourcePrefixes": ["Domain 6: Security Assessment and Testing"],
+      "expectedQuestions": 32,
+      "topics": [
+        {
+          "id": "cissp-d6-security-testing",
+          "slug": "security-testing",
+          "title": "Security Testing",
+          "expectedQuestions": 27,
+          "sourceLabels": [
+            { "label": "Security testing", "expectedQuestions": 27 }
+          ]
+        },
+        {
+          "id": "cissp-d6-audit-and-assurance",
+          "slug": "audit-and-assurance",
+          "title": "Audit and Assurance",
+          "expectedQuestions": 5,
+          "sourceLabels": [
+            { "label": "Audit and assessment", "expectedQuestions": 3 },
+            { "label": "Audit and assurance reporting", "expectedQuestions": 2 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cissp-d7",
+      "title": "Security Operations",
+      "sourcePrefixes": ["Domain 7: Security Operations"],
+      "expectedQuestions": 20,
+      "topics": [
+        {
+          "id": "cissp-d7-business-continuity",
+          "slug": "business-continuity",
+          "title": "Business Continuity",
+          "expectedQuestions": 4,
+          "sourceLabels": [
+            { "label": "Business continuity and disaster recovery", "expectedQuestions": 2 },
+            { "label": "Business Continuity and Disaster Recovery", "expectedQuestions": 1 },
+            { "label": "BCP and DR Testing", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d7-incident-management",
+          "slug": "incident-management",
+          "title": "Incident Management",
+          "expectedQuestions": 3,
+          "sourceLabels": [
+            { "label": "Incident management", "expectedQuestions": 2 },
+            { "label": "Incident response", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d7-investigations-forensics",
+          "slug": "investigations-forensics",
+          "title": "Investigations and Forensics",
+          "expectedQuestions": 3,
+          "sourceLabels": [
+            { "label": "Investigations and email analysis", "expectedQuestions": 1 },
+            { "label": "Investigations and evidence handling", "expectedQuestions": 1 },
+            { "label": "Digital forensics", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d7-logging-monitoring",
+          "slug": "logging-monitoring",
+          "title": "Logging and Monitoring",
+          "expectedQuestions": 3,
+          "sourceLabels": [
+            { "label": "Logging and Monitoring", "expectedQuestions": 1 },
+            { "label": "Logging, monitoring and configuration management", "expectedQuestions": 1 },
+            { "label": "Monitoring and Attack Paths", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d7-vulnerability-management",
+          "slug": "vulnerability-management",
+          "title": "Vulnerability Management",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Vulnerability Management", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d7-general",
+          "slug": "general",
+          "title": "General",
+          "expectedQuestions": 6,
+          "sourceLabels": [
+            { "label": "Security", "expectedQuestions": 6 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cissp-d8",
+      "title": "Software Development Security",
+      "sourcePrefixes": ["Domain 8: Software Development Security"],
+      "expectedQuestions": 42,
+      "topics": [
+        {
+          "id": "cissp-d8-application-security",
+          "slug": "application-security",
+          "title": "Application Security",
+          "expectedQuestions": 10,
+          "sourceLabels": [
+            { "label": "Application security", "expectedQuestions": 10 }
+          ]
+        },
+        {
+          "id": "cissp-d8-software-development-security",
+          "slug": "software-development-security",
+          "title": "Software Development Security",
+          "expectedQuestions": 7,
+          "sourceLabels": [
+            { "label": "Software development security", "expectedQuestions": 7 }
+          ]
+        },
+        {
+          "id": "cissp-d8-secure-coding",
+          "slug": "secure-coding",
+          "title": "Secure Coding",
+          "expectedQuestions": 3,
+          "sourceLabels": [
+            { "label": "Secure coding and review", "expectedQuestions": 2 },
+            { "label": "Secure SDLC and code review", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d8-secure-sdlc",
+          "slug": "secure-sdlc",
+          "title": "Secure SDLC",
+          "expectedQuestions": 2,
+          "sourceLabels": [
+            { "label": "Secure SDLC", "expectedQuestions": 1 },
+            { "label": "Lifecycle", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d8-supply-chain",
+          "slug": "supply-chain",
+          "title": "Supply Chain",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Supply Chain Assurance", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d8-vulnerability-remediation",
+          "slug": "vulnerability-remediation",
+          "title": "Vulnerability Remediation",
+          "expectedQuestions": 1,
+          "sourceLabels": [
+            { "label": "Vulnerability Remediation", "expectedQuestions": 1 }
+          ]
+        },
+        {
+          "id": "cissp-d8-general",
+          "slug": "general",
+          "title": "General",
+          "expectedQuestions": 18,
+          "sourceLabels": [
+            { "label": "Software", "expectedQuestions": 18 }
+          ]
+        }
+      ]
+    }
+  ]
+}
