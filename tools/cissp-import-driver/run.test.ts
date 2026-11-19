@@ -462,6 +462,33 @@ test("a publish that commits and then answers 500 is observed, not re-sent", asy
   assert.equal(checkpoint.questions[0]!.pointerVersion, 1);
 });
 
+test("a stop from the observation branch keeps the in-flight intent on disk", async () => {
+  // The checkpoint says submitted with a submit in flight (the answer was lost);
+  // the server says draft, a transition the driver cannot explain. The stop
+  // must leave the intent where the next run can see it: clearing it before the
+  // throw deleted the one record that a mutation may have landed.
+  const { harness, stub } = buildHarness("ok", 1);
+  await runStages(harness, ["transform", "upload"]);
+
+  const serverQuestion = [...stub.questions.values()][0]!;
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  const record = checkpoint.questions[0]!;
+  record.state = "submitted";
+  record.inFlight = "submit";
+  saveCheckpoint(harness.checkpointPath, checkpoint, undefined, NOW);
+  serverQuestion.state = "draft";
+
+  await assert.rejects(
+    runDriver({ ...harness.options, stage: "publish", unitLimit: 1 }, harness.deps),
+    (error: unknown) => error instanceof DriverError && error.code === "WORKFLOW_CONFLICT",
+  );
+
+  const after = readCheckpoint(harness.stateDir)!;
+  assert.equal(after.questions[0]!.inFlight, "submit");
+  assert.equal(after.questions[0]!.state, "submitted");
+  assert.equal(after.lastError?.code, "WORKFLOW_CONFLICT");
+});
+
 test("a refused preview keeps its own code instead of collapsing into PREVIEW_REJECTED", async () => {
   // A lost session and a rate limit stop the run for different reasons than a
   // refused body: the operator re-authenticates or waits, and neither is fixed

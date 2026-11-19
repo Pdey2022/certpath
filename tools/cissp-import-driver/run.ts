@@ -855,7 +855,12 @@ async function convergeQuestion(context: Context, record: QuestionRecord): Promi
     let publication: Observation["publication"] = null;
     if (record.inFlight !== null) {
       const observation = await observeQuestion(context, record);
-      record.inFlight = null;
+      // The intent is cleared by the branch's own continuing writes, which pass
+      // `{ inFlight: null }` to align/set before they persist. Clearing it here
+      // would destroy the on-disk record of "a mutation was in flight" on
+      // exactly the throws below (a publication for another revision, an
+      // unexpected state, an observation behind the checkpoint) - the stop that
+      // most needs to say a call may have landed.
       workflowState = observation.workflowState;
       publication = observation.publication;
       if (publication !== null) {
