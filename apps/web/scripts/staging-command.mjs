@@ -117,6 +117,8 @@ async function main() {
     for (const [name, value] of Object.entries(verified.flags)) {
       console.log(`Verified ${name}=${JSON.stringify(value)}`);
     }
+    // The stamp the publish job wrote; the pilot CLI prints the same line.
+    console.log(`Verified DEPLOYED_COMMIT=${verified.stamp}`);
     if (verified.allowPilotFlags) {
       console.log(
         "Pilot flag override: --allow-pilot-flags (the flags above are not asserted false)",
