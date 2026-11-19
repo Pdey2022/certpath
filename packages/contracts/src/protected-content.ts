@@ -29,6 +29,38 @@ export const questionContentSchema = z
   })
   .strict();
 
+/**
+ * Certification roots are permanent: `certifications_no_update` and
+ * `certifications_no_delete` refuse every later change, so a value this schema
+ * lets through is a value the platform has to live with.
+ *
+ * The rules below mirror `createCertificationRoot`'s own check field by field
+ * rather than inventing nicer ones, and `apps/api/src/protected-content.ts`
+ * holds a compile-time assertion that the two input shapes cannot drift. Two
+ * consequences worth knowing:
+ *
+ * - `displayName` is bounded on its raw length and required to be non-blank
+ *   after trimming, which is exactly what the mutation checks. Trimming here
+ *   would accept a 200-character body the mutation rejects.
+ * - `slug` has no length bound because the mutation has none; the only
+ *   route-level bound is the 24 KiB JSON body cap. A real bound belongs in the
+ *   mutation and a `CHECK` constraint, not on one side of the wire alone.
+ */
+export const createCertificationRequestSchema = z
+  .object({
+    id,
+    slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    displayName: z
+      .string()
+      .max(160)
+      .refine((value) => value.trim().length > 0),
+  })
+  .strict();
+
+export type CreateCertificationRequest = z.infer<
+  typeof createCertificationRequestSchema
+>;
+
 export const createExamVersionRequestSchema = z
   .object({
     versionKey: key(80),

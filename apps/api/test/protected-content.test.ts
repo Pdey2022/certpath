@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { createCertificationRequestSchema } from "@certpath/contracts";
 import { api } from "../src/index.ts";
 import type { SecurityDatabase } from "../src/security/database.ts";
 import {
@@ -8,6 +9,7 @@ import {
   previewQuestionImport,
 } from "../src/security/question-imports.ts";
 import {
+  createCertificationRoot,
   revokeManagerCertification,
   revokeOwnApplicationSession,
 } from "../src/security/mutations.ts";
@@ -18,7 +20,7 @@ import {
   createTestSessionCredentials,
   grantTestRole,
 } from "./factories.ts";
-import { validQuestionContent } from "./content-fixtures.ts";
+import { countRows, validQuestionContent } from "./content-fixtures.ts";
 
 const database: SecurityDatabase = env.DB;
 const origin = "https://certpath.example.test";
@@ -2196,3 +2198,451 @@ describe("protected content HTTP boundary", () => {
     expect(await health.json()).toEqual({ status: "ok" });
   });
 });
+
+describe("certification root creation over the audited boundary", () => {
+  const certificationsPath = `${apiRoot}/certifications`;
+
+  function uniqueRoot() {
+    const suffix = crypto.randomUUID();
+    return {
+      id: `cissp-${suffix}`,
+      slug: `cissp-${suffix}`,
+      displayName: "Synthetic CISSP root",
+    };
+  }
+
+  async function certificationAuditCount(certificationId: string): Promise<number> {
+    const row = await database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE subject_type = 'certification' AND subject_id = ?`,
+      )
+      .bind(certificationId)
+      .first<{ count: number }>();
+    return row?.count ?? 0;
+  }
+
+  it("creates one certification root for a Global Admin and audits it", async () => {
+    const admin = await createActor();
+    const root = uniqueRoot();
+    const response = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify(root),
+    });
+    expect(response.status).toBe(201);
+    assertPrivate(response);
+    expect(await response.json()).toEqual({ id: root.id });
+
+    const row = await database
+      .prepare(
+        `SELECT slug, display_name, created_by_user_id, created_operation_id
+         FROM certifications WHERE id = ?`,
+      )
+      .bind(root.id)
+      .first<{
+        slug: string;
+        display_name: string;
+        created_by_user_id: string;
+        created_operation_id: string;
+      }>();
+    expect(row).not.toBeNull();
+    expect(row!.slug).toBe(root.slug);
+    expect(row!.display_name).toBe(root.displayName);
+    expect(row!.created_by_user_id).toBe(admin.userId);
+
+    const audit = await database
+      .prepare(
+        `SELECT operation_id, actor_user_id, action, subject_id, certification_id
+         FROM audit_events
+         WHERE subject_type = 'certification' AND subject_id = ?`,
+      )
+      .bind(root.id)
+      .all<{
+        operation_id: string;
+        actor_user_id: string;
+        action: string;
+        subject_id: string;
+        certification_id: string | null;
+      }>();
+    expect(audit.results).toHaveLength(1);
+    expect(audit.results[0]).toMatchObject({
+      operation_id: row!.created_operation_id,
+      actor_user_id: admin.userId,
+      action: "certification_created",
+      subject_id: root.id,
+    });
+    expect(audit.results[0]!.operation_id).toMatch(/^api:create-certification:/);
+  });
+
+  it("refuses a Manager even though Managers hold content.manage in their own scope", async () => {
+    // `authorizeGlobalAdmin` answers `insufficient-role` for an assigned Manager:
+    // creating a root is platform-wide (`content.manage` is certification-scoped
+    // and there is no certification yet to scope it to), so it is Global Admin
+    // only per ADR 0004 and docs/admin-capabilities.md.
+    const manager = await createActor({ role: "manager" });
+    const root = uniqueRoot();
+    const refused = await call(manager, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify(root),
+    });
+    expect(refused.status).toBe(403);
+    assertPrivate(refused);
+    expect(await refused.json()).toMatchObject({
+      error: { code: "forbidden" },
+    });
+    expect(await countRows(database, "certifications", "id", root.id)).toBe(0);
+    expect(await certificationAuditCount(root.id)).toBe(0);
+  });
+
+  it("refuses an unauthenticated caller before reading the body", async () => {
+    const admin = await createActor();
+    const root = uniqueRoot();
+    const anonymous = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify(root),
+      cookie: null,
+    });
+    expect(anonymous.status).toBe(401);
+    assertPrivate(anonymous);
+    expect(await anonymous.json()).toMatchObject({
+      error: { code: "unauthenticated" },
+    });
+
+    const malformed = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify(root),
+      cookie: "certpath_session=not-a-valid-token",
+    });
+    expect(malformed.status).toBe(401);
+    expect(await countRows(database, "certifications", "id", root.id)).toBe(0);
+  });
+
+  it("answers 409 for a duplicate id and a duplicate slug and writes nothing", async () => {
+    const admin = await createActor();
+    const root = uniqueRoot();
+    const created = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify(root),
+    });
+    expect(created.status).toBe(201);
+
+    const duplicateId = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify({
+        id: root.id,
+        slug: `${root.slug}-other`,
+        displayName: "Synthetic duplicate id",
+      }),
+    });
+    expect(duplicateId.status).toBe(409);
+    assertPrivate(duplicateId);
+    const duplicateIdText = await duplicateId.text();
+    expect(duplicateIdText).not.toMatch(/SQLITE|constraint failed|D1_ERROR/i);
+    expect(JSON.parse(duplicateIdText)).toMatchObject({
+      error: { code: "conflict" },
+    });
+
+    const otherId = `cissp-${crypto.randomUUID()}`;
+    const duplicateSlug = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify({
+        id: otherId,
+        slug: root.slug,
+        displayName: "Synthetic duplicate slug",
+      }),
+    });
+    expect(duplicateSlug.status).toBe(409);
+    expect(await duplicateSlug.json()).toMatchObject({
+      error: { code: "conflict" },
+    });
+
+    expect(await countRows(database, "certifications", "id", root.id)).toBe(1);
+    expect(await countRows(database, "certifications", "id", otherId)).toBe(0);
+    expect(await countRows(database, "certifications", "slug", root.slug)).toBe(1);
+    expect(await certificationAuditCount(root.id)).toBe(1);
+    expect(await certificationAuditCount(otherId)).toBe(0);
+  });
+
+  it("rejects an invalid body with the house error envelope and writes nothing", async () => {
+    const admin = await createActor();
+    const root = uniqueRoot();
+    const missingName = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify({ id: root.id, slug: root.slug }),
+    });
+    expect(missingName.status).toBe(400);
+    assertPrivate(missingName);
+    const missingBody = (await missingName.json()) as {
+      error: {
+        code: string;
+        requestId: string;
+        issues?: Array<{ path: string; code: string }>;
+      };
+    };
+    expect(missingBody.error.code).toBe("validation_error");
+    expect(missingBody.error.requestId).toBeTruthy();
+    expect(missingBody.error.issues?.map((issue) => issue.path)).toContain(
+      "displayName",
+    );
+    expect(JSON.stringify(missingBody)).not.toContain(root.slug);
+
+    const overLength = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify({ ...root, displayName: "d".repeat(161) }),
+    });
+    expect(overLength.status).toBe(400);
+    expect(
+      ((await overLength.json()) as { error: { code: string } }).error.code,
+    ).toBe("validation_error");
+
+    const blankName = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify({ ...root, displayName: "   " }),
+    });
+    expect(blankName.status).toBe(400);
+
+    const extraField = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify({ ...root, createdByUserId: admin.userId }),
+    });
+    expect(extraField.status).toBe(400);
+
+    expect(await countRows(database, "certifications", "id", root.id)).toBe(0);
+    expect(await certificationAuditCount(root.id)).toBe(0);
+  });
+
+  it("requires the exact Origin and a session-bound CSRF token", async () => {
+    const admin = await createActor();
+    const csrf = await getCsrf(admin);
+    const root = uniqueRoot();
+    const body = JSON.stringify(root);
+    const raw = (headers: Record<string, string>) =>
+      api.fetch(
+        new Request(requestUrl(certificationsPath), {
+          method: "POST",
+          headers: {
+            Cookie: `certpath_session=${admin.rawToken}`,
+            "Content-Type": "application/json",
+            ...headers,
+          },
+          body,
+        }),
+        admin.bindings,
+      );
+
+    const noToken = await raw({ Origin: origin });
+    expect(noToken.status).toBe(400);
+    expect(await noToken.json()).toMatchObject({ error: { code: "invalid_csrf" } });
+
+    const badToken = await raw({ Origin: origin, "X-CSRF-Token": "v1.invalid" });
+    expect(badToken.status).toBe(400);
+    expect(await badToken.json()).toMatchObject({ error: { code: "invalid_csrf" } });
+
+    const wrongOrigin = await raw({
+      Origin: "https://attacker.example",
+      "X-CSRF-Token": csrf,
+    });
+    expect(wrongOrigin.status).toBe(400);
+    expect(await wrongOrigin.json()).toMatchObject({
+      error: { code: "invalid_origin" },
+    });
+
+    const forgedHost = await api.fetch(
+      new Request(`https://attacker.example${certificationsPath}`, {
+        method: "POST",
+        headers: {
+          Cookie: `certpath_session=${admin.rawToken}`,
+          Origin: origin,
+          "X-CSRF-Token": csrf,
+          "Content-Type": "application/json",
+        },
+        body,
+      }),
+      admin.bindings,
+    );
+    expect(forgedHost.status).toBe(400);
+    expect(await forgedHost.json()).toMatchObject({
+      error: { code: "invalid_origin" },
+    });
+
+    const missingOrigin = await call(admin, certificationsPath, {
+      method: "POST",
+      body,
+      csrf: false,
+    });
+    expect(missingOrigin.status).toBe(400);
+    expect(await missingOrigin.json()).toMatchObject({
+      error: { code: "invalid_origin" },
+    });
+
+    expect(await countRows(database, "certifications", "id", root.id)).toBe(0);
+    expect(await certificationAuditCount(root.id)).toBe(0);
+  });
+
+  it("lists the created certification in the scoped GET /certifications read", async () => {
+    const admin = await createActor();
+    const root = uniqueRoot();
+    const created = await call(admin, certificationsPath, {
+      method: "POST",
+      body: JSON.stringify(root),
+    });
+    expect(created.status).toBe(201);
+
+    const seen: Array<{ id: string; slug: string; displayName: string }> = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const query: string = cursor
+        ? `?limit=50&cursor=${encodeURIComponent(cursor)}`
+        : "?limit=50";
+      const listed = await call(admin, `${certificationsPath}${query}`);
+      expect(listed.status).toBe(200);
+      const payload = (await listed.json()) as {
+        items: Array<{ id: string; slug: string; displayName: string }>;
+        nextCursor: string | null;
+      };
+      seen.push(...payload.items);
+      cursor = payload.nextCursor;
+      if (!cursor) break;
+    }
+
+    expect(seen).toContainEqual(root);
+  });
+
+  it("keeps the request schema in exact step with createCertificationRoot", async () => {
+    const admin = await createActor();
+    const token = crypto.randomUUID();
+    const cases: Array<{
+      label: string;
+      body: Record<string, unknown>;
+      accepted: boolean;
+    }> = [
+      {
+        label: "a canonical root",
+        body: { id: `ok-${token}`, slug: `ok-${token}`, displayName: "CISSP" },
+        accepted: true,
+      },
+      {
+        label: "a 160-character display name",
+        body: {
+          id: `max-${token}`,
+          slug: `max-${token}`,
+          displayName: "d".repeat(160),
+        },
+        accepted: true,
+      },
+      {
+        label: "a padded but short display name",
+        body: {
+          id: `pad-${token}`,
+          slug: `pad-${token}`,
+          displayName: "  CISSP  ",
+        },
+        accepted: true,
+      },
+      {
+        label: "a blank display name",
+        body: { id: `blank-${token}`, slug: `blank-${token}`, displayName: "   " },
+        accepted: false,
+      },
+      {
+        label: "a 161-character display name",
+        body: {
+          id: `long-${token}`,
+          slug: `long-${token}`,
+          displayName: "d".repeat(161),
+        },
+        accepted: false,
+      },
+      {
+        label: "a 161-character raw length that trims to something shorter",
+        body: {
+          id: `trim-${token}`,
+          slug: `trim-${token}`,
+          displayName: ` ${"d".repeat(160)} `,
+        },
+        accepted: false,
+      },
+      {
+        label: "an empty id",
+        body: { id: "", slug: `empty-${token}`, displayName: "CISSP" },
+        accepted: false,
+      },
+      {
+        label: "a 129-character id",
+        body: {
+          id: "x".repeat(129),
+          slug: `wide-${token}`,
+          displayName: "CISSP",
+        },
+        accepted: false,
+      },
+      {
+        label: "an id with a space",
+        body: { id: "cissp root", slug: `space-${token}`, displayName: "CISSP" },
+        accepted: false,
+      },
+      {
+        label: "an uppercase slug",
+        body: { id: `upper-${token}`, slug: "CISSP", displayName: "CISSP" },
+        accepted: false,
+      },
+      {
+        label: "a leading-hyphen slug",
+        body: { id: `lead-${token}`, slug: "-cissp", displayName: "CISSP" },
+        accepted: false,
+      },
+      {
+        label: "a doubled-hyphen slug",
+        body: {
+          id: `double-${token}`,
+          slug: "cissp--root",
+          displayName: "CISSP",
+        },
+        accepted: false,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const parsed = createCertificationRequestSchema.safeParse(testCase.body);
+      expect(parsed.success, `schema: ${testCase.label}`).toBe(testCase.accepted);
+      if (!testCase.accepted) {
+        // The mutation's own verdict for the same values, before the wire layer.
+        expect(
+          await createCertificationRoot(
+            database,
+            admin.tokenDigest,
+            testCase.body as {
+              id: string;
+              slug: string;
+              displayName: string;
+            },
+            {
+              operationId: `parity:${crypto.randomUUID()}`,
+              reason: "Synthetic parity probe",
+              now: Date.now(),
+            },
+            { maxAgeMs: 120_000, allowedMethods: ["totp"] },
+          ),
+          `mutation: ${testCase.label}`,
+        ).toEqual({ applied: false, reason: "invalid-input" });
+      }
+      const response = await call(admin, certificationsPath, {
+        method: "POST",
+        body: JSON.stringify(testCase.body),
+      });
+      expect(response.status, `route: ${testCase.label}`).toBe(
+        testCase.accepted ? 201 : 400,
+      );
+      if (testCase.accepted) {
+        expect(
+          await countRows(database, "certifications", "id", testCase.body.id as string),
+        ).toBe(1);
+      } else {
+        expect(
+          await countRows(database, "certifications", "id", testCase.body.id as string),
+        ).toBe(0);
+      }
+    }
+  });
+});
+

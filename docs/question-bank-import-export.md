@@ -122,6 +122,19 @@ changes those cell values. There is no import correction/overwrite path.
 
 ## Runtime and future work
 
+A certification root can now be created over the audited boundary:
+`POST /api/admin/content/certifications` (`docs/protected-content-api.md`) is
+Global Admin only, requires the exact `Origin` and a session-bound CSRF token,
+writes one `certifications` row through `createCertificationRoot`, and answers
+`409` instead of duplicating an existing id or slug. The row is audited by the
+`certifications_audit_insert` trigger, and it is immutable afterwards
+(`certifications_no_update`, `certifications_no_delete`), so a wrong root cannot
+be amended - only a second, correctly named root can be created. With the root in
+place, creating the `exam_versions`, `domains` and `topics` beneath it is the
+next step of the content plan; those routes already exist under the authorized
+certification scope. This slice creates no exam version, domain, topic,
+question, seed or import row.
+
 The CSV parser is the pinned `csv-parse` 7.0.3 pure-JavaScript synchronous
 parser. It handles quoted commas, escaped quotes and embedded newlines without
 hand-written delimiter splitting and is exercised in the actual local
