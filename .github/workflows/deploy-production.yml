@@ -43,9 +43,12 @@ jobs:
           # Full history: the append-only check below needs the merge base with
           # main, which a depth-1 clone cannot compute.
           fetch-depth: 0
-      # The same rule ci.yml enforces, carried into the one path that can reach
-      # production. A dispatch from a branch may add migrations; it may not
-      # modify, delete or rename one that has landed.
+      # The same rule ci.yml enforces, for the dispatch case. On the only ref
+      # that can deploy (main) the merge base equals HEAD, so this diff is empty
+      # by construction; main is protected by ci.yml's push event and by branch
+      # protection. What this step actually covers is a non-main dispatch, which
+      # runs verify and then skips the deploy: such a branch may add migrations
+      # but may not modify, delete or rename one that has landed.
       - name: Migration history is append-only
         run: |
           set -euo pipefail
