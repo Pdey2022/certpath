@@ -65,6 +65,7 @@ export type DriverErrorCode =
   | "CERTIFICATION_NOT_FOUND"
   | "KEY_COLLISION"
   | "TAXONOMY_PROSE_MISMATCH"
+  | "PROSE_TAXONOMY_DIGEST_MISSING"
   | "PREVIEW_REJECTED"
   | "EXISTING_KEYS"
   | "CONFIRM_FAILED"
@@ -97,18 +98,6 @@ export class DriverError extends Error {
     this.requestId = extras.requestId;
     this.info = extras.info;
   }
-}
-
-/** True for the failures that must stop a run outright and never be retried. */
-export function isTerminalStatus(status: number): boolean {
-  return (
-    status === 400 ||
-    status === 401 ||
-    status === 403 ||
-    status === 404 ||
-    status === 413 ||
-    status === 429
-  );
 }
 
 export function describeError(error: unknown): string {

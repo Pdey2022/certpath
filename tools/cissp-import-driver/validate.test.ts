@@ -48,12 +48,13 @@ function rewriteProse(path: string, mutate: (value: Record<string, unknown>) => 
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-test("the owner-approved prose shape (bare string meanings, no digest, a note) is accepted", () => {
+test("the owner-approved prose shape (bare string meanings, the taxonomy digest, a note) is accepted", () => {
   const root = makeTempDir();
   const taxonomy = taxonomyFixture();
   writeFileSync(join(root, "taxonomy.json"), taxonomy.text, "utf8");
   const prose = {
     formatVersion: "certpath-cissp-taxonomy-prose-v1",
+    taxonomySha256: sha256(taxonomy.text),
     note: "Owner-supplied prose for createExamVersion, createDomain and createTopic.",
     certification: { slug: "cissp", displayName: "CISSP" },
     examVersion: {
@@ -76,6 +77,39 @@ test("the owner-approved prose shape (bare string meanings, no digest, a note) i
   assert.equal(inputs.prose.certification.id, null);
   assert.equal(inputs.prose.domains.get("cissp-d1"), "Owner meaning for cissp-d1");
   assert.equal(inputs.prose.topics.size, 36);
+});
+
+test("prose without the taxonomy digest is refused, not treated as approved", () => {
+  // The digest is the only thing that binds the 46 owner strings to the
+  // taxonomy file they were approved against. A file without one is prose that
+  // was never approved against anything, so it is a refusal with its own code.
+  const fixture = freshFixture();
+  rewriteProse(fixture.prosePath, (value) => {
+    delete value["taxonomySha256"];
+  });
+  expectCode(
+    () =>
+      validateInputs({
+        batchesDir: fixture.batchesDir,
+        taxonomyPath: fixture.taxonomyPath,
+        prosePath: fixture.prosePath,
+      }),
+    "PROSE_TAXONOMY_DIGEST_MISSING",
+  );
+
+  // A digest that is present but not a digest is the same refusal, not a pass.
+  rewriteProse(fixture.prosePath, (value) => {
+    value["taxonomySha256"] = 42;
+  });
+  expectCode(
+    () =>
+      validateInputs({
+        batchesDir: fixture.batchesDir,
+        taxonomyPath: fixture.taxonomyPath,
+        prosePath: fixture.prosePath,
+      }),
+    "PROSE_TAXONOMY_DIGEST_MISSING",
+  );
 });
 
 test("a well-formed fixture validates and reports its counts", () => {

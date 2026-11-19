@@ -310,10 +310,20 @@ export function parseProse(raw: unknown, taxonomy: TaxonomyDoc, taxonomySha256: 
   if ("note" in raw && (typeof raw["note"] !== "string" || raw["note"].length > 2000)) {
     throw new DriverError("PROSE_IDENTITY_INVALID", "note must be a short string");
   }
-  // The digest is the design's anti-drift binding. The owner's approved file
-  // carries no digest; when it is present it is enforced, and when it is absent
-  // the key-set equality below still binds the prose to this taxonomy file.
-  if (raw["taxonomySha256"] !== undefined && raw["taxonomySha256"] !== taxonomySha256) {
+  // The digest is the design's anti-drift binding, and it is required: a prose
+  // file without one is prose that was never approved against any taxonomy, so
+  // there is nothing to compare and nothing to trust. It is listed as an
+  // optional key only so the key-set check still names an unknown key as
+  // unknown; presence is asserted here with its own code, because "you forgot
+  // the binding" and "no such field" are different failures.
+  const digest = raw["taxonomySha256"];
+  if (typeof digest !== "string" || digest.length === 0) {
+    throw new DriverError(
+      "PROSE_TAXONOMY_DIGEST_MISSING",
+      "the prose file must carry taxonomySha256, the digest of the taxonomy file it was approved against",
+    );
+  }
+  if (digest !== taxonomySha256) {
     throw new DriverError(
       "PROSE_TAXONOMY_DIGEST_MISMATCH",
       "the prose file was not approved for this taxonomy file",

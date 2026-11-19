@@ -110,10 +110,12 @@ The driver validates every input first, so a broken file costs zero requests:
   `taxonomy-report.json`'s `writtenQuestions`; a mismatch is fatal
   (`TAXONOMY_REPORT_MISMATCH`).
 - **Prose binding** — the owner's prose file carries `taxonomySha256`, the
-  SHA-256 of the taxonomy file it was approved against. Stage 0 compares it and
-  refuses with `PROSE_TAXONOMY_DIGEST_MISMATCH` when it differs, so prose
-  approved for one taxonomy cannot be applied to another. The digest is optional
-  in the schema but **present in the approved file**; the key-set equality
+  SHA-256 of the taxonomy file it was approved against. The key is **required**:
+  a prose file without it is refused with `PROSE_TAXONOMY_DIGEST_MISSING` before
+  any request, because prose that names no taxonomy was approved against
+  nothing. When the key is present and differs from the taxonomy actually
+  passed, Stage 0 refuses with `PROSE_TAXONOMY_DIGEST_MISMATCH`, so prose
+  approved for one taxonomy cannot be applied to another. The key-set equality
   between prose and taxonomy is checked either way.
 
 Stage 0 writes nothing and calls nothing. `--dry-run` stops here and prints the
