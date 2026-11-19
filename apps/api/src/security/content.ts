@@ -92,6 +92,22 @@ export interface CreateQuestionInput {
   source?: CopySource;
 }
 
+/**
+ * The question-content caps this module enforces, exported so the CISSP import
+ * driver's copy (`tools/cissp-import-driver/contract.ts` `LIMITS`) can be
+ * asserted equal in `contract.test.ts`. A cap that moved here without moving
+ * there used to surface mid-run, after the first confirm; now it fails a test.
+ */
+export const QUESTION_CONTENT_LIMITS = {
+  stem: { minimum: 5, maximum: 4000 },
+  optionText: { minimum: 1, maximum: 1000 },
+  explanation: { minimum: 1, maximum: 3000 },
+  sourceReference: { minimum: 1, maximum: 1000 },
+  licenseReference: { minimum: 1, maximum: 200 },
+  questionKey: { minimum: 1, maximum: 120 },
+  optionKey: { minimum: 1, maximum: 32 },
+} as const;
+
 function isId(value: string): boolean {
   return /^[a-zA-Z0-9:_-]{1,128}$/.test(value);
 }
@@ -132,10 +148,22 @@ export function normalizeQuestionContent(
   if (!isRecord(value)) return null;
   const optionsInput = value["options"];
   if (
-    !isBoundedText(value["stem"], 5, 4000) ||
+    !isBoundedText(
+      value["stem"],
+      QUESTION_CONTENT_LIMITS.stem.minimum,
+      QUESTION_CONTENT_LIMITS.stem.maximum,
+    ) ||
     !isDifficulty(value["difficulty"]) ||
-    !isBoundedText(value["sourceReference"], 1, 1000) ||
-    !isBoundedText(value["licenseReference"], 1, 200) ||
+    !isBoundedText(
+      value["sourceReference"],
+      QUESTION_CONTENT_LIMITS.sourceReference.minimum,
+      QUESTION_CONTENT_LIMITS.sourceReference.maximum,
+    ) ||
+    !isBoundedText(
+      value["licenseReference"],
+      QUESTION_CONTENT_LIMITS.licenseReference.minimum,
+      QUESTION_CONTENT_LIMITS.licenseReference.maximum,
+    ) ||
     !Array.isArray(optionsInput) ||
     optionsInput.length < 2 ||
     optionsInput.length > 8
@@ -154,9 +182,17 @@ export function normalizeQuestionContent(
     const correct = option["correct"];
     if (
       typeof key !== "string" ||
-      !isKey(key, 32) ||
-      !isBoundedText(text, 1, 1000) ||
-      !isBoundedText(explanation, 1, 3000) ||
+      !isKey(key, QUESTION_CONTENT_LIMITS.optionKey.maximum) ||
+      !isBoundedText(
+        text,
+        QUESTION_CONTENT_LIMITS.optionText.minimum,
+        QUESTION_CONTENT_LIMITS.optionText.maximum,
+      ) ||
+      !isBoundedText(
+        explanation,
+        QUESTION_CONTENT_LIMITS.explanation.minimum,
+        QUESTION_CONTENT_LIMITS.explanation.maximum,
+      ) ||
       typeof correct !== "boolean" ||
       keys.has(key)
     ) {
@@ -806,7 +842,7 @@ export async function createDraftQuestion(
     !isId(input.examVersionId) ||
     !isId(input.domainId) ||
     !isId(input.topicId) ||
-    !isKey(input.questionKey, 120) ||
+    !isKey(input.questionKey, QUESTION_CONTENT_LIMITS.questionKey.maximum) ||
     metadata.operationId.length > 100 ||
     !normalizeQuestionContent(input.content)
   ) {
