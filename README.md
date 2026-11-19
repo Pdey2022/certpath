@@ -170,5 +170,7 @@ manifest fields, the retention rule, and what CI can and cannot prove.
   later milestone features.
 
 Local development uses Wrangler's local D1 emulator. Do not put credentials,
-customer data, or paid question banks in this repository. There is no deploy
-command in the workspace scripts.
+customer data, or paid question banks in this repository. The public site and
+the staging app publish on every merge to `main`; production is a manual,
+reviewed dispatch. See [deployments](docs/deployments.md) for the triggers, the
+schema gate, the required GitHub secrets and rollback.

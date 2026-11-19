@@ -147,7 +147,10 @@ done (the staging database holds 22 applied migrations, last
 remains:
 
 1. deploy the staging Worker (an owner-approved deployment; the cron ships with
-   the deployment and stays a no-op until step 3);
+   the deployment and stays a no-op until step 3). Since continuous deployment
+   landed, a merge to `main` publishes it automatically — but only while no
+   migration is pending, and `0023` is pending until it is applied by hand
+   ([deployments](deployments.md));
 2. measure the cron's CPU cost for a 250-row prune against Free's 10 ms limit
    (#147) — the prune has never run on a deployed Worker, so the batch's cost
    against the cap is unproven;
