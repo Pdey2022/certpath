@@ -1,10 +1,20 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CliError } from "./lib/d1-targets.mjs";
+import {
+  assertSiteDeployConfig,
+  readSiteGeneratedConfig,
+} from "./lib/site-deploy.mjs";
 
 const action = process.argv[2];
 const env = { ...process.env, VITE_CERTPATH_PUBLIC_RELEASE: "true" };
+
+// The artefact Wrangler is pointed at, resolved the same way Wrangler resolves
+// `-c build/server/wrangler.json`: relative to the working directory.
+const GENERATED_CONFIG = path.resolve("build", "server", "wrangler.json");
 
 function find(...relativePaths) {
   for (const path of relativePaths) {
@@ -62,6 +72,26 @@ if (action === "build") {
 }
 
 if (action === "deploy") {
+  // Every build target writes this one file, and this is the deploy that runs
+  // on every merge. Assert the artefact before spawning Wrangler.
+  let verified;
+  try {
+    verified = assertSiteDeployConfig(
+      readSiteGeneratedConfig(GENERATED_CONFIG),
+    );
+  } catch (error) {
+    if (error instanceof CliError) {
+      console.error(`error ${error.code}: ${error.message}`);
+      process.exit(error.exitCode);
+    }
+    throw error;
+  }
+  console.log(`Verified site deploy target: worker ${verified.worker}`);
+  console.log(`Verified DEPLOYED_COMMIT=${verified.stamp}`);
+  console.log(
+    "Verified no d1_databases binding (the public site is D1-free)",
+  );
+
   const result = spawnSync(
     process.execPath,
     [wranglerBin(), "deploy", "-c", "build/server/wrangler.json"],
