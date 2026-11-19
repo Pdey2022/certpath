@@ -24,6 +24,11 @@ this branch publish nothing.
   Two merges queue instead of deploying at once, an in-flight deploy is never
   cancelled by a later one, and a manual site dispatch cannot race the merge
   that is publishing `certpath-site`.
+- A *pending* run in a shared group is superseded by a newer one. An in-progress
+  deploy is never cancelled, but a queued one can be: a production dispatch that
+  is waiting behind a merge may never start, because the newer merge takes the
+  slot. Re-dispatch and read the run outcome rather than assuming a queued
+  dispatch will execute.
 - The production deploy job runs only from `refs/heads/main`. A dispatch from
   another ref runs `verify` and then skips the deploy job — that is a guard, not
   a supported way to ship. Allowing a non-`main` production deploy is an open
