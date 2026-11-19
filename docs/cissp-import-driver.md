@@ -109,6 +109,12 @@ The driver validates every input first, so a broken file costs zero requests:
 - **Cross-checks** — rows per taxonomy topic versus
   `taxonomy-report.json`'s `writtenQuestions`; a mismatch is fatal
   (`TAXONOMY_REPORT_MISMATCH`).
+- **Prose binding** — the owner's prose file carries `taxonomySha256`, the
+  SHA-256 of the taxonomy file it was approved against. Stage 0 compares it and
+  refuses with `PROSE_TAXONOMY_DIGEST_MISMATCH` when it differs, so prose
+  approved for one taxonomy cannot be applied to another. The digest is optional
+  in the schema but **present in the approved file**; the key-set equality
+  between prose and taxonomy is checked either way.
 
 Stage 0 writes nothing and calls nothing. `--dry-run` stops here and prints the
 counts, which is the command the owner uses to review the inputs.
@@ -468,6 +474,14 @@ immediately with `RATE_LIMITED`; 5xx is never masked by a retry storm.
 checkpoint records `target.actorUserId`; if a later stage authenticates as a
 different user, the driver stops with `ACTOR_CHANGED` rather than producing
 previews that can never be confirmed.
+
+**Observed in the canary run: a fast resume is refused.** A second authenticated
+run started inside the same 30-second TOTP step as the first is rejected with
+`400` by `last_used_step` replay protection, even with a correct code. This is
+the mechanism working, not a defect. An operator resuming immediately should
+wait for the next time step (~35 s) rather than reading the failure as an
+authentication problem. Nothing needs to change in code: a whole run is one
+sign-in, and the driver does not retry.
 
 **What is logged.** Stage, unit number, question key, HTTP status, server
 `requestId`, and error codes. **Never**: credentials, cookie or CSRF values,
