@@ -23,7 +23,10 @@ synthetic prototype remains separate.
   certification assignment, MFA assurance and exact nested resource scope.
   The existing services recheck authorization in their reads and guarded
   writes. An unassigned/missing certification or nested resource is reported
-  as not found to avoid confirming another scope.
+  as not found to avoid confirming another scope. `POST /certifications` is the
+  one content route with no certification to scope to yet, so it is Global
+  Admin only through the same session/role/MFA check and the guarded insert
+  rechecks it again.
 - Each request body is read as a byte stream with an enforced byte cap; the
   `Content-Length` header is only an early rejection hint. JSON endpoints
   accept `application/json` with optional UTF-8 charset; imports accept
@@ -62,6 +65,7 @@ define scope.
 |---|---|---|
 | `GET /csrf` | Authenticated session cookie; no body | `200 {"csrfToken":"v1.<signature>"}` |
 | `GET /certifications?cursor=...&limit=1..50` | No body; lists all certifications for Global Admin or assigned certifications for Manager only. | `200 {"items":[{"id":"...","slug":"...","displayName":"..."}],"nextCursor":null}` |
+| `POST /certifications` | Strict JSON: `id` (1–128 key characters), `slug` (lowercase hyphen-separated), `displayName` (1–160 characters, not blank). **Global Admin only**: a certification root is a platform-wide act, not content inside an assigned certification (ADR 0004). Server generates the operation ID and time. Roots are immutable once created (`certifications_no_update`, `certifications_no_delete`). | `201 {"id":"..."}`; `409` when the `id` or `slug` already exists. |
 | `GET /certifications/:certificationId/exam-versions?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with scoped version items `{id,versionKey,title}` and `nextCursor`. |
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/domains?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with scoped domain items `{id,domainKey,title,order}` and `nextCursor`. |
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/domains/:domainId/topics?cursor=...&limit=1..50` | No body; strict query allowlist. | `200` with scoped topic items `{id,topicKey,title,order}` and `nextCursor`. |
@@ -83,8 +87,9 @@ define scope.
 | `GET /certifications/:certificationId/exam-versions/:examVersionId/export?cursor=...&limit=1..100` | No body; strict query allowlist. | `200 text/csv` with the export CSV and `X-Export-Next-Cursor` when another page exists. |
 
 General unscoped collection/search endpoints, cross-certification copy,
-certification/account lifecycle management, login/logout, role changes,
-bootstrap, test-session creation and all learner routes are out of scope. The question search is
+certification/account lifecycle management beyond creating the immutable root,
+login/logout, role changes, bootstrap, test-session creation and all learner
+routes are out of scope. The question search is
 restricted to the selected authorized taxonomy and bounded to 50 results per
 page. Every list query includes current session, MFA and certification-role/
 assignment predicates in the same primary D1 query; mutations repeat their
@@ -102,7 +107,7 @@ identity.
 | 401 | `unauthenticated` | Missing, malformed, expired, revoked or disabled-account session. |
 | 403 | `forbidden` | Authenticated non-staff or staff MFA assurance is missing, unsupported or stale. |
 | 404 | `not_found` | Resource is absent or not visible in the authorized certification scope. |
-| 409 | `conflict` | Stale lock/pointer, duplicate exam-version/domain/topic/question key, invalid workflow transition, expired preview or import replay conflict. Expected key collisions use targeted SQLite conflict clauses in the same guarded insert; they are not classified by parsing arbitrary database errors. Existing confirmed imports return their prior successful outcome. |
+| 409 | `conflict` | Stale lock/pointer, duplicate certification `id`/`slug`, duplicate exam-version/domain/topic/question key, invalid workflow transition, expired preview or import replay conflict. Expected key collisions use targeted SQLite conflict clauses in the same guarded insert; they are not classified by parsing arbitrary database errors. Existing confirmed imports return their prior successful outcome. |
 | 503 | `service_unavailable` | Required security configuration is absent/invalid or D1/runtime processing failed. The response is sanitized. |
 
 Validation responses may include stable field-level schema issue paths and
@@ -122,11 +127,11 @@ wildcard or comma-separated list.
 
 JSON limits are route-specific and enforced while streaming, before JSON parsing:
 
-- Exam-version, domain, topic, review, publication, retirement, and other
-  non-question JSON mutations: 24 KiB. The largest of these schemas is a
-  3,000-code-unit review note; worst-case JSON escaping uses at most six bytes
-  per code unit (18,000 bytes), leaving room for the rest of the request and
-  JSON structure.
+- Certification creation, exam-version, domain, topic, review, publication,
+  retirement, and other non-question JSON mutations: 24 KiB. The largest of
+  these schemas is a 3,000-code-unit review note; worst-case JSON escaping uses
+  at most six bytes per code unit (18,000 bytes), leaving room for the rest of
+  the request and JSON structure.
 - Question draft creation and correction: 256 KiB. The schema allows at most
   37,576 UTF-16 code units across question key, stem, source/licence
   references, and eight options' keys, text and explanations. Escaping every

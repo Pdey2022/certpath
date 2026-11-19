@@ -5,6 +5,7 @@ import {
   createdRevisionResponseSchema,
   certificationListResponseSchema,
   csrfResponseSchema,
+  createCertificationRequestSchema,
   createDomainRequestSchema,
   createExamVersionRequestSchema,
   createQuestionRequestSchema,
@@ -31,6 +32,7 @@ import {
   retireQuestionRequestSchema,
   topicListResponseSchema,
 } from "@certpath/contracts";
+import type { CreateCertificationRequest } from "@certpath/contracts";
 import type { SecurityDatabase } from "./security/database.ts";
 import {
   readStaffSecurityConfiguration,
@@ -50,6 +52,7 @@ import {
   submitQuestionForReview,
 } from "./security/content.ts";
 import type { ContentFailure, ContentResult } from "./security/content.ts";
+import { createCertificationRoot } from "./security/mutations.ts";
 import {
   confirmQuestionImport,
   exportPublishedQuestions,
@@ -68,6 +71,7 @@ import {
 } from "./security/content-queries.ts";
 import {
   authorizeCertification,
+  authorizeGlobalAdmin,
   authorizeStaffSession,
   findActiveApplicationSession,
 } from "./security/repository.ts";
@@ -313,6 +317,53 @@ async function requireMutation(
   return requireCertification(context, certificationId);
 }
 
+/**
+ * Platform-wide mutation scope: exact Origin, session-bound CSRF, then the same
+ * Global Admin session/role/MFA check every platform-wide staff write uses
+ * (`mutations.ts#authorizeMutation`). It exists because the certification-scoped
+ * `requireMutation` above needs a `:certificationId` to authorize against, and a
+ * certification root is created before any such scope exists.
+ *
+ * `createCertificationRoot` re-checks this authorization and its guarded INSERT
+ * adds `globalAdminGuard`, so a role or MFA change between the two checks still
+ * takes effect inside the write.
+ */
+async function requireGlobalAdminMutation(
+  context: ProtectedContext,
+): Promise<Response | null> {
+  const csrfFailure = await mutationProtection(context);
+  if (csrfFailure) return csrfFailure;
+  const principal = context.get("principal");
+  const authorization = await authorizeGlobalAdmin(
+    context.env.DB,
+    principal.tokenDigest,
+    Date.now(),
+    principal.configuration.policy,
+  );
+  if (!authorization.allowed) return contentError(context, authorization.reason);
+  return null;
+}
+
+/**
+ * Compile-time contract parity: `createCertificationRequestSchema` and the input
+ * of `createCertificationRoot` are one shape. Adding a field on either side
+ * without the other fails `npm run typecheck` instead of drifting silently at
+ * runtime. `SameShape` is the contravariant-assignability identity check, so it
+ * also catches a widened or narrowed field type, not just missing keys.
+ */
+type SameShape<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends
+  <Value>() => Value extends Right ? 1 : 2
+    ? true
+    : false;
+type Expect<Condition extends true> = Condition;
+type _CertificationRequestMatchesMutationInput = Expect<
+  SameShape<
+    CreateCertificationRequest,
+    Parameters<typeof createCertificationRoot>[2]
+  >
+>;
+
 async function exactRevisionExists(
   context: ProtectedContext,
   input: {
@@ -503,6 +554,22 @@ protectedApi.get("/certifications", async (context) => {
     },
   );
   return context.json(certificationListResponseSchema.parse(result));
+});
+
+protectedApi.post("/certifications", async (context) => {
+  const denied = await requireGlobalAdminMutation(context);
+  if (denied) return denied;
+  const parsed = await readJsonBody(context, createCertificationRequestSchema);
+  if ("response" in parsed) return parsed.response;
+  const result = await createCertificationRoot(
+    context.env.DB,
+    context.get("principal").tokenDigest,
+    parsed.value,
+    serverMetadata("create-certification"),
+    context.get("principal").configuration.policy,
+  );
+  if (!result.applied) return contentError(context, result.reason);
+  return context.json(createdIdResponseSchema.parse({ id: parsed.value.id }), 201);
 });
 
 protectedApi.get(

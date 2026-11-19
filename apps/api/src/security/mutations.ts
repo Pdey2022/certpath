@@ -330,11 +330,16 @@ export async function createCertificationRoot(
   const guard = globalAdminGuard(tokenDigest, metadata.now, auth.policy);
   const result = await database
     .prepare(
+      // `id` (primary key), `slug` and `created_operation_id` are unique, so a
+      // duplicate is an expected key collision. It resolves to zero rows and the
+      // existing `conflict` result rather than a thrown D1 error, the same way
+      // every other guarded insert in `content.ts` handles one.
       `INSERT INTO certifications (
          id, slug, display_name, created_by_user_id, created_operation_id, created_at
        )
        SELECT ?, ?, ?, ?, ?, ?
        WHERE ${guard.sql}
+       ON CONFLICT DO NOTHING
        RETURNING id`,
     )
     .bind(
