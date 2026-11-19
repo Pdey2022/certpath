@@ -98,6 +98,7 @@ export type ConverterErrorCode =
   | "VALUE_OVER_LIMIT"
   | "TAXONOMY_UNREADABLE"
   | "TAXONOMY_INVALID"
+  | "TAXONOMY_COUNT_MISMATCH"
   | "UNKNOWN_DOMAIN_PREFIX"
   | "UNKNOWN_SOURCE_LABEL"
   | "NO_ROWS_WRITTEN"
@@ -119,7 +120,8 @@ export class ConverterError extends Error {
 export type RejectionCode =
   | "CORRECT_ANSWER_MATCH_COUNT"
   | "EXPLANATION_MISSING"
-  | "EXPLANATION_SPLIT_INCOMPLETE";
+  | "EXPLANATION_SPLIT_INCOMPLETE"
+  | "EXPLANATION_OVER_LIMIT";
 
 export interface Provenance {
   sourceReference: string;
@@ -132,6 +134,7 @@ export interface CliOptions {
   outDir: string;
   examVersionId: string;
   provenance: Provenance;
+  allowCountDrift: boolean;
 }
 
 export interface Rejection {
@@ -240,7 +243,12 @@ const defaultIo: OutputIo = {
 
 const KEY_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/;
 const OPTION_KEY_PATTERN = /^[A-H]$/;
-const MARKER_PATTERN = /(?:^|(?<=[\s;,:]))([A-H])\.(?=\s|$)/g;
+/**
+ * A candidate marker is any capital option letter followed by a full stop and
+ * whitespace. It is only a marker when it also starts a section; see
+ * `isSectionBoundary`.
+ */
+const CANDIDATE_PATTERN = /([A-H])\.(?=\s|$)/g;
 
 function isKey(value: string, maximum: number): boolean {
   return value.length >= 1 && value.length <= maximum && KEY_PATTERN.test(value);
@@ -724,34 +732,48 @@ export type SplitResult =
   | { ok: false; detail: string };
 
 /**
+ * A marker must start the string, a new line, or a sentence/section boundary.
+ * The owner's file is one line per explanation (0 of 484 contain a newline), so
+ * a line-start-only rule would see only the first section. `.`, `!`, `?`, `;`
+ * and `:` followed by whitespace are the single-line equivalent of a line
+ * start; prose such as "so pick C. That is" is not a boundary.
+ */
+function isSectionBoundary(source: string, index: number): boolean {
+  if (index === 0) return true;
+  return /(?:\n\s*|[.!?;:]\s+)$/.test(source.slice(0, index));
+}
+
+/**
  * Splits `ins_others` on the source's letter markers. A marker is the *next
- * expected* option letter, in option order; any other capital letter followed
- * by a full stop is prose (for example a sentence ending in "option B."), not a
- * marker. The result must contain exactly one non-empty fragment for each
- * expected (non-correct) option. No fragment is ever duplicated onto another
- * option and the correct option's `ins_why` is never used as a fallback.
+ * expected* option letter, in option order, at a section boundary. The result
+ * must contain exactly one non-empty fragment for each expected (non-correct)
+ * option, and no fragment may still contain a marker for any of the question's
+ * own option letters. No fragment is ever duplicated onto another option and
+ * the correct option's `ins_why` is never used as a fallback.
  */
 export function splitDistractorExplanations(
   text: string,
   expectedLetters: readonly string[],
+  ownOptionLetters: readonly string[] = expectedLetters,
 ): SplitResult {
   const source = text.trim();
   const expected = `${expectedLetters.join(",")}`;
-  const markerPattern = new RegExp(MARKER_PATTERN.source, "g");
-  const candidates = [...source.matchAll(markerPattern)];
+  const candidates = [
+    ...source.matchAll(new RegExp(CANDIDATE_PATTERN.source, "g")),
+  ];
 
   const selected: Array<{ letter: string; index: number; length: number }> = [];
   let position = 0;
   for (const candidate of candidates) {
     if (position >= expectedLetters.length) break;
-    if (candidate[1] === expectedLetters[position]) {
-      selected.push({
-        letter: candidate[1],
-        index: candidate.index,
-        length: candidate[0].length,
-      });
-      position += 1;
-    }
+    if (candidate[1] !== expectedLetters[position]) continue;
+    if (!isSectionBoundary(source, candidate.index)) continue;
+    selected.push({
+      letter: candidate[1],
+      index: candidate.index,
+      length: candidate[0].length,
+    });
+    position += 1;
   }
 
   if (selected.length === 0) {
@@ -776,6 +798,8 @@ export function splitDistractorExplanations(
     };
   }
 
+  const ownLetters = new Set(ownOptionLetters);
+  const fragmentCandidates = new RegExp(CANDIDATE_PATTERN.source, "g");
   const fragments = new Map<string, string>();
   for (let index = 0; index < selected.length; index += 1) {
     const marker = selected[index];
@@ -788,6 +812,14 @@ export function splitDistractorExplanations(
         ok: false,
         detail: `empty fragment for option ${marker.letter}; expected ${expected}`,
       };
+    }
+    for (const candidate of fragment.matchAll(fragmentCandidates)) {
+      if (ownLetters.has(candidate[1])) {
+        return {
+          ok: false,
+          detail: `fragment for option ${marker.letter} still contains a marker for option ${candidate[1]}; expected ${expected}`,
+        };
+      }
     }
     fragments.set(marker.letter, fragment);
   }
@@ -831,10 +863,14 @@ function buildRow(
     };
   }
   if (correctExplanation.length > LIMITS.explanation.maximum) {
-    throw new ConverterError(
-      "VALUE_OVER_LIMIT",
-      `question ${question.id} ins_why length ${correctExplanation.length} exceeds ${LIMITS.explanation.maximum}`,
-    );
+    return {
+      cells: [],
+      rejection: {
+        id: question.id,
+        code: "EXPLANATION_OVER_LIMIT",
+        detail: `ins_why length ${correctExplanation.length} exceeds ${LIMITS.explanation.maximum}`,
+      },
+    };
   }
 
   const expectedLetters = question.options
@@ -843,6 +879,7 @@ function buildRow(
   const split = splitDistractorExplanations(
     question.distractorExplanations,
     expectedLetters,
+    question.options.map((option) => option.key),
   );
   if (!split.ok) {
     return {
@@ -870,10 +907,14 @@ function buildRow(
       };
     }
     if (explanation.length > LIMITS.explanation.maximum) {
-      throw new ConverterError(
-        "VALUE_OVER_LIMIT",
-        `question ${question.id} option ${option.key} explanation length ${explanation.length} exceeds ${LIMITS.explanation.maximum}`,
-      );
+      return {
+        cells: [],
+        rejection: {
+          id: question.id,
+          code: "EXPLANATION_OVER_LIMIT",
+          detail: `option ${option.key} explanation length ${explanation.length} exceeds ${LIMITS.explanation.maximum}`,
+        },
+      };
     }
     explanations.set(option.key, explanation);
   }
@@ -1118,6 +1159,7 @@ export interface ConverterOptions {
   outDir: string;
   examVersionId: string;
   provenance: Provenance;
+  allowCountDrift?: boolean;
   repoRoot?: string;
   io?: Partial<OutputIo>;
 }
@@ -1271,6 +1313,40 @@ export function runConverter(options: ConverterOptions): ConversionSummary {
     }),
   };
 
+  if (!options.allowCountDrift) {
+    const mismatches: string[] = [];
+    for (const domain of taxonomyReport.domains) {
+      if (domain.observedQuestions !== domain.expectedQuestions) {
+        mismatches.push(
+          `domain ${domain.id}: observed ${domain.observedQuestions}, expected ${domain.expectedQuestions}`,
+        );
+      }
+      for (const topic of domain.topics) {
+        if (topic.observedQuestions !== topic.expectedQuestions) {
+          mismatches.push(
+            `topic ${topic.id}: observed ${topic.observedQuestions}, expected ${topic.expectedQuestions}`,
+          );
+        }
+        for (const sourceLabel of topic.sourceLabels) {
+          if (sourceLabel.observedQuestions !== sourceLabel.expectedQuestions) {
+            mismatches.push(
+              `label ${domain.id}/${sourceLabel.label}: observed ${sourceLabel.observedQuestions}, expected ${sourceLabel.expectedQuestions}`,
+            );
+          }
+        }
+      }
+    }
+    if (mismatches.length > 0) {
+      const shown = mismatches.slice(0, 10).join("; ");
+      const more =
+        mismatches.length > 10 ? `; and ${mismatches.length - 10} more` : "";
+      throw new ConverterError(
+        "TAXONOMY_COUNT_MISMATCH",
+        `${shown}${more}`,
+      );
+    }
+  }
+
   const manifest = {
     formatVersion: MANIFEST_FORMAT_VERSION,
     sourceSha256: sha256(sourceText),
@@ -1358,6 +1434,19 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const equals = argument.indexOf("=");
     const name = equals >= 0 ? argument.slice(0, equals) : argument;
     const inline = equals >= 0 ? argument.slice(equals + 1) : undefined;
+    if (name === "--allow-count-drift") {
+      if (inline !== undefined && inline !== "true") {
+        throw new ConverterError(
+          "UNKNOWN_ARGUMENT",
+          "--allow-count-drift does not take a value",
+        );
+      }
+      if (values.has(name)) {
+        throw new ConverterError("DUPLICATE_ARGUMENT", `${name} was given twice`);
+      }
+      values.set(name, "true");
+      continue;
+    }
     if (
       ![
         "--input",
@@ -1431,6 +1520,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       outDir: values.get("--out") as string,
       examVersionId,
       provenance,
+      allowCountDrift: values.has("--allow-count-drift"),
     },
   };
 }
@@ -1439,10 +1529,14 @@ const HELP_TEXT = `Usage:
   tsx tools/cissp-convert/cli.ts --input <html> --taxonomy <json> --out <dir>
     --exam-version-id <id>
     (--source-reference <text> --license-reference <text> | --provenance <json>)
+    [--allow-count-drift]
 
 The output directory must exist outside the repository and be empty. The tool
 writes batch-NNN.csv, manifest.json, taxonomy-report.json and rejections.txt.
-It exits non-zero with a named code on any fatal condition.`;
+It exits non-zero with a named code on any fatal condition.
+
+--allow-count-drift is for synthetic test fixtures only. The owner's bank must
+match the approved per-label, per-topic and per-domain counts.`;
 
 function printSummary(summary: ConversionSummary): void {
   console.log(`cissp-convert: parsed ${summary.parsed} question(s)`);

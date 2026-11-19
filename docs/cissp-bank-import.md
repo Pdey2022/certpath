@@ -68,9 +68,11 @@ one of the pair, or a missing/blank/over-cap value fails closed.
 Fatal conditions exit non-zero with a named code on stderr and leave no output
 files: unreadable input, missing/unclosed/unparseable `allQuestions`, duplicate
 or out-of-range id (1–484), option count other than four, blank stem/option,
-any value over its contract cap, unknown source label or domain prefix,
-malformed taxonomy, missing provenance, an output path inside the repository or
-a non-empty output directory, and a run in which no question survives.
+any stem, option, provenance or key value over its contract cap, unknown source
+label or domain prefix, malformed taxonomy, observed/expected count drift
+(`TAXONOMY_COUNT_MISMATCH`), missing provenance, an output path inside the
+repository or a non-empty output directory, and a run in which no question
+survives.
 
 Per-question omissions do not abort the run. They are written to
 `rejections.txt` with one of:
@@ -79,15 +81,32 @@ Per-question omissions do not abort the run. They are written to
   after trimming and whitespace normalisation. The converter never guesses.
 - `EXPLANATION_MISSING` — the correct option has no `ins_why`.
 - `EXPLANATION_SPLIT_INCOMPLETE` — `ins_others` does not yield exactly one
-  non-empty fragment for every non-correct option.
+  non-empty fragment for every non-correct option, or a fragment still contains
+  a marker for one of the question's own option letters.
+- `EXPLANATION_OVER_LIMIT` — one explanation (the correct `ins_why` or a
+  distractor fragment) is longer than 3,000 characters. Only that question is
+  omitted; the other rows are kept.
 
 The correct option's explanation is always `ins_why`. Distractor explanations
-come only from `ins_others`, split deterministically: a marker is the *next
-expected* option letter in option order, followed by a full stop and whitespace.
-A capital letter that is not the next expected marker is prose, so an
-explanation ending “...for option B.” is not mistaken for a new section. If the
-expected sequence does not complete, the question is rejected — `ins_why` is
-never copied onto a distractor and a fragment is never duplicated.
+come only from `ins_others`, split deterministically. A marker must start the
+string, a new line, or a sentence/section boundary (`.`, `!`, `?`, `;` or `:`
+followed by whitespace) and must be the *next expected* option letter in option
+order. The owner's file is single-line — 0 of 484 `ins_others` values contain a
+newline — so the sentence boundary is the single-line equivalent of a line
+start. Prose such as “so pick C. That is” is not a marker because it does not
+start a section.
+
+After splitting, a fragment that still contains a marker for any of the
+question's own option letters is rejected: `B. one. C. two. A. three. D. four.`
+is rejected rather than folding A's text into C. If the expected sequence does
+not complete, the question is rejected. `ins_why` is never copied onto a
+distractor and a fragment is never duplicated. A wrong-but-accepted explanation
+is worse than an omission.
+
+The approved per-label, per-topic and per-domain counts are enforced. Any
+observed/expected mismatch is fatal with `TAXONOMY_COUNT_MISMATCH` before a file
+is written. `--allow-count-drift` exists for synthetic test fixtures only; the
+owner's bank must run without it.
 
 ## Canonical taxonomy
 
@@ -141,7 +160,9 @@ no case-insensitive match: a new spelling requires an explicit taxonomy change.
 - **Roughly 140 explanations are still pending editorial review** in the
   owner's inventory. The converter does not judge editorial quality; it only
   enforces the import contract. Separately, 21 items in the current file have no
-  per-option `ins_others` markers and are rejected rather than guessed.
+  per-option `ins_others` markers and are rejected rather than guessed. All 21
+  are `no-marker`; none are `found-X-expected-Y` prose, so they are authoring
+  debt rather than marker-rule symptoms.
 - **Third-party question wording remains in the source's own
   `verified_source`.** Several items record notes such as “still recommended to
   verify against the exact license” or third-party outline references. The
@@ -170,11 +191,15 @@ The taxonomy report observed all eight domains and 36 topics at their approved
 counts (484 total, 171 `general`), and the generated CSV rows use the exact
 41-column header, four options, options 5–8 empty, and exactly one `true`.
 
-The tool's tests cover the synthetic three-question fixture byte-for-byte, the
-header/format/row-cap parity with the real import constants, every rejection
-code, the repo-write refusal, `.partial` cleanup after a write failure, and the
-absence of question text from `manifest.json`, `taxonomy-report.json` and
-`rejections.txt`.
+The 21 omissions classify as `no-marker: 21`, `found-X-expected-Y: 0`,
+`text-before-first-marker: 0`, `empty-fragment: 0`.
+
+The tool's 19 tests cover the synthetic three-question fixture byte-for-byte,
+the header/format/row-cap parity with the real import constants, every rejection
+code, the count-drift failure, both wrong-marker cases (`so pick C.` and
+`A.` folded into C), the repo-write refusal, `.partial` cleanup after a write
+failure, and the absence of question text from `manifest.json`,
+`taxonomy-report.json` and `rejections.txt`.
 
 No migration, import, deployment, provisioning or write to a deployed or
 content database is part of this slice. The only database activity is the

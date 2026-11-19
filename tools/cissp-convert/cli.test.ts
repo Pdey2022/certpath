@@ -77,9 +77,9 @@ function syntheticQuestion(
     correct_text: `Synthetic ${id} option A`,
     ins_why: `Synthetic reason ${id} for option A.`,
     ins_others:
-      `B. Synthetic ${id} reason B. ` +
-      `C. Synthetic ${id} reason C. ` +
-      `D. Synthetic ${id} reason D.`,
+      `B. Synthetic reason ${id} for the second option. ` +
+      `C. Synthetic reason ${id} for the third option. ` +
+      `D. Synthetic reason ${id} for the fourth option.`,
     ins_map: "Domain 1: Security and Risk Management > Risk management",
     ...overrides,
   };
@@ -117,6 +117,8 @@ function createFixture(
       outDir,
       examVersionId: "exam-v1",
       provenance: PROVENANCE,
+      // Synthetic fixtures do not carry the owner's 484-item counts.
+      allowCountDrift: true,
       ...overrides,
     },
   };
@@ -197,8 +199,8 @@ const FIXTURE_QUESTIONS: FixtureQuestion[] = [
     correct_text: "Synthetic option C",
     ins_why: "Synthetic reason for C.",
     ins_others:
-      "A. Synthetic distraction A. B. Synthetic distraction B. " +
-      'D. Synthetic distraction D, with "quotes".',
+      "A. Synthetic distraction alpha. B. Synthetic distraction beta. " +
+      'D. Synthetic distraction delta, with "quotes".',
     ins_map: "Domain 1: Security and Risk Management > Risk management",
   },
   {
@@ -213,8 +215,8 @@ const FIXTURE_QUESTIONS: FixtureQuestion[] = [
     correct_text: "Synthetic option A",
     ins_why: "Synthetic reason for A.",
     ins_others:
-      "B. Synthetic distraction B. C. Synthetic distraction C. " +
-      "D. Synthetic distraction D.",
+      "B. Synthetic distraction bravo. C. Synthetic distraction charlie. " +
+      "D. Synthetic distraction delta.",
     ins_map: "Domain 1: Security and Risk Management > Governance and policy",
   },
   {
@@ -229,8 +231,8 @@ const FIXTURE_QUESTIONS: FixtureQuestion[] = [
     correct_text: "Synthetic option D",
     ins_why: "Synthetic reason for D.",
     ins_others:
-      "A. Synthetic distraction A. B. Synthetic distraction B. " +
-      "C. Synthetic distraction C.",
+      "A. Synthetic distraction alpha. B. Synthetic distraction bravo. " +
+      "C. Synthetic distraction charlie.",
     ins_map: "Domain 2: Asset Security > Asset",
   },
 ];
@@ -257,11 +259,11 @@ const EXPECTED_BATCH_ONE = [
     "A",
     "Synthetic option A",
     "false",
-    "Synthetic distraction A.",
+    "Synthetic distraction alpha.",
     "B",
     "Synthetic option B",
     "false",
-    "Synthetic distraction B.",
+    "Synthetic distraction beta.",
     "C",
     "Synthetic option C",
     "true",
@@ -269,7 +271,7 @@ const EXPECTED_BATCH_ONE = [
     "D",
     "Synthetic option D",
     "false",
-    '"Synthetic distraction D, with ""quotes""."',
+    '"Synthetic distraction delta, with ""quotes""."',
     ...EMPTY_SLOTS,
   ]),
   expectedRow([
@@ -289,15 +291,15 @@ const EXPECTED_BATCH_ONE = [
     "B",
     "Synthetic option B",
     "false",
-    "Synthetic distraction B.",
+    "Synthetic distraction bravo.",
     "C",
     "Synthetic option C",
     "false",
-    "Synthetic distraction C.",
+    "Synthetic distraction charlie.",
     "D",
     "Synthetic option D",
     "false",
-    "Synthetic distraction D.",
+    "Synthetic distraction delta.",
     ...EMPTY_SLOTS,
   ]),
   expectedRow([
@@ -313,15 +315,15 @@ const EXPECTED_BATCH_ONE = [
     "A",
     "Synthetic option A",
     "false",
-    "Synthetic distraction A.",
+    "Synthetic distraction alpha.",
     "B",
     "Synthetic option B",
     "false",
-    "Synthetic distraction B.",
+    "Synthetic distraction bravo.",
     "C",
     "Synthetic option C",
     "false",
-    "Synthetic distraction C.",
+    "Synthetic distraction charlie.",
     "D",
     "Synthetic option D",
     "true",
@@ -397,6 +399,57 @@ test("batches never exceed the ten-row import cap", () => {
   }
 });
 
+interface TaxonomyForCounts {
+  domains: Array<{
+    id: string;
+    sourcePrefixes: string[];
+    topics: Array<{
+      id: string;
+      sourceLabels: Array<{ label: string; expectedQuestions: number }>;
+    }>;
+  }>;
+}
+
+function countCompleteQuestions(): FixtureQuestion[] {
+  const taxonomy = JSON.parse(
+    readFileSync(TAXONOMY_PATH, "utf8"),
+  ) as TaxonomyForCounts;
+  const questions: FixtureQuestion[] = [];
+  let id = 1;
+  for (const domain of taxonomy.domains) {
+    const prefix = domain.sourcePrefixes[0];
+    for (const topic of domain.topics) {
+      for (const sourceLabel of topic.sourceLabels) {
+        for (let count = 0; count < sourceLabel.expectedQuestions; count += 1) {
+          questions.push(
+            syntheticQuestion(id, {
+              ins_map: `${prefix} > ${sourceLabel.label}`,
+            }),
+          );
+          id += 1;
+        }
+      }
+    }
+  }
+  return questions;
+}
+
+test("the approved counts are enforced unless drift is explicitly allowed", () => {
+  const complete = countCompleteQuestions();
+  assert.equal(complete.length, 484);
+
+  const strict = createFixture(complete, { allowCountDrift: false });
+  const summary = runConverter(strict.options);
+  assert.equal(summary.parsed, 484);
+  assert.equal(summary.written, 484);
+  assert.equal(summary.rejected, 0);
+
+  const omitted = complete.slice(0, -1);
+  const drifted = createFixture(omitted, { allowCountDrift: false });
+  expectCode(() => runConverter(drifted.options), "TAXONOMY_COUNT_MISMATCH");
+  assert.equal(existsSync(drifted.outDir), false);
+});
+
 test("the explanation split maps each fragment to its own option", () => {
   const split = splitDistractorExplanations(
     "A. first reason. B. second reason. D. fourth reason.",
@@ -412,19 +465,26 @@ test("the explanation split maps each fragment to its own option", () => {
   });
 });
 
-test("prose ending in an option letter is not treated as a marker", () => {
+test("prose that mentions a letter is not consumed as that option's marker", () => {
   const result = splitDistractorExplanations(
-    "B. Reason for option B. C. Reason for option C. D. Reason for option D.",
+    "B. Option A is wrong, so pick C. That is the point. D. Fifth.",
     ["B", "C", "D"],
+    ["A", "B", "C", "D"],
   );
-  assert.deepEqual(result, {
-    ok: true,
-    fragments: new Map([
-      ["B", "Reason for option B."],
-      ["C", "Reason for option C."],
-      ["D", "Reason for option D."],
-    ]),
-  });
+  assert.equal(result.ok, false);
+});
+
+test("a fragment cannot fold another option's marker into its own text", () => {
+  const result = splitDistractorExplanations(
+    "B. one. C. two. A. three. D. four.",
+    ["B", "C", "D"],
+    ["A", "B", "C", "D"],
+  );
+  assert.equal(result.ok, false);
+  assert.match(
+    result.ok ? "" : result.detail,
+    /still contains a marker for option A/,
+  );
 });
 
 test("deliberately unsplittable and malformed explanations are rejected", () => {
@@ -478,6 +538,18 @@ test("every rejection code is emitted and the question is omitted", () => {
       name: "missing distractor marker",
       question: syntheticQuestion(1, { ins_others: "A. one. B. two." }),
       code: "EXPLANATION_SPLIT_INCOMPLETE",
+    },
+    {
+      name: "over-cap correct explanation",
+      question: syntheticQuestion(1, { ins_why: "x".repeat(3001) }),
+      code: "EXPLANATION_OVER_LIMIT",
+    },
+    {
+      name: "over-cap distractor explanation",
+      question: syntheticQuestion(1, {
+        ins_others: `B. ${"x".repeat(3001)}. C. two. D. three.`,
+      }),
+      code: "EXPLANATION_OVER_LIMIT",
     },
   ];
 
@@ -564,11 +636,6 @@ test("fatal shape and taxonomy errors fail closed before any file is written", (
           ],
         }),
       ],
-      code: "VALUE_OVER_LIMIT",
-    },
-    {
-      name: "explanation over cap",
-      questions: [syntheticQuestion(1, { ins_why: "x".repeat(3001) })],
       code: "VALUE_OVER_LIMIT",
     },
     {
