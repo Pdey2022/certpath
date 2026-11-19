@@ -69,8 +69,15 @@ tester-only.
 
 - ~1,200 authored and reviewed items across two exams is the longest lead time in
   the plan; it must start in parallel with Phase 1, not after it.
-- The editorial pipeline (draft, review, publish, retire) already exists and is
-  the mechanism for enforcing author != reviewer.
+- The editorial pipeline (draft, review, publish, retire) already exists, but it
+  does **not** enforce author != reviewer. `content_reviews` records the reviewer
+  separately from the publisher, and neither the schema nor `recordQuestionReview`
+  requires the reviewer to differ from the revision's author. Requiring an
+  independent reviewer is a separate policy decision that needs its own
+  migration.
+- The CISSP pilot runs under a documented self-review exception: the owner
+  authors that bank and is its only reviewer. It is a pilot concession, not a
+  change to the guarantees above, and it does not extend to any future bank.
 - Email-dependent features (magic links, verification, renewal reminders) remain
   fake-inbox only until a provider is chosen and email is enabled.
 - Funnel instrumentation is a Phase 5 deliverable, before any pricing test runs.
