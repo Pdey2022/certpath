@@ -658,11 +658,12 @@ mechanisation is honest about itself:
   the pilot under a documented exception; they do not attest an item-by-item
   read. Anything that consumes `content_reviews` as evidence of careful reading
   would be over-reading it.
-- **ADR 0006 and `docs/delivery-plan.md` overstate a guarantee.** ADR 0006 states
-  "Author != reviewer is enforced in the database, not only the UI", and
-  `docs/delivery-plan.md` repeats it. There is no such constraint in
-  `0003_versioned_content.sql` or any later migration: `content_reviews` records
-  a `reviewer_user_id` but nothing compares it with `question_revisions.
+- **ADR 0006 and `docs/delivery-plan.md` record a gap, not a guarantee.** Both
+  state that author != reviewer is *intended* as a database guarantee and that
+  it is **not enforced** as of November 2026; neither document claims the
+  guarantee holds. There is no such constraint in `0003_versioned_content.sql`
+  or any later migration: `content_reviews` records a `reviewer_user_id` but
+  nothing compares it with `question_revisions.
   authored_by_user_id`. The database does not stop an author from approving
   their own revision. This slice records the gap and does **not** close it — a
   migration with a trigger is its own review, and the pilot exception is the

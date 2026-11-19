@@ -22,9 +22,12 @@ tester-only.
   prohibited by the certification bodies' terms and is a legal risk, not a style
   preference. A short written content policy must exist before the first author
   starts.
-- **Author != reviewer** is enforced in the database, not only the UI, because
-  self-authored content without a second pair of eyes is where answer-key drift
-  lives.
+- **Author != reviewer** is required: self-authored content without a second
+  pair of eyes is where answer-key drift lives. It is intended as a database
+  guarantee, not a UI convention, but as of November 2026 it is **not enforced**
+  — `content_reviews` records the reviewer without comparing it with the
+  revision's author (see Consequences). The pilot's documented self-review
+  exception is a concession on top of that gap, not a relaxation of the rule.
 - English only at launch. The content model stays text-in/text-out with no locale
   baked into keys, so translation is later a data task, not a migration.
 - **Text only**: no images or diagrams at launch, so no object storage is
