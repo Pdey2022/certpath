@@ -31,7 +31,19 @@ after(() => {
   for (const directory of tempDirs) rmSync(directory, { recursive: true, force: true });
 });
 
-type ConfirmBehaviour = "ok" | "commit-then-500" | "partial-then-500" | "unauthorized";
+type ConfirmBehaviour =
+  | "ok"
+  | "commit-then-500"
+  | "partial-then-500"
+  | "unauthorized"
+  // The three Stage 3/4 mutations that commit and then lose the answer. Each
+  // one must be reconciled by observation, never re-sent blind.
+  | "submit-then-500"
+  | "publish-then-500"
+  // Preview refusals that must keep their own code instead of collapsing into
+  // PREVIEW_REJECTED.
+  | "preview-401"
+  | "preview-429";
 
 interface StubQuestion {
   key: string;
@@ -51,8 +63,13 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
   const calls: string[] = [];
   let previewCount = 0;
   let confirmCount = 0;
+  let submitCount = 0;
+  let publishCount = 0;
+  let revisionReads = 0;
+  let publicationReads = 0;
   let observedUnitStateDuringConfirm: string | null = null;
   let observedConfirmBody: string | null = null;
+  let observedQuestionStateDuringReview: string | null = null;
 
   function json(body: unknown, status = 200): Response {
     return new Response(JSON.stringify(body), {
@@ -83,6 +100,12 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
     }
 
     if (path.endsWith("/import-previews")) {
+      if (behaviour === "preview-401") {
+        return json({ error: { code: "unauthenticated", requestId: "stub-11" } }, 401);
+      }
+      if (behaviour === "preview-429") {
+        return json({ error: { code: "rate_limited", requestId: "stub-12" } }, 429);
+      }
       const body = init?.body;
       const text = typeof body === "string" ? body : new TextDecoder().decode(body as Uint8Array);
       const rows = parseCsv(text).slice(1);
@@ -165,20 +188,31 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
       if (!question) return json({ error: { code: "not_found", requestId: "stub-4" } }, 404);
       const action = revisionMatch[3];
       if (action === "/submit") {
+        submitCount += 1;
         question.state = "submitted";
+        if (behaviour === "submit-then-500") {
+          return json({ error: { code: "service_unavailable", requestId: "stub-9" } }, 500);
+        }
         return json({ revisionId: question.revisionId });
       }
       if (action === "/review") {
         const body = JSON.parse(String(init?.body)) as { decision: string; notes: string };
         reviewNotes.push(body.notes);
+        // What the checkpoint said when the driver moved on from the submit:
+        // "submitted" means the observation was recorded before reviewing.
+        const checkpoint = readCheckpoint(readOnlyStateDir);
+        observedQuestionStateDuringReview =
+          checkpoint?.questions.find((item) => item.key === question.key)?.state ?? null;
         question.state = "approved";
         return json({ reviewId: `review-${question.questionId}` }, 201);
       }
+      revisionReads += 1;
       return json({ revisionId: question.revisionId, workflowState: question.state });
     }
 
     const publicationMatch = /\/questions\/([^/]+)\/publication$/.exec(path);
     if (publicationMatch) {
+      publicationReads += 1;
       const question = [...questions.values()].find((item) => item.questionId === publicationMatch[1]);
       if (!question) return json({ error: { code: "not_found", requestId: "stub-5" } }, 404);
       return json({ questionId: question.questionId, publication: question.publication });
@@ -186,6 +220,7 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
 
     const publishMatch = /\/questions\/([^/]+)\/publish$/.exec(path);
     if (publishMatch) {
+      publishCount += 1;
       const question = [...questions.values()].find((item) => item.questionId === publishMatch[1]);
       if (!question) return json({ error: { code: "not_found", requestId: "stub-6" } }, 404);
       if (question.publication !== null) {
@@ -193,6 +228,9 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
       }
       question.publication = { revisionId: question.revisionId, state: "published", pointerVersion: 1 };
       question.state = "published";
+      if (behaviour === "publish-then-500") {
+        return json({ error: { code: "service_unavailable", requestId: "stub-10" } }, 500);
+      }
       return json({ pointerVersion: 1 });
     }
 
@@ -222,6 +260,21 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
     get previewCount() {
       return previewCount;
     },
+    get submitCount() {
+      return submitCount;
+    },
+    get publishCount() {
+      return publishCount;
+    },
+    get revisionReads() {
+      return revisionReads;
+    },
+    get publicationReads() {
+      return publicationReads;
+    },
+    get observedQuestionStateDuringReview() {
+      return observedQuestionStateDuringReview;
+    },
     get observedUnitStateDuringConfirm() {
       return observedUnitStateDuringConfirm;
     },
@@ -248,9 +301,12 @@ interface Harness {
   deps: RunDependencies;
 }
 
-function buildHarness(behaviour?: ConfirmBehaviour): { harness: Harness; stub: ReturnType<typeof createStub> } {
+function buildHarness(
+  behaviour?: ConfirmBehaviour,
+  rowCount = 5,
+): { harness: Harness; stub: ReturnType<typeof createStub> } {
   const root = makeTempDir();
-  const fixture = writeFixture(root, { rowCount: 5 });
+  const fixture = writeFixture(root, { rowCount });
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
   const validated = validateInputs({
@@ -371,6 +427,58 @@ test("a confirm that commits and then answers 500 is reconciled by question key,
   assert.equal(new Set(checkpoint.questions.map((question) => question.key)).size, 5);
   assert.equal(stub.questions.size, 5);
   assert.equal(checkpoint.counters.recoveries >= 1, true);
+});
+
+test("a submit that commits and then answers 500 is observed, not re-sent", async () => {
+  // The intent must stay in flight across a lost answer: the next iteration has
+  // to read the revision before deciding anything. Clearing it re-sent the
+  // submit from the stale checkpoint, and the second submit of an
+  // already-submitted revision is a 409 - a WORKFLOW_CONFLICT that hid the fact
+  // that the server was already at the state the driver wanted.
+  const { harness, stub } = buildHarness("submit-then-500", 1);
+  await runStages(harness, ["transform", "upload", "publish"]);
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(stub.submitCount, 1);
+  assert.equal(stub.revisionReads, 1);
+  // The observation was recorded before the next action: the review saw a
+  // checkpoint that said "submitted", not "draft".
+  assert.equal(stub.observedQuestionStateDuringReview, "submitted");
+  assert.equal(checkpoint.questions[0]!.state, "published");
+  assert.equal(checkpoint.counters.recoveries >= 1, true);
+});
+
+test("a publish that commits and then answers 500 is observed, not re-sent", async () => {
+  // Same rule for the last mutation: one publication read decides it, and the
+  // run records "published" from what the server says rather than publishing
+  // twice and turning the second attempt into a 409.
+  const { harness, stub } = buildHarness("publish-then-500", 1);
+  await runStages(harness, ["transform", "upload", "publish"]);
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(stub.publishCount, 1);
+  assert.equal(stub.publicationReads, 1);
+  assert.equal(checkpoint.questions[0]!.state, "published");
+  assert.equal(checkpoint.questions[0]!.pointerVersion, 1);
+});
+
+test("a refused preview keeps its own code instead of collapsing into PREVIEW_REJECTED", async () => {
+  // A lost session and a rate limit stop the run for different reasons than a
+  // refused body: the operator re-authenticates or waits, and neither is fixed
+  // by editing the CSV. previewUnit used to map all three to PREVIEW_REJECTED.
+  for (const [behaviour, code] of [
+    ["preview-401", "SESSION_LOST"],
+    ["preview-429", "RATE_LIMITED"],
+  ] as const) {
+    const { harness, stub } = buildHarness(behaviour);
+    await assert.rejects(
+      runStages(harness, ["transform", "upload"]),
+      (error: unknown) => error instanceof DriverError && error.code === code,
+      `${behaviour} should stop with ${code}`,
+    );
+    // The refusal happened at the preview, before any confirm.
+    assert.equal(stub.confirmCount, 0);
+  }
 });
 
 test("a partial reconciliation stops the run with PARTIAL_IMPORT and leaves the unit unconfirmed", async () => {

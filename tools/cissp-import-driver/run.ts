@@ -13,6 +13,7 @@ import {
   StaffApi,
   outcomeError,
   previewResponse,
+  rejectedError,
   confirmResponse,
   type ApiOutcome,
   type ConfirmResponse,
@@ -581,10 +582,21 @@ async function previewUnit(
         .slice(0, 10)
         .map((issue) => `${issue.path}:${issue.code}`)
         .join(" ");
+      if (issues.some((issue) => issue.code === "existing_question_key")) {
+        throw new DriverError(
+          "EXISTING_KEYS",
+          `unit ${unit.unit} was refused by the import validator${issueList ? ` (${issueList})` : ""}`,
+          { status: outcome.status, requestId: outcome.requestId ?? undefined },
+        );
+      }
+      // The run stops either way, but not for the same reason: a lost session
+      // (401/403) is re-authenticated and a 429 is waited out, while a refused
+      // body is fixed. Collapsing them into PREVIEW_REJECTED hid that.
+      if (outcome.status === 401 || outcome.status === 403 || outcome.status === 429) {
+        throw rejectedError(outcome, "PREVIEW_REJECTED");
+      }
       throw new DriverError(
-        issues.some((issue) => issue.code === "existing_question_key")
-          ? "EXISTING_KEYS"
-          : "PREVIEW_REJECTED",
+        "PREVIEW_REJECTED",
         `unit ${unit.unit} was refused by the import validator${issueList ? ` (${issueList})` : ""}`,
         { status: outcome.status, requestId: outcome.requestId ?? undefined },
       );
@@ -827,7 +839,8 @@ function questionWorkflowState(state: QuestionState): ReturnType<typeof mapWorkf
   return state === "pending" ? "draft" : state;
 }
 
-async function convergeQuestion(context: Context, record: QuestionRecord): Promise<void> {  const certification = context.checkpoint.target.certificationId!;
+async function convergeQuestion(context: Context, record: QuestionRecord): Promise<void> {
+  const certification = context.checkpoint.target.certificationId!;
   const examVersion = context.checkpoint.target.examVersionId!;
   const questionId = record.questionId;
   const revisionId = record.revisionId;
@@ -945,7 +958,13 @@ async function convergeQuestion(context: Context, record: QuestionRecord): Promi
       );
     }
     noteFailure(context);
-    record.inFlight = null;
+    // The intent stays set. A rejected, 5xx or timed-out answer does not say
+    // whether the mutation committed, so the next iteration must observe the
+    // server state and align before deciding anything - "re-read the server
+    // state, then act" in docs/cissp-import-driver.md. Clearing it here is what
+    // re-sent the same submit from the stale checkpoint, and a submit that
+    // committed with a lost response then surfaced as a 409 and a
+    // WORKFLOW_CONFLICT instead of the state the server already held.
     persist(context);
   }
   throw new DriverError("WORKFLOW_CONFLICT", `${record.key}: the workflow did not converge`);
