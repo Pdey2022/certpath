@@ -22,6 +22,15 @@ Live checks against `certpath-site` after the deploy: `/` 200 with the full
 server-rendered HTML, `/exams` 200, `/robots.txt` 200 (`Allow: /`,
 `Disallow: /app`, `Disallow: /admin`), `/sitemap.xml` 200.
 
+That robots reading was taken at `16247bf`, when the site config shipped with
+`INDEXING_ENABLED: "true"`. The public site now deploys with indexing off
+(`apps/web/wrangler.site.jsonc` sets `"false"`; see
+[SEO](seo.md#indexing-is-off-on-the-public-site)), so the same live check after
+the next merge to `main` must show `/robots.txt` as `User-agent: *` plus
+`Disallow: /`, an empty `/sitemap.xml`, and `noindex,nofollow` on `/` and
+`/exams`. A live `Allow: /` would mean the deployed config is not the one in
+`main`.
+
 Both publish jobs are guarded by `github.event_name == 'push' &&
 github.ref == 'refs/heads/main'`, so a pull request or a manual `CI` dispatch
 publishes nothing.

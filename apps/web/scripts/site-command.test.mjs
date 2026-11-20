@@ -24,14 +24,15 @@ const CLI = fileURLToPath(new URL("./site-command.mjs", import.meta.url));
 
 // Shaped like the artefact `npm run build:site` writes, trimmed to what the
 // guard reads. The generated config carries `d1_databases: []` because the site
-// has no binding.
+// has no binding, and `INDEXING_ENABLED: "false"` because `wrangler.site.jsonc`
+// is deployed with indexing off.
 function siteConfig() {
   return {
     configPath: "C:\\repo\\apps\\web\\wrangler.site.jsonc",
     name: "certpath-site",
     main: "index.js",
     compatibility_date: "2026-11-10",
-    vars: { INDEXING_ENABLED: "true", DEPLOYED_COMMIT: "280d53b" },
+    vars: { INDEXING_ENABLED: "false", DEPLOYED_COMMIT: "280d53b" },
     d1_databases: [],
   };
 }
@@ -76,7 +77,7 @@ test("the site guard refuses every artefact that is not the site build", () => {
       "site_d1_binding",
     ],
     [{ ...siteConfig(), d1_databases: pilotArtefact().d1_databases }, "site_d1_binding"],
-    [{ ...siteConfig(), vars: { INDEXING_ENABLED: "true" } }, "site_deploy_stamp_missing"],
+    [{ ...siteConfig(), vars: { INDEXING_ENABLED: "false" } }, "site_deploy_stamp_missing"],
     [{ ...siteConfig(), vars: { ...siteConfig().vars, DEPLOYED_COMMIT: "280d53" } }, "site_deploy_stamp_missing"],
     [null, "site_config_unparsed"],
     [[], "site_config_unparsed"],
