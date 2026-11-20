@@ -5,9 +5,11 @@
 // a mocked Cloudflare CLI.
 //
 // Remote safety model:
-//   1. Preflight resolves `certpath-admin` by name once and records its UUID.
-//   2. That UUID is written into a run-only Wrangler config as a binding.
-//   3. Every later read and write addresses the binding, never the name, so a
+//   1. The operator names the database and its recorded UUID together, and both
+//      must match one entry of `approvedRemoteDatabases`.
+//   2. Preflight resolves that name once and re-checks the UUID it resolves to.
+//   3. That UUID is written into a run-only Wrangler config as a binding.
+//   4. Every later read and write addresses the binding, never the name, so a
 //      database swapped behind the name after preflight receives nothing.
 
 import {
@@ -17,9 +19,36 @@ import {
 } from "./security/totp.ts";
 
 export const certpathAccountId = "ef67137c4d1556f7f51f1cb3f1f420f3";
-export const remoteStaffDatabaseName = "certpath-admin";
 export const localStaffDatabaseName = "certpath-local";
 export const pinnedDatabaseBinding = "STAFF_PROVISIONING_DB";
+
+/** A remote database this script may address, with its recorded UUID. */
+export interface ApprovedRemoteDatabase {
+  readonly name: string;
+  readonly databaseId: string;
+}
+
+/**
+ * The only databases a remote run may write to. The 5C posture is one database,
+ * `certpath-learner-staging` (#134); a production database is not provisioned,
+ * so it is not here. Naming a database is never enough on its own: the operator
+ * must also pass the UUID recorded for that name, and both must agree.
+ */
+export const approvedRemoteDatabases: readonly ApprovedRemoteDatabase[] = [
+  {
+    name: "certpath-learner-staging",
+    databaseId: "c52e398f-4280-40a6-8244-854186dc6ef2",
+  },
+];
+
+/**
+ * Names that appeared in an approved plan but were never provisioned. They are
+ * refused with their own code, so an operator who types one is told why rather
+ * than reading a generic "unapproved".
+ */
+export const unprovisionedRemoteDatabases: readonly string[] = [
+  "certpath-admin",
+];
 
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -93,19 +122,73 @@ export async function createProvisioningTickets(): Promise<
 }
 
 /**
- * Remote writes are opt-in: `--remote` must be paired with the exact database
- * UUID recorded before creation. The local database keeps its existing default.
+ * Resolves an operator-supplied name/UUID pair against the allowlist. Fail
+ * closed: an unapproved name, a name that was never provisioned, a value that is
+ * not a UUID, and a UUID recorded for a different database each abort with their
+ * own code, before the CLI is spawned. Returns the allowlist's own copy, so the
+ * caller can never carry a name and a UUID that disagree.
+ */
+export function resolveRemoteDatabase(
+  name: string,
+  databaseId: string,
+): ApprovedRemoteDatabase {
+  const approved = approvedRemoteDatabases.find(
+    (database) => database.name === name,
+  );
+  if (!approved) {
+    if (unprovisionedRemoteDatabases.includes(name)) {
+      throw new ProvisioningAbort(
+        "database-not-provisioned",
+        `${name} was a proposed target that was never provisioned; the approved remote targets are ${approvedRemoteDatabases
+          .map((database) => database.name)
+          .join(", ")}; nothing was written`,
+      );
+    }
+    throw new ProvisioningAbort(
+      "unapproved-database",
+      `${name || "(no name)"} is not an approved remote target; nothing was written`,
+    );
+  }
+  const normalized = databaseId.trim().toLowerCase();
+  if (!uuidPattern.test(normalized)) {
+    throw new ProvisioningAbort(
+      "invalid-database-id",
+      `--expect-database-id must be a lowercase UUID recorded for ${approved.name}`,
+    );
+  }
+  if (normalized !== approved.databaseId) {
+    throw new ProvisioningAbort(
+      "database-id-mismatch",
+      `${approved.name} is recorded as ${approved.databaseId}, saw ${normalized}; nothing was written`,
+    );
+  }
+  return approved;
+}
+
+/**
+ * Remote writes are opt-in: `--remote` must name an approved database with
+ * `--database` **and** its recorded UUID with `--expect-database-id`. A name
+ * alone, a UUID alone, or a pair that does not match is refused. The local
+ * database keeps its existing default.
  */
 export function selectProvisioningTarget(
   argv: string[],
 ): ProvisioningSelection {
   const remote = argv.includes("--remote");
+  const nameIndex = argv.indexOf("--database");
+  const name = nameIndex === -1 ? undefined : argv[nameIndex + 1];
+  if (nameIndex !== -1 && (!name || name.startsWith("--"))) {
+    throw new ProvisioningAbort(
+      "missing-database-name",
+      "--database requires the recorded name of the target database",
+    );
+  }
   const idIndex = argv.indexOf("--expect-database-id");
   const expected = idIndex === -1 ? undefined : argv[idIndex + 1];
   if (idIndex !== -1 && (!expected || expected.startsWith("--"))) {
     throw new ProvisioningAbort(
       "missing-database-id",
-      "--expect-database-id requires the recorded certpath-admin UUID",
+      "--expect-database-id requires the UUID recorded for --database",
     );
   }
   if (!remote) {
@@ -115,24 +198,31 @@ export function selectProvisioningTarget(
         "--expect-database-id only applies to --remote provisioning",
       );
     }
+    if (name) {
+      throw new ProvisioningAbort(
+        "unexpected-database-name",
+        "--database only applies to --remote provisioning",
+      );
+    }
     return { kind: "local", databaseName: localStaffDatabaseName };
+  }
+  if (!name) {
+    throw new ProvisioningAbort(
+      "missing-database-name",
+      "--remote requires --database <recorded database name> together with --expect-database-id <recorded database UUID>",
+    );
   }
   if (!expected) {
     throw new ProvisioningAbort(
       "missing-database-id",
-      "--remote requires --expect-database-id <recorded certpath-admin UUID>",
+      "--remote requires --expect-database-id <UUID recorded for --database>; a name on its own is not a target",
     );
   }
-  if (!uuidPattern.test(expected.toLowerCase())) {
-    throw new ProvisioningAbort(
-      "invalid-database-id",
-      "--expect-database-id must be a lowercase UUID",
-    );
-  }
+  const approved = resolveRemoteDatabase(name, expected);
   return {
     kind: "remote",
-    databaseName: remoteStaffDatabaseName,
-    expectedDatabaseId: expected.toLowerCase(),
+    databaseName: approved.name,
+    expectedDatabaseId: approved.databaseId,
   };
 }
 
@@ -148,9 +238,13 @@ export function pinRemoteTarget(
   if (!selection.expectedDatabaseId) {
     throw new ProvisioningAbort(
       "missing-database-id",
-      "the verified certpath-admin UUID is unavailable; refusing to write",
+      "the verified database UUID is unavailable; refusing to write",
     );
   }
+  const approved = resolveRemoteDatabase(
+    selection.databaseName,
+    selection.expectedDatabaseId,
+  );
   if (!configPath) {
     throw new ProvisioningAbort(
       "missing-pinned-config",
@@ -159,8 +253,8 @@ export function pinRemoteTarget(
   }
   return {
     kind: "remote",
-    databaseName: selection.databaseName,
-    expectedDatabaseId: selection.expectedDatabaseId,
+    databaseName: approved.name,
+    expectedDatabaseId: approved.databaseId,
     bindingName: pinnedDatabaseBinding,
     configPath,
   };
@@ -237,14 +331,16 @@ async function runCounts(
 }
 
 /**
- * Fail closed unless the CLI is authenticated to the Certpath account and
- * `certpath-admin` currently resolves to the exact recorded UUID. This is the
- * only name-based lookup in the whole run.
+ * Fail closed unless the CLI is authenticated to the Certpath account and the
+ * named database currently resolves to the exact UUID recorded for it. This is
+ * the only name-based lookup in the whole run, and the pair is re-resolved
+ * against the allowlist first so a hand-built target cannot skip the check.
  */
 export async function assertRemoteTarget(
   run: WranglerRunner,
-  expectedDatabaseId: string,
+  database: ApprovedRemoteDatabase,
 ): Promise<void> {
+  const approved = resolveRemoteDatabase(database.name, database.databaseId);
   const identity = parseJson(await run(["whoami", "--json"]), "wrangler whoami");
   const accounts = (identity as { accounts?: { id?: string; name?: string }[] })
     .accounts;
@@ -266,19 +362,22 @@ export async function assertRemoteTarget(
   }
 
   const info = parseJson(
-    await run(["d1", "info", remoteStaffDatabaseName, "--json"]),
+    await run(["d1", "info", approved.name, "--json"]),
     "wrangler d1 info",
   ) as { uuid?: string; name?: string };
-  if (info.name !== remoteStaffDatabaseName) {
+  if (info.name !== approved.name) {
     throw new ProvisioningAbort(
       "wrong-database-name",
-      `expected database ${remoteStaffDatabaseName}, saw ${info.name ?? "none"}; nothing was written`,
+      `expected database ${approved.name}, saw ${info.name ?? "none"}; nothing was written`,
     );
   }
-  if (typeof info.uuid !== "string" || info.uuid.toLowerCase() !== expectedDatabaseId) {
+  if (
+    typeof info.uuid !== "string" ||
+    info.uuid.toLowerCase() !== approved.databaseId
+  ) {
     throw new ProvisioningAbort(
       "wrong-database-id",
-      `expected database ${expectedDatabaseId}, saw ${info.uuid ?? "none"}; nothing was written`,
+      `expected database ${approved.databaseId}, saw ${info.uuid ?? "none"}; nothing was written`,
     );
   }
 }
