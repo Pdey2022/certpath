@@ -6,16 +6,27 @@
 // guard still cannot upload. `deploy` itself is never spawned by this suite.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { CliError } from "./lib/d1-targets.mjs";
+import { CliError, deployEnv } from "./lib/d1-targets.mjs";
+import {
+  describeMigrationGate,
+  exitCodeForAction,
+  parseMigrationsList,
+  planMigrationGate,
+} from "./lib/migration-gate.mjs";
 import {
   STAGING_PILOT_FLAGS,
   assertStagingDeployConfig,
-  deployEnv,
   readStagingGeneratedConfig,
   wranglerArgs,
 } from "./lib/staging-deploy.mjs";
@@ -37,6 +48,9 @@ function stagingConfig() {
       PILOT_EVENTS_ENABLED: "false",
       PILOT_SERVER_EVENTS_ENABLED: "false",
       PILOT_EVENTS_RETENTION_ENABLED: "false",
+      // The publish job stamps this before it deploys; the guard refuses an
+      // artefact without it, because then the run cannot be tied to a commit.
+      DEPLOYED_COMMIT: "280d53b",
     },
     d1_databases: [
       {
@@ -97,8 +111,15 @@ function runCli(directory, args, envOverrides = {}) {
   // deleted, because a value inherited from the developer's shell would make
   // every deploy case refuse with account_env_mismatch, and a test that passes
   // only on a clean machine is not a test. The account cases set it explicitly.
+  // The legacy key/email pair, an API-base override and the token are cleared
+  // too: an invalid token is the second lock, so a deploy row that reached a
+  // spawn could not authenticate instead of uploading.
   const env = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CI: "1" };
   delete env.CLOUDFLARE_ACCOUNT_ID;
+  delete env.CLOUDFLARE_API_KEY;
+  delete env.CLOUDFLARE_EMAIL;
+  delete env.CLOUDFLARE_API_BASE_URL;
+  env.CLOUDFLARE_API_TOKEN = "certpath-test-token-not-a-credential";
   Object.assign(env, envOverrides);
   const result = spawnSync(process.execPath, [CLI, ...args], {
     cwd: directory,
@@ -227,6 +248,17 @@ test("the staging deploy guard refuses every artefact that is not the staging bu
     {
       code: "staging_pilot_flag_missing",
       config: withoutVar("PILOT_SERVER_EVENTS_ENABLED"),
+    },
+    {
+      // The publish jobs stamp DEPLOYED_COMMIT before deploying. An artefact
+      // without it is one this pipeline did not produce, and the docs' promise
+      // that every publish stamps the commit would be false.
+      code: "staging_deploy_stamp_missing",
+      config: withoutVar("DEPLOYED_COMMIT"),
+    },
+    {
+      code: "staging_deploy_stamp_missing",
+      config: withVars({ DEPLOYED_COMMIT: "not-a-commit" }),
     },
   ];
 
@@ -527,6 +559,7 @@ test("the guard helper names each refusal code and returns what it verified", ()
       PILOT_SERVER_EVENTS_ENABLED: "false",
       PILOT_EVENTS_RETENTION_ENABLED: "false",
     },
+    stamp: "280d53b",
     allowPilotFlags: false,
   });
 
@@ -560,3 +593,380 @@ test("the guard helper names each refusal code and returns what it verified", ()
     "true",
   );
 });
+
+// ---------------------------------------------------------------------------
+// Continuous deployment schema gate (scripts/migration-gate.mjs and
+// scripts/lib/migration-gate.mjs).
+//
+// Staging D1 sits at 22 applied migrations while `main` carries 23, so the
+// publish job must stop instead of deploying code ahead of its schema. These
+// rows are the gate's rules; the CLI rows below prove the refusals happen
+// before Wrangler is spawned, so no case here reaches the network. The real
+// `wrangler d1 migrations list --remote` output the parser is written for was
+// captured from `certpath-learner-staging` on 19 November 2026.
+// ---------------------------------------------------------------------------
+
+const GATE_CLI = fileURLToPath(
+  new URL("./migration-gate.mjs", import.meta.url),
+);
+const ACCOUNT_ID = "ef67137c4d1556f7f51f1cb3f1f420f3";
+
+function runGate(args, envOverrides = {}) {
+  // Same hermetic parent as runCli: a stored account or credential must not
+  // change which refusal a case exercises.
+  const env = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0", CI: "1" };
+  delete env.CLOUDFLARE_ACCOUNT_ID;
+  delete env.CLOUDFLARE_API_KEY;
+  delete env.CLOUDFLARE_EMAIL;
+  delete env.CLOUDFLARE_API_BASE_URL;
+  env.CLOUDFLARE_API_TOKEN = "certpath-test-token-not-a-credential";
+  Object.assign(env, envOverrides);
+  const result = spawnSync(process.execPath, [GATE_CLI, ...args], {
+    cwd: fileURLToPath(new URL(".", import.meta.url)),
+    encoding: "utf8",
+    env,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return {
+    status: result.status,
+    output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+  };
+}
+
+test("the schema gate reads the pending table and the clean line, and refuses anything else", () => {
+  // The exact shape `wrangler d1 migrations list certpath-learner-staging
+  // --remote` printed for the deferred 0023.
+  const pendingOutput = [
+    " ⛅️ wrangler 4.160.0 (update available 4.165.0)",
+    "───────────────────────────────────────────────",
+    "Resource location: remote ",
+    "",
+    "Migrations to be applied:",
+    "┌──────────────────────────────┐",
+    "│ Name                         │",
+    "├──────────────────────────────┤",
+    "│ 0023_staff_second_factor.sql │",
+    "└──────────────────────────────┘",
+  ].join("\n");
+  assert.deepEqual(parseMigrationsList(pendingOutput), {
+    pending: ["0023_staff_second_factor.sql"],
+    clean: false,
+  });
+
+  // Two pending files are both named, and a repeated row is not counted twice.
+  const two = parseMigrationsList(
+    [
+      "Migrations to be applied:",
+      "┌──────────────────────────────────┐",
+      "│ Name                             │",
+      "├──────────────────────────────────┤",
+      "│ 0022_pilot_events_retention.sql  │",
+      "│ 0023_staff_second_factor.sql     │",
+      "│ 0023_staff_second_factor.sql     │",
+      "└──────────────────────────────────┘",
+    ].join("\n"),
+  );
+  assert.deepEqual(two.pending, [
+    "0022_pilot_events_retention.sql",
+    "0023_staff_second_factor.sql",
+  ]);
+
+  // Wrangler's clean line.
+  assert.deepEqual(
+    parseMigrationsList("✅ No migrations to apply!"),
+    { pending: [], clean: true },
+  );
+
+  // Colour codes must not hide a row.
+  assert.deepEqual(
+    parseMigrationsList("\u001b[1m│ 0023_staff_second_factor.sql │\u001b[0m").pending,
+    ["0023_staff_second_factor.sql"],
+  );
+  // A banner alone is not evidence of anything.
+  assert.throws(
+    () => parseMigrationsList("Migrations to be applied:"),
+    (error) =>
+      error instanceof CliError && error.code === "migrations_list_unparsed",
+  );
+  // The clean line beside a pending row is contradictory, not resolvable.
+  assert.throws(
+    () =>
+      parseMigrationsList(
+        `${pendingOutput}\n✅ No migrations to apply!`,
+      ),
+    (error) =>
+      error instanceof CliError && error.code === "migrations_list_ambiguous",
+  );
+});
+
+test("the schema gate plans skip for staging and abort for production, and refuses a pending file this commit does not carry", () => {
+  const available = ["0022_pilot_events_retention.sql", "0023_staff_second_factor.sql"];
+
+  assert.deepEqual(
+    planMigrationGate({ pending: [], available, mode: "skip" }),
+    { action: "deploy", pending: [] },
+  );
+  assert.deepEqual(
+    planMigrationGate({
+      pending: ["0023_staff_second_factor.sql"],
+      available,
+      mode: "skip",
+    }),
+    { action: "skip", pending: ["0023_staff_second_factor.sql"] },
+  );
+  assert.deepEqual(
+    planMigrationGate({
+      pending: ["0023_staff_second_factor.sql"],
+      available,
+      mode: "abort",
+    }),
+    { action: "abort", pending: ["0023_staff_second_factor.sql"] },
+  );
+
+  // Exit codes are the workflow contract; the workflow reads 3 as "do not
+  // deploy", so a rename here would silently deploy or fail the build.
+  assert.equal(exitCodeForAction("deploy"), 0);
+  assert.equal(exitCodeForAction("skip"), 3);
+  assert.equal(exitCodeForAction("abort"), 4);
+
+  assert.throws(
+    () => planMigrationGate({ pending: [], available, mode: "apply" }),
+    (error) => error instanceof CliError && error.code === "gate_mode_unknown",
+  );
+  assert.throws(
+    () => planMigrationGate({ pending: [], available: [], mode: "skip" }),
+    (error) => error instanceof CliError && error.code === "migrations_dir_empty",
+  );
+  // The database wants a migration this commit does not have: the schema is
+  // from another revision, so neither skip nor abort is enough - it refuses.
+  assert.throws(
+    () =>
+      planMigrationGate({
+        pending: ["0099_from_the_future.sql"],
+        available,
+        mode: "skip",
+      }),
+    (error) => error instanceof CliError && error.code === "migration_not_in_repo",
+  );
+});
+
+test("the schema gate notice names the pending file and says nothing was deployed", () => {
+  const skipped = describeMigrationGate({
+    action: "skip",
+    pending: ["0023_staff_second_factor.sql"],
+    database: "certpath-learner-staging",
+  });
+  assert.match(skipped.notice, /^::notice title=Staging deploy skipped::/);
+  assert.match(skipped.notice, /0023_staff_second_factor\.sql/);
+  assert.match(skipped.notice, /not deployed/);
+  assert.match(skipped.summary, /Staging deploy skipped/);
+  assert.match(skipped.summary, /\| `0023_staff_second_factor\.sql` \|/);
+
+  const aborted = describeMigrationGate({
+    action: "abort",
+    pending: ["0023_staff_second_factor.sql"],
+    database: "certpath-pilot",
+  });
+  assert.match(aborted.notice, /^::error title=Production deploy aborted::/);
+  assert.match(aborted.summary, /nothing was deployed/);
+});
+
+test("the schema gate CLI refuses before Wrangler is spawned", () => {
+  // A missing account assertion is a usage error: an unpinned remote read could
+  // be about another account entirely.
+  const unpinned = runGate([
+    "--config",
+    "wrangler.staging.jsonc",
+    "--database",
+    "certpath-learner-staging",
+    "--mode",
+    "skip",
+  ]);
+  assert.equal(unpinned.status, 2, unpinned.output);
+  assert.match(unpinned.output, /error missing_option: --expect-account is required/);
+  assert.doesNotMatch(unpinned.output, /⛅/);
+
+  // A mistyped option is refused, not ignored.
+  const mistyped = runGate(
+    [
+      "--config",
+      "wrangler.staging.jsonc",
+      "--database",
+      "certpath-learner-staging",
+      "--mode",
+      "skip",
+      "--expect-acount",
+      ACCOUNT_ID,
+    ],
+    { CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+  );
+  assert.equal(mistyped.status, 2, mistyped.output);
+  assert.match(mistyped.output, /error unknown_argument: /);
+  assert.doesNotMatch(mistyped.output, /⛅/);
+
+  // A disagreement between --expect-account and the environment is refused
+  // rather than resolved in Wrangler's favour.
+  const mismatch = runGate(
+    [
+      "--config",
+      "wrangler.staging.jsonc",
+      "--database",
+      "certpath-learner-staging",
+      "--mode",
+      "skip",
+      "--expect-account",
+      ACCOUNT_ID,
+    ],
+    { CLOUDFLARE_ACCOUNT_ID: "00000000000000000000000000000000" },
+  );
+  assert.equal(mismatch.status, 1, mismatch.output);
+  assert.match(mismatch.output, /error account_env_mismatch: /);
+  assert.doesNotMatch(mismatch.output, /⛅/);
+
+  // The gate must read the database it is about to gate: asking it about the
+  // pilot database with the staging config is refused before the network.
+  const wrongDatabase = runGate(
+    [
+      "--config",
+      "wrangler.staging.jsonc",
+      "--database",
+      "certpath-pilot",
+      "--mode",
+      "skip",
+      "--expect-account",
+      ACCOUNT_ID,
+    ],
+    { CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+  );
+  assert.equal(wrongDatabase.status, 1, wrongDatabase.output);
+  assert.match(wrongDatabase.output, /error database_mismatch: /);
+  assert.doesNotMatch(wrongDatabase.output, /⛅/);
+
+  // The pilot database is still the all-zero placeholder, so there is nothing
+  // to compare: a production deploy is refused rather than shipped blind.
+  const notProvisioned = runGate(
+    [
+      "--config",
+      "wrangler.pilot.jsonc",
+      "--database",
+      "certpath-pilot",
+      "--mode",
+      "abort",
+      "--expect-account",
+      ACCOUNT_ID,
+    ],
+    { CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+  );
+  assert.equal(notProvisioned.status, 1, notProvisioned.output);
+  assert.match(notProvisioned.output, /error database_not_provisioned: /);
+  assert.doesNotMatch(notProvisioned.output, /⛅/);
+});
+
+test("the schema gate refuses a config that compares a different migrations directory", (t) => {
+  // Wrangler prints "No migrations to apply!" relative to the config's own
+  // migrations_dir. A config pointing elsewhere would give a clean line for a
+  // chain this repository does not review, and the gate would pass a deploy
+  // whose real migration is pending - so the directory is checked before the
+  // read. The fixture is otherwise a valid target (real id, right database), so
+  // the row fails if the directory rule is removed.
+  const directory = mkdtempSync(path.join(tmpdir(), "certpath-gate-config-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "wrangler.staging.jsonc");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      name: "learner-auth-staging",
+      d1_databases: [
+        {
+          binding: "DB",
+          database_name: "certpath-learner-staging",
+          database_id: "c52e398f-4280-40a6-8244-854186dc6ef2",
+          migrations_dir: "../somewhere-else",
+        },
+      ],
+    }),
+  );
+
+  const result = runGate(
+    [
+      "--config",
+      file,
+      "--database",
+      "certpath-learner-staging",
+      "--mode",
+      "skip",
+      "--expect-account",
+      ACCOUNT_ID,
+    ],
+    { CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+  );
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.output, /error migrations_dir_mismatch: /);
+  assert.match(result.output, /somewhere-else/);
+  assert.doesNotMatch(result.output, /⛅/);
+});
+
+// The publish jobs stamp the deployed commit into the generated config they
+// deploy. The value becomes a public Worker var, so the rule that only a hex
+// commit may be stamped is asserted here: without it, a mistyped CI variable
+// (a token, an account id) would be shipped to the Worker as a var.
+test("the deploy stamp writes DEPLOYED_COMMIT and refuses anything that is not a commit", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "certpath-stamp-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "wrangler.json");
+  writeFileSync(
+    file,
+    JSON.stringify({ name: "certpath-site", vars: { INDEXING_ENABLED: "true" } }),
+  );
+
+  assert.equal(
+    runStamp([file, "--commit", "280d53b"]).status,
+    0,
+  );
+  const stamped = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(stamped.name, "certpath-site");
+  assert.equal(stamped.vars.DEPLOYED_COMMIT, "280d53b");
+  assert.equal(stamped.vars.INDEXING_ENABLED, "true");
+
+  // A value that is not a commit never reaches the artefact. The account id
+  // is the interesting row: it is 32 hex characters, so a length-only rule
+  // would have shipped it as the deployed commit.
+  for (const [commit, expected, marker] of [
+    ["ef67137c4d1556f7f51f1cb3f1f420f3", 1, "commit_invalid"],
+    ["zzzzzzz", 1, "commit_invalid"],
+    ["280d53", 1, "commit_invalid"],
+    ["", 2, "missing_option_value"],
+  ]) {
+    const result = runStamp([file, "--commit", commit]);
+    assert.equal(result.status, expected, result.output);
+    assert.match(result.output, new RegExp(`error ${marker}: `));
+  }
+  const absent = runStamp([file]);
+  assert.equal(absent.status, 1, absent.output);
+  assert.match(absent.output, /error commit_invalid: /);
+  assert.equal(
+    JSON.parse(readFileSync(file, "utf8")).vars.DEPLOYED_COMMIT,
+    "280d53b",
+  );
+
+  // An artefact that names no Worker is not the build's output.
+  writeFileSync(file, JSON.stringify({ vars: {} }));
+  const unnamed = runStamp([file, "--commit", "280d53b"]);
+  assert.equal(unnamed.status, 1, unnamed.output);
+  assert.match(unnamed.output, /error config_unparsed: /);
+});
+
+function runStamp(args, envOverrides = {}) {
+  const env = { ...process.env, NO_COLOR: "1", CI: "1" };
+  delete env.DEPLOYED_COMMIT;
+  Object.assign(env, envOverrides);
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./stamp-deployed-commit.mjs", import.meta.url)), ...args],
+    { encoding: "utf8", env },
+  );
+  return {
+    status: result.status,
+    output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+  };
+}

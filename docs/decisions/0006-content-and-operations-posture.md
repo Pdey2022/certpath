@@ -22,9 +22,12 @@ tester-only.
   prohibited by the certification bodies' terms and is a legal risk, not a style
   preference. A short written content policy must exist before the first author
   starts.
-- **Author != reviewer** is enforced in the database, not only the UI, because
-  self-authored content without a second pair of eyes is where answer-key drift
-  lives.
+- **Author != reviewer** is required: self-authored content without a second
+  pair of eyes is where answer-key drift lives. It is intended as a database
+  guarantee, not a UI convention, but as of November 2026 it is **not enforced**
+  — `content_reviews` records the reviewer without comparing it with the
+  revision's author (see Consequences). The pilot's documented self-review
+  exception is a concession on top of that gap, not a relaxation of the rule.
 - English only at launch. The content model stays text-in/text-out with no locale
   baked into keys, so translation is later a data task, not a migration.
 - **Text only**: no images or diagrams at launch, so no object storage is
@@ -69,8 +72,15 @@ tester-only.
 
 - ~1,200 authored and reviewed items across two exams is the longest lead time in
   the plan; it must start in parallel with Phase 1, not after it.
-- The editorial pipeline (draft, review, publish, retire) already exists and is
-  the mechanism for enforcing author != reviewer.
+- The editorial pipeline (draft, review, publish, retire) already exists, but it
+  does **not** enforce author != reviewer. `content_reviews` records the reviewer
+  separately from the publisher, and neither the schema nor `recordQuestionReview`
+  requires the reviewer to differ from the revision's author. Requiring an
+  independent reviewer is a separate policy decision that needs its own
+  migration.
+- The CISSP pilot runs under a documented self-review exception: the owner
+  authors that bank and is its only reviewer. It is a pilot concession, not a
+  change to the guarantees above, and it does not extend to any future bank.
 - Email-dependent features (magic links, verification, renewal reminders) remain
   fake-inbox only until a provider is chosen and email is enabled.
 - Funnel instrumentation is a Phase 5 deliverable, before any pricing test runs.

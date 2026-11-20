@@ -1,0 +1,206 @@
+name: Deploy production
+
+# Production is manual on purpose (docs/deployments.md). This workflow has no
+# push, pull_request or schedule trigger, so no merge can reach it; a human
+# dispatches it, types the target's Worker name, and a required reviewer on the
+# protected `production` environment approves it.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: What to deploy
+        required: true
+        type: choice
+        options:
+          - app
+          - site
+      confirm:
+        description: Type the Worker name to confirm (certpath-pilot or certpath-site)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# One deploy per target at a time, across both workflows. The group names are
+# the same strings ci.yml uses for the same Worker, so a manual site dispatch
+# cannot race a merge that is publishing certpath-site: it queues behind it
+# (or ahead of it) instead of deploying at the same moment.
+concurrency:
+  group: ${{ inputs.target == 'site' && 'deploy-certpath-site' || 'deploy-certpath-pilot' }}
+  cancel-in-progress: false
+
+jobs:
+  # Production deploys go through the same single gate as every other change.
+  # It runs before the protected environment is entered, so the reviewer
+  # approves a commit that already passed.
+  verify:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the append-only check below needs the merge base with
+          # main, which a depth-1 clone cannot compute.
+          fetch-depth: 0
+      # The same rule ci.yml enforces, for the dispatch case. On the only ref
+      # that can deploy (main) the merge base equals HEAD, so this diff is empty
+      # by construction; main is protected by ci.yml's push event and by branch
+      # protection. What this step actually covers is a non-main dispatch, which
+      # runs verify and then skips the deploy: such a branch may add migrations
+      # but may not modify, delete or rename one that has landed.
+      - name: Migration history is append-only
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          base_sha="$(git rev-parse origin/main)"
+          git cat-file -e "${base_sha}^{commit}"
+          merge_base="$(git merge-base "$base_sha" HEAD)"
+          echo "append-only check: production dispatch, base ${base_sha}, merge-base ${merge_base}"
+          if git diff --diff-filter=MDR --exit-code "$merge_base" -- 'db/migrations/*.sql'; then
+            echo "db/migrations is append-only: no migration was modified, deleted or renamed"
+          else
+            echo "::error::db/migrations is append-only: the migration(s) above were modified, deleted or renamed relative to ${merge_base}. Add the next unused number instead."
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: echo "CERTPATH_NODE22_PATH=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --include=optional
+      - run: npm run verify
+
+  deploy:
+    needs: verify
+    # main only. A dispatch from a branch runs verify and then skips this job:
+    # production ships what is on main (docs/deployments.md), and making a
+    # non-main production deploy possible is an owner decision, not a default.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Protected environment: required reviewers and any deployment-branch
+    # restriction live here, in repository settings (docs/deployments.md).
+    environment: production
+    env:
+      EXPECTED_ACCOUNT_ID: ef67137c4d1556f7f51f1cb3f1f420f3
+      PRODUCTION_DATABASE: certpath-pilot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --include=optional
+      - name: Confirm the target
+        env:
+          TARGET: ${{ inputs.target }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            site) worker=certpath-site ;;
+            app) worker=certpath-pilot ;;
+            *)
+              echo "::error title=Unknown target::${TARGET} is not a target this workflow deploys"
+              exit 1
+              ;;
+          esac
+          if [ "$CONFIRM" != "$worker" ]; then
+            echo "::error title=Confirmation does not name the target::Type the target's Worker name (${worker}) into the confirm input; got ${CONFIRM:-nothing}."
+            exit 1
+          fi
+          echo "WORKER=$worker" >> "$GITHUB_ENV"
+      - name: Record the deployed commit
+        run: echo "DEPLOYED_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - name: Require Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          failed=0
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error title=CLOUDFLARE_API_TOKEN is missing::Create the repository secret CLOUDFLARE_API_TOKEN (Workers Scripts:Edit and D1:Read for the Certpath account; the pipeline never applies a migration, so it does not need D1:Edit). See docs/deployments.md."
+            failed=1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "::error title=CLOUDFLARE_ACCOUNT_ID is missing::Create the repository secret CLOUDFLARE_ACCOUNT_ID with the Certpath account id ${EXPECTED_ACCOUNT_ID}. See docs/deployments.md."
+            failed=1
+          elif [ "$CLOUDFLARE_ACCOUNT_ID" != "$EXPECTED_ACCOUNT_ID" ]; then
+            echo "::error title=CLOUDFLARE_ACCOUNT_ID is not the Certpath account::The secret holds an account id that is not ${EXPECTED_ACCOUNT_ID}; this workflow only deploys to the Certpath account."
+            failed=1
+          fi
+          exit "$failed"
+      # Same schema gate as staging, with the opposite outcome: a human is
+      # watching, so a pending migration aborts the dispatch (exit 4) instead of
+      # skipping it. Nothing is ever applied from here.
+      - name: Migration gate
+        if: inputs.target == 'app'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node apps/web/scripts/migration-gate.mjs \
+            --config wrangler.pilot.jsonc \
+            --database "$PRODUCTION_DATABASE" \
+            --mode abort \
+            --expect-account "$EXPECTED_ACCOUNT_ID"
+      # The public site carries no D1 binding, so there is no schema to gate;
+      # the step above is the only difference between the two targets.
+      - name: Build certpath-site
+        if: inputs.target == 'site'
+        run: npm run build:site
+      - name: Build certpath-pilot
+        if: inputs.target == 'app'
+        run: npm run build:pilot
+      - name: Stamp DEPLOYED_COMMIT into the deploy artefact
+        run: node apps/web/scripts/stamp-deployed-commit.mjs apps/web/build/server/wrangler.json
+      - name: Deploy certpath-site
+        if: inputs.target == 'site'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy:site
+      # The pilot path carries the same account assertion as staging: the script
+      # refuses to deploy without --expect-account and refuses an environment
+      # that disagrees, so the pin is not only the workflow's environment check.
+      # The root script is an `npm run --workspace` hop, and npm would swallow
+      # the flag on the way through; naming the workspace forwards it.
+      - name: Deploy certpath-pilot
+        if: inputs.target == 'app'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy:pilot --workspace @certpath/web -- --expect-account "$EXPECTED_ACCOUNT_ID"
+      - name: Deployment status
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Read through the environment, never interpolated into the script:
+          # a dispatch input is untrusted text.
+          TARGET: ${{ inputs.target }}
+        run: |
+          echo "DEPLOYED_COMMIT=${DEPLOYED_COMMIT}"
+          cd apps/web
+          case "$TARGET" in
+            site) config=wrangler.site.jsonc ;;
+            app) config=wrangler.pilot.jsonc ;;
+            *)
+              echo "::error title=Unknown target::${TARGET} is not a target this workflow deploys"
+              exit 1
+              ;;
+          esac
+          node ../../node_modules/wrangler/bin/wrangler.js deployments status -c "$config"
+      - name: Record the deployment
+        if: always()
+        run: |
+          {
+            echo "## Production deploy"
+            echo ""
+            echo "- target: \`${WORKER:-unknown}\`"
+            echo "- commit: \`${DEPLOYED_COMMIT:-unknown}\`"
+            echo "- status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

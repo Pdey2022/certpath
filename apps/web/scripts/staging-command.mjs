@@ -3,10 +3,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CliError } from "./lib/d1-targets.mjs";
+import {
+  CliError,
+  deployEnv,
+  describeAccountPin,
+} from "./lib/d1-targets.mjs";
 import {
   assertStagingDeployConfig,
-  deployEnv,
   parseDeployOptions,
   readStagingGeneratedConfig,
   wranglerArgs,
@@ -114,20 +117,14 @@ async function main() {
     for (const [name, value] of Object.entries(verified.flags)) {
       console.log(`Verified ${name}=${JSON.stringify(value)}`);
     }
+    // The stamp the publish job wrote; the pilot CLI prints the same line.
+    console.log(`Verified DEPLOYED_COMMIT=${verified.stamp}`);
     if (verified.allowPilotFlags) {
       console.log(
         "Pilot flag override: --allow-pilot-flags (the flags above are not asserted false)",
       );
     }
-    if (account.expectAccount) {
-      console.log(
-        `Account: CLOUDFLARE_ACCOUNT_ID pinned to ${account.expectAccount} for this run`,
-      );
-    } else {
-      console.log(
-        "Account: not asserted (no --expect-account and CLOUDFLARE_ACCOUNT_ID unset; Wrangler uses its stored selection)",
-      );
-    }
+    console.log(describeAccountPin(account));
 
     const result = spawnSync(
       process.execPath,

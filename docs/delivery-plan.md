@@ -44,8 +44,15 @@ English. This is the longest lead time in the plan (~1,200 items for two exams)
 and the real launch blocker. It runs alongside Phases 1-4 and must not wait for
 a milestone gate.
 
-Author != reviewer is enforced in the database; the content policy (original
-work, no live-exam reconstruction) is a prerequisite for the first author.
+Author != reviewer is **not** enforced in the database. `content_reviews` stores
+the reviewer separately from the publisher, and nothing in the schema or in
+`recordQuestionReview` requires a reviewer to differ from the author of the
+revision; an independent-review requirement is a separate policy decision with
+its own migration. The content policy (original work, no live-exam
+reconstruction) remains a prerequisite for the first author.
+
+The CISSP pilot is a documented exception: the owner authors that bank and is
+its only reviewer ([decisions](decisions/0006-content-and-operations-posture.md)).
 
 ## Definition of done (every phase)
 

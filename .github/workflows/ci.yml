@@ -57,3 +57,180 @@ jobs:
           cache: npm
       - run: npm ci --include=optional
       - run: npm run verify
+
+  # Continuous deployment (docs/deployments.md). Two tiers move on every merge
+  # to main, and only then: a pull request or a manual dispatch builds and
+  # verifies but deploys nothing. Production is a separate, manual workflow
+  # (deploy-production.yml) that cannot be reached from a push.
+  publish-site:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # One deploy at a time per target: two merges in a row queue instead of
+    # racing, and an in-flight deploy is never cancelled by a later one.
+    concurrency:
+      group: deploy-certpath-site
+      cancel-in-progress: false
+    env:
+      EXPECTED_ACCOUNT_ID: ef67137c4d1556f7f51f1cb3f1f420f3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --include=optional
+      - name: Record the deployed commit
+        run: echo "DEPLOYED_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      # Cloudflare credentials are repository secrets the owner creates once.
+      # Absent, the job must say which one and stop before touching anything.
+      - name: Require Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          failed=0
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error title=CLOUDFLARE_API_TOKEN is missing::Create the repository secret CLOUDFLARE_API_TOKEN (Workers Scripts:Edit and D1:Read for the Certpath account; the pipeline never applies a migration, so it does not need D1:Edit). See docs/deployments.md."
+            failed=1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "::error title=CLOUDFLARE_ACCOUNT_ID is missing::Create the repository secret CLOUDFLARE_ACCOUNT_ID with the Certpath account id ${EXPECTED_ACCOUNT_ID}. See docs/deployments.md."
+            failed=1
+          elif [ "$CLOUDFLARE_ACCOUNT_ID" != "$EXPECTED_ACCOUNT_ID" ]; then
+            echo "::error title=CLOUDFLARE_ACCOUNT_ID is not the Certpath account::The secret holds an account id that is not ${EXPECTED_ACCOUNT_ID}; this workflow only deploys to the Certpath account."
+            failed=1
+          fi
+          exit "$failed"
+      - name: Build the public site
+        run: npm run build:site
+      - name: Stamp DEPLOYED_COMMIT into the deploy artefact
+        run: node apps/web/scripts/stamp-deployed-commit.mjs apps/web/build/server/wrangler.json
+      - name: Deploy certpath-site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy:site
+      # The commit var is the provenance; this prints the deployment record it
+      # belongs to, so a log reader can tie the two together.
+      - name: Deployment status
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "DEPLOYED_COMMIT=${DEPLOYED_COMMIT}"
+          cd apps/web
+          node ../../node_modules/wrangler/bin/wrangler.js deployments status -c wrangler.site.jsonc
+      - name: Record the deployment
+        if: always()
+        run: |
+          {
+            echo "## Public site published"
+            echo ""
+            echo "- target: \`certpath-site\`"
+            echo "- commit: \`${DEPLOYED_COMMIT:-unknown}\`"
+            echo "- status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-staging:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-learner-auth-staging
+      cancel-in-progress: false
+    env:
+      EXPECTED_ACCOUNT_ID: ef67137c4d1556f7f51f1cb3f1f420f3
+      STAGING_DATABASE: certpath-learner-staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --include=optional
+      - name: Record the deployed commit
+        run: echo "DEPLOYED_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - name: Require Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          failed=0
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error title=CLOUDFLARE_API_TOKEN is missing::Create the repository secret CLOUDFLARE_API_TOKEN (Workers Scripts:Edit and D1:Read for the Certpath account; the pipeline never applies a migration, so it does not need D1:Edit). See docs/deployments.md."
+            failed=1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "::error title=CLOUDFLARE_ACCOUNT_ID is missing::Create the repository secret CLOUDFLARE_ACCOUNT_ID with the Certpath account id ${EXPECTED_ACCOUNT_ID}. See docs/deployments.md."
+            failed=1
+          elif [ "$CLOUDFLARE_ACCOUNT_ID" != "$EXPECTED_ACCOUNT_ID" ]; then
+            echo "::error title=CLOUDFLARE_ACCOUNT_ID is not the Certpath account::The secret holds an account id that is not ${EXPECTED_ACCOUNT_ID}; this workflow only deploys to the Certpath account."
+            failed=1
+          fi
+          exit "$failed"
+      # The schema gate: never deploy staging code ahead of its schema, and
+      # never apply a migration from a deploy job. A pending migration is a
+      # deliberate, visible skip (exit 3), not a red build: the site job is
+      # still allowed to publish, and the summary names the pending file.
+      - name: Migration gate
+        id: gate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set +e
+          node apps/web/scripts/migration-gate.mjs \
+            --config wrangler.staging.jsonc \
+            --database "$STAGING_DATABASE" \
+            --mode skip \
+            --expect-account "$EXPECTED_ACCOUNT_ID"
+          status=$?
+          set -e
+          case "$status" in
+            0) echo "deploy=true" >> "$GITHUB_OUTPUT" ;;
+            3) echo "deploy=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$status" ;;
+          esac
+      - name: Deploy skipped
+        if: steps.gate.outputs.deploy != 'true'
+        run: |
+          echo "learner-auth-staging was not deployed because the migration gate found a pending migration. Nothing was applied. See the job summary."
+      - name: Build the staging Worker
+        if: steps.gate.outputs.deploy == 'true'
+        run: npm run build:staging
+      - name: Stamp DEPLOYED_COMMIT into the deploy artefact
+        if: steps.gate.outputs.deploy == 'true'
+        run: node apps/web/scripts/stamp-deployed-commit.mjs apps/web/build/server/wrangler.json
+      # The account is asserted on the command line, not inherited: the script
+      # refuses to deploy without it, and the environment above must agree.
+      - name: Deploy learner-auth-staging
+        if: steps.gate.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        # The root script is itself an `npm run --workspace` hop, and npm would
+        # swallow `--expect-account` on the way through. Naming the workspace
+        # with `--` forwards the flag to `apps/web/scripts/staging-command.mjs`.
+        run: npm run deploy:staging --workspace @certpath/web -- --expect-account "$EXPECTED_ACCOUNT_ID"
+      - name: Deployment status
+        if: steps.gate.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "DEPLOYED_COMMIT=${DEPLOYED_COMMIT}"
+          cd apps/web
+          node ../../node_modules/wrangler/bin/wrangler.js deployments status -c wrangler.staging.jsonc
+      - name: Record the deployment
+        if: steps.gate.outputs.deploy == 'true'
+        run: |
+          {
+            echo "## Staging Worker published"
+            echo ""
+            echo "- target: \`learner-auth-staging\`"
+            echo "- commit: \`${DEPLOYED_COMMIT:-unknown}\`"
+            echo "- status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

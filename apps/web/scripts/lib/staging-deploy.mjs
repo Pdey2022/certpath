@@ -12,11 +12,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import {
   CliError,
-  assertExpectedAccountEnv,
+  DEPLOYED_COMMIT_PATTERN,
   idClass,
-  normalizeAccountId,
   normalizeDatabaseId,
-  wranglerEnv,
 } from "./d1-targets.mjs";
 
 export const STAGING_CONFIG_SUFFIX = "/wrangler.staging.jsonc";
@@ -36,6 +34,7 @@ export const STAGING_PILOT_FLAGS = Object.freeze([
   "PILOT_SERVER_EVENTS_ENABLED",
   "PILOT_EVENTS_RETENTION_ENABLED",
 ]);
+
 
 /**
  * Parse the arguments of `deploy` / `dry-run`. Unknown arguments are refused
@@ -70,65 +69,6 @@ export function parseDeployOptions(argv) {
     );
   }
   return options;
-}
-
-/**
- * The child environment for Wrangler, and the account the run is pinned to.
- *
- * Wrangler resolves the target account from the config, then
- * `CLOUDFLARE_ACCOUNT_ID`, then a stored selection. An id that is only in the
- * operator's shell therefore wins over anything the operator believes they
- * selected, and the deploy lands in that account — bound to a database id that
- * does not exist there.
- *
- * `deploy` is the one irreversible action here, so it always requires the id:
- * with `requireAccount` the flag is mandatory even when the environment is
- * silent, because a silent environment means Wrangler's stored selection decides
- * where the Worker and its cron are created. `dry-run` uploads nothing, so it
- * may omit the flag and then reports that the account was not asserted.
- *
- * When an id is supplied it must agree with the environment, and the child gets
- * it pinned (`wranglerEnv`), which removes both fallbacks. The rule and its
- * helpers are the ones `d1-account-preflight.mjs` already uses.
- */
-export function deployEnv({
-  parentEnv = {},
-  expectAccount = null,
-  requireAccount = false,
-}) {
-  const envAccountId = normalizeAccountId(parentEnv.CLOUDFLARE_ACCOUNT_ID);
-  const expected = normalizeAccountId(expectAccount);
-
-  if (expected === "") {
-    if (requireAccount) {
-      const environment = envAccountId
-        ? ` CLOUDFLARE_ACCOUNT_ID is set to ${envAccountId}; that is not a source of truth, but it is the value to confirm: pass it as --expect-account once you have checked it is the Certpath account.`
-        : " With CLOUDFLARE_ACCOUNT_ID unset Wrangler falls back to its stored selection, which is not an assertion about anything.";
-      throw new CliError(
-        "account_not_asserted",
-        `deploy must name the account it writes to: pass --expect-account <account id>.${environment} A deploy creates the Worker and its cron, so it is the one action here that cannot be undone by re-running it.`,
-        2,
-      );
-    }
-    if (envAccountId !== "") {
-      throw new CliError(
-        "account_env_mismatch",
-        `CLOUDFLARE_ACCOUNT_ID is set to ${envAccountId} and no --expect-account was given; Wrangler prefers the environment variable, so the run could land in an account nobody asserted. Pass --expect-account <account id> (or unset the variable) and run again`,
-        1,
-      );
-    }
-    // Nothing to pin and nothing to contradict — a `dry-run`, which uploads
-    // nothing and says on stdout that the account was not asserted.
-    return { env: { ...parentEnv }, expectAccount: null, envAccountId: null };
-  }
-
-  // Refuses account_env_mismatch when the environment variable disagrees.
-  assertExpectedAccountEnv({ expectAccount: expected, envAccountId });
-  return {
-    env: wranglerEnv({ parentEnv, expectAccount: expected }),
-    expectAccount: expected,
-    envAccountId: envAccountId === "" ? null : envAccountId,
-  };
 }
 
 /**
@@ -302,12 +242,26 @@ export function assertStagingDeployConfig(
     flags[name] = value;
   }
 
+  // The publish job stamps the deployed commit before it deploys
+  // (stamp-deployed-commit.mjs). An artefact without a commit-shaped stamp means
+  // that step was skipped, and the docs' promise that every publish stamps
+  // DEPLOYED_COMMIT would be false for this run.
+  const stamp = vars["DEPLOYED_COMMIT"];
+  if (typeof stamp !== "string" || !DEPLOYED_COMMIT_PATTERN.test(stamp)) {
+    throw new CliError(
+      "staging_deploy_stamp_missing",
+      `The generated staging config carries DEPLOYED_COMMIT ${JSON.stringify(stamp ?? null)}; the publish job stamps the deployed commit before it deploys, and an artefact without one cannot be tied to a commit`,
+      1,
+    );
+  }
+
   return {
     worker: generatedConfig.name,
     database: databaseName,
     binding,
     schedule: [...schedule],
     flags,
+    stamp,
     allowPilotFlags,
   };
 }
