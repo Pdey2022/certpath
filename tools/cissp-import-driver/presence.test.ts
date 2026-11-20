@@ -167,6 +167,51 @@ test("a record with exactly one of the two ids is a corrupt checkpoint", async (
   assert.equal(reader.calls.length, 0);
 });
 
+test("a dropped id, an empty id or a record with no ids is a corrupt checkpoint", async () => {
+  // A hand-edited checkpoint can lose a field entirely. `undefined === null` is
+  // false, so a null-vs-undefined comparison would call the record complete and
+  // hand out `questionId: undefined`, which JSON.stringify then drops. A record
+  // with neither id is the same class: no writer produces one and nothing can
+  // repair it, so it is not a reason to ask the server.
+  const reader = paged([]);
+  for (const patched of [
+    { questionId: undefined },
+    { questionId: "" },
+    { revisionId: undefined },
+    { revisionId: "" },
+    { questionId: null, revisionId: null },
+  ] as Array<Partial<QuestionRecord>>) {
+    await expectCode(
+      () =>
+        resolveUnitPresence(
+          input({
+            rows: rows(1),
+            questions: [{ ...record("cissp-1"), ...patched } as QuestionRecord],
+            readPage: reader.readPage,
+          }),
+        ),
+      "CHECKPOINT_INVALID",
+    );
+  }
+  assert.equal(reader.calls.length, 0);
+});
+
+test("a unit that names the same key twice is a validation bug, not an absent row", async () => {
+  const reader = paged([]);
+  await expectCode(
+    () =>
+      resolveUnitPresence(
+        input({
+          rows: [{ key: "cissp-1", domainKey: "cissp-d1", topicKey: "cissp-d1-topic-1" },
+            { key: "cissp-1", domainKey: "cissp-d1", topicKey: "cissp-d1-topic-1" }],
+          readPage: reader.readPage,
+        }),
+      ),
+    "DUPLICATE_QUESTION_KEY",
+  );
+  assert.equal(reader.calls.length, 0);
+});
+
 test("a key recorded under another unit is a corrupt checkpoint", async () => {
   const reader = paged([]);
   await expectCode(
@@ -183,15 +228,18 @@ test("a key recorded under another unit is a corrupt checkpoint", async () => {
 });
 
 test("two local rows and three found on page three come back in row order", async () => {
+  // The local rows sit at positions 2 and 4, so an implementation that returned
+  // the order in which ids were *found* (local first, then the walk) would come
+  // back as 2, 4, 1, 3, 5. Only the rebuild from row order passes.
   const reader = paged(
     [
-      // Decoys whose ids sort first, so the three exact rows are on page three.
+      // Decoys whose ids sort first, so the three server rows are on page three.
       item("cissp-100"),
       item("cissp-101"),
       item("cissp-102"),
       item("cissp-103"),
+      item("cissp-1"),
       item("cissp-3"),
-      item("cissp-4"),
       item("cissp-5"),
     ],
     { limit: 3 },
@@ -199,7 +247,7 @@ test("two local rows and three found on page three come back in row order", asyn
   const presence = await resolveUnitPresence(
     input({
       rows: rows(5),
-      questions: [record("cissp-1"), record("cissp-2")],
+      questions: [record("cissp-2"), record("cissp-4")],
       readPage: reader.readPage,
     }),
   );
@@ -211,7 +259,7 @@ test("two local rows and three found on page three come back in row order", asyn
   );
   assert.deepEqual(
     presence.kind === "all" ? presence.ids.map((entry) => entry.source) : [],
-    ["checkpoint", "checkpoint", "server", "server", "server"],
+    ["server", "checkpoint", "server", "checkpoint", "server"],
   );
   assert.equal(reader.calls.length, 3);
 });

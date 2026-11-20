@@ -4,37 +4,50 @@ import type { TaxonomyIdMap } from "./transform.ts";
 import { DriverError } from "./errors.ts";
 
 /**
- * Presence: does the server hold this row of a unit?
+ * Presence: does the server hold this row of a unit, and is it this pipeline's
+ * content?
  *
  * Two sources, in this order, and never a third.
  *
- * 1. **The checkpoint.** A `questions[]` record whose `questionId` *and*
- *    `revisionId` are both set is proof the row exists. Both ids are written
- *    only from a server answer to a preview or a confirm, `questions_immutable_delete`
- *    (`0003_versioned_content.sql`) aborts every `DELETE FROM questions`, and
- *    `questions_immutable_update` forbids changing a question's id or key. A
- *    recorded id therefore cannot go missing and cannot come to mean another
- *    question: presence is monotone, so the local answer needs no request and
- *    has no expiry.
+ * 1. **The checkpoint.** A `questions[]` record carrying both a `questionId`
+ *    and a `revisionId` is proof the row exists. Both ids are written only from
+ *    a server answer — a confirm's positional arrays, or the listing read below
+ *    — `questions_immutable_delete` (`0003_versioned_content.sql`) aborts every
+ *    `DELETE FROM questions`, and `questions_immutable_update` forbids changing
+ *    a question's id or key. A recorded id therefore cannot go missing and
+ *    cannot come to mean another question: presence is monotone, so the local
+ *    answer needs no request and has no expiry.
  *
  *    `state` and `inFlight` must not gate that answer. `state` is workflow
  *    progress and `inFlight` is an intent about a *revision* mutation; neither
  *    can remove a row. Reading them here would call a published question
  *    "absent" and would re-read rows the server already has.
  *
- *    A record with exactly one of the two ids set is not a partial fact, it is
- *    a corrupted checkpoint: no writer produces it. That stops the run with
- *    `CHECKPOINT_INVALID` instead of falling back to the server, because a
- *    hand-edited id would otherwise let the driver adopt a question it never
- *    created.
+ *    A record that does not carry both ids is not a partial fact, it is a
+ *    corrupted checkpoint: no writer produces one, and one cannot be repaired
+ *    (`addQuestions` refuses a key that is already present with different ids).
+ *    That stops the run with `CHECKPOINT_INVALID` instead of falling back to the
+ *    server, because a hand-edited id would otherwise let the driver adopt a
+ *    question it never created. `null`, `undefined` and `""` are all "absent",
+ *    so a checkpoint with a dropped field cannot pass for a complete record.
  *
  * 2. **The server**, only for rows the checkpoint cannot answer. One exhaustive
  *    listing of the row's own topic - `domainId`, `topicId`, `limit`, `cursor`
  *    - following `nextCursor` to `null`, comparing `questionKey` by exact
  *    string. Not `search`: that is `LIKE '%…%'` over the key *or* the stem,
- *    ordered by `question.id`, so an exact key can sit on page seven behind
- *    `cissp-120`, `cissp-112` and any stem that quotes the key. A substring
- *    match is never the row and an unread page is not evidence.
+ *    ordered by `question.id`, so a `cissp-12` probe also matches `cissp-120`
+ *    and any stem that quotes it, a `cissp-1` probe also matches `cissp-112`,
+ *    and an exact key can sit past the first page. A substring match is never
+ *    the row and an unread page is not evidence.
+ *
+ *    The listing establishes that the key **exists**. It does not establish
+ *    that the row holds *these bytes*: `UNIQUE (certification_id,
+ *    question_key)` is scoped to the certification, so a row can be the same
+ *    key carrying an earlier source, and `revisionNumber === 1` is true of any
+ *    first revision, not only of one this pipeline wrote. Callers therefore
+ *    fail closed: an id this resolver took from the server is usable only when
+ *    this checkpoint previewed these exact bytes (`unit.importId !== null`).
+ *    That decision belongs to `openUnit`, which owns the unit record.
  *
  * Absence is therefore only ever concluded from an exhausted listing, and an
  * inconclusive read stops the run with `PRESENCE_UNKNOWN` rather than
@@ -84,7 +97,7 @@ export interface PresenceInput {
     topicId: string,
     cursor: string | null,
   ) => Promise<{ items: QuestionItem[]; nextCursor: string | null }>;
-  /** Injectable so a test can prove the bound bites. */
+  /** Injectable so a test can prove the bound bites. Test-only: production uses the default. */
   maxPagesPerTopic?: number;
   /**
    * The preview's `existing_question_key` issue count, on the preview-refused
@@ -98,6 +111,19 @@ export async function resolveUnitPresence(input: PresenceInput): Promise<UnitPre
   const { unit, rows } = input;
   if (rows.length === 0) {
     throw new DriverError("CHECKPOINT_INVALID", `unit ${unit} has no rows to resolve`);
+  }
+  // The row-order rebuild below is lossless only for unique keys. `validate.ts`
+  // rejects a duplicate, so anything else is an upstream bug and must not
+  // surface as a server-fact claim such as `PARTIAL_IMPORT`.
+  const unitKeys = new Set<string>();
+  for (const row of rows) {
+    if (unitKeys.has(row.key)) {
+      throw new DriverError(
+        "DUPLICATE_QUESTION_KEY",
+        `unit ${unit} names question ${row.key} more than once`,
+      );
+    }
+    unitKeys.add(row.key);
   }
   const maxPages = input.maxPagesPerTopic ?? DEFAULT_MAX_PAGES_PER_TOPIC;
   const recorded = new Map(input.questions.map((record) => [record.key, record]));
@@ -118,18 +144,29 @@ export async function resolveUnitPresence(input: PresenceInput): Promise<UnitPre
     }
     const questionId = record.questionId;
     const revisionId = record.revisionId;
-    if ((questionId === null) !== (revisionId === null)) {
+    const hasQuestion = typeof questionId === "string" && questionId.length > 0;
+    const hasRevision = typeof revisionId === "string" && revisionId.length > 0;
+    if (hasQuestion !== hasRevision) {
       throw new DriverError(
         "CHECKPOINT_INVALID",
         `question ${row.key} has exactly one of questionId and revisionId`,
       );
     }
-    if (questionId !== null && revisionId !== null) {
-      found.set(row.key, { key: row.key, questionId, revisionId, source: "checkpoint" });
+    if (hasQuestion && hasRevision) {
+      found.set(row.key, {
+        key: row.key,
+        questionId: questionId as string,
+        revisionId: revisionId as string,
+        source: "checkpoint",
+      });
       continue;
     }
-    // Both ids null: a record that has been started but never answered.
-    unknown.add(row.key);
+    // Neither id: a record nobody writes and nothing can repair, so it is not a
+    // reason to ask the server. See the module comment.
+    throw new DriverError(
+      "CHECKPOINT_INVALID",
+      `question ${row.key} is recorded with no server ids`,
+    );
   }
 
   // One traversal per (domain, topic) serves every unknown key in it, so a

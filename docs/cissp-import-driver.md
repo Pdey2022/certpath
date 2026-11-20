@@ -211,9 +211,10 @@ Per unit, in order, with no other work in between:
    else stops the run and prints the row/column issue list (codes only).
 2a. A refusal whose issues are **all** `existing_question_key` is not a content
    error — it means the server already holds every row of this unit. The driver
-   resolves the unit by presence (§Idempotency and resume → *Presence*) and,
-   when every row is established, records the ids and continues. Any other issue
-   code stops the run as before.
+   resolves the unit by presence (§Idempotency and resume → *Presence*) and, when
+   every row is established **and** these bytes were previewed by this
+   checkpoint, records the ids and continues. Any other issue code stops the run
+   as before; a row it cannot account for stops it with `EXISTING_KEYS`.
 3. Checkpoint `unit.state = "previewed"` with `importId`, then
    `POST /api/admin/content/certifications/:cid/import-previews/:importId/confirm`
    with `{}`. The body is empty by contract; the driver never sends rows.
@@ -401,7 +402,7 @@ and only records:
                "importId": null, "expiresAt": null } ],
   "questions": [ { "key": "cissp-1", "unit": 1,
                    "domainKey": "cissp-d1", "topicKey": "cissp-d1-risk-management",
-                   "questionId": null, "revisionId": null,
+                   "questionId": "…", "revisionId": "…",
                    "state": "pending|draft|submitted|approved|published",
                    "pointerVersion": null, "inFlight": null } ],
   "counters": { "requests": 0, "http5xx": 0, "conflicts": 0, "recoveries": 0 },
@@ -409,11 +410,15 @@ and only records:
 }
 ```
 
-`questions[]` is authoritative for presence: a non-null `questionId` means the
-row exists on the server and the driver will not re-read it. The file is
-therefore not a scratch log — hand-editing a `questionId` makes the driver adopt
-a question it never created and later publish it under the review note. Never
-edit it; discard it and start a new run against a new exam version instead.
+`questions[]` is authoritative for presence: a record carries **both** a
+`questionId` and a `revisionId`, written from a server answer, and both being
+present is proof the row exists on the server and the driver will not re-read
+it. A record missing either id is refused with `CHECKPOINT_INVALID` — no writer
+produces one and it cannot be repaired. The file is therefore not a scratch log:
+hand-editing a `questionId` makes the driver adopt a question it never created
+and later publish it under the review note. Never edit it; discard it and start
+a new run against a new exam version instead (with the caveat in
+§Idempotency and resume → *Replay* about what a new version can and cannot free).
 
 It never contains: a cookie, a CSRF token, a password, a TOTP code or seed, a
 recovery code, a stem, an option, an explanation, an answer key, or question
@@ -514,32 +519,42 @@ one question in a transitional state — never a silent gap.
 **Ambiguous confirm.** A confirm "may or may not have committed" on timeout,
 abort, or `5xx`. Resolution never guesses; it reads.
 
-**Presence: the checkpoint is the authority.** A `questions[]` record with a
-non-null `questionId` *and* `revisionId` is proof the row exists. Both ids are
-written only from a server answer to a preview or confirm, and
+**Presence: the checkpoint is the authority.** A `questions[]` record carrying
+both a `questionId` *and* a `revisionId` is proof the row exists. Both ids are
+written only from a server answer, and
 `questions_immutable_delete` makes a question undeletable, so a recorded id
 cannot go stale. Presence is therefore answered from the checkpoint with **no
 request**, whatever the record's `state` or `inFlight` says: `state` is workflow
 progress, `inFlight` is an intent about a revision mutation, and neither can
-remove a row. A record with exactly one of the two ids set is corrupt — the run
-stops with `CHECKPOINT_INVALID` instead of asking the server.
+remove a row. A record that does not carry both ids — a set one and an unset
+one, or neither — is corrupt, and the run stops with `CHECKPOINT_INVALID`
+instead of asking the server: no writer produces one, and one cannot be
+repaired, because a key already in the checkpoint cannot be re-recorded with
+different ids.
 
-The server is read **only** for rows the checkpoint cannot answer (no record, or
-`questionId: null`). That read has to be able to say "absent" honestly, so it is
-one exhaustive listing of the row's own topic, `GET …/questions?domainId=<row
+The server is read **only** for rows the checkpoint cannot answer (no record at
+all). That read has to be able to say "absent" honestly, so it is one exhaustive
+listing of the row's own topic, `GET …/questions?domainId=<row
 domain>&topicId=<row topic>&limit=50`, following `nextCursor` until it is `null`
 and comparing `questionKey` by exact string. It does not use `search`: `search`
-is `LIKE '%…%'` over question key *or* stem, ordered by `question.id`, so an
-exact key can sit on page seven behind `cissp-120`, `cissp-112` and a stem that
-quotes the key — the first page of fifty is not an answer, and a substring match
-is never the row. A missing `nextCursor` is a protocol error, not the end of the
-list. The walk is bounded at 40 pages per topic; hitting the bound stops the run
-with `PRESENCE_UNKNOWN`.
+is `LIKE '%…%'` over question key *or* stem, ordered by `question.id`, so a
+probe for `cissp-12` also matches `cissp-120` (and a probe for `cissp-1` matches
+`cissp-112`) and any stem that quotes the key — the first page of fifty is not
+an answer, and a substring match is never the row. A missing `nextCursor` is a
+protocol error, not the end of the list. The walk is bounded at 40 pages per
+topic; hitting the bound stops the run with `PRESENCE_UNKNOWN`.
 
-A question counts as present only when its key matches exactly **and** its
-current revision is revision 1 — the revision an import of these bytes creates.
-A key at a later revision stops the run with `PRESENCE_UNKNOWN`: present, but not
-provably the content the review note describes.
+The listing proves the key **exists**; it does not prove the row holds these
+bytes. `UNIQUE (certification_id, question_key)` is scoped to the
+**certification**, and `revisionNumber = 1` is true of any first revision, not
+only one this pipeline wrote. A key at a later revision therefore stops the run
+with `PRESENCE_UNKNOWN` (present, but not provably the content the review note
+describes), and — fail closed — an id taken from the listing is used only when
+this checkpoint previewed these exact bytes, which its own record says: the unit
+carries a non-null `importId`, and `reconcileUnits` clears it whenever a unit's
+bytes move. Without that `importId` the run stops with `EXISTING_KEYS` and names
+the unproven keys. An id the checkpoint itself recorded needs no such licence;
+it is this run's own answer.
 
 Absence never causes a create. The driver has no create path here; "absent" leads
 at most to retrying the same `importId` or re-previewing the same bytes, both of
@@ -549,8 +564,8 @@ Then decide:
 
 | Observed | Action |
 |---|---|
-| all N keys present, exact keys, current revision 1 | adopted: record `questionId`/`currentRevisionId`, unit `confirmed` |
-| some keys present, at least one established absent | **stop** with `PARTIAL_IMPORT` (should be impossible: confirm is one D1 batch) |
+| all N keys present, exact keys, current revision 1, and either recorded here or previewed here | adopted: record `questionId`/`currentRevisionId`, unit `confirmed` |
+| some keys present, at least one established absent | **stop** with `PARTIAL_IMPORT`. True of this driver's own confirm, which is one D1 batch; a concurrent writer or a different batch size could produce it legitimately |
 | none present, preview not expired | retry the same `importId` once (confirm is idempotent by id) |
 | none present, preview expired | re-preview the same bytes (new `importId`), then confirm |
 | the read cannot conclude, or a key sits at a later revision | **stop** with `PRESENCE_UNKNOWN` |
@@ -572,20 +587,44 @@ confirmation and on expiry, and its content is gone after that. The driver
 therefore never holds a preview across stages: preview and confirm are adjacent
 calls in the same unit.
 
-**Replay.** A stage 3 that is already complete is refused by the checkpoint
-(`beginStage` → `TRANSITION_INVALID`), not by the server; the operator is told
-the stage is done, and a fresh checkpoint against the same exam version is
-refused unless they explicitly start a new run against a new version.
+**Replay.** A stage 3 that is already complete never runs again. `runDriver`
+skips it before `beginStage` and logs
+`driver: stage upload is already complete; nothing to do`; the run costs **zero
+requests** and the operator is told the stage is done. (A direct call to
+`beginStage` would refuse with `TRANSITION_INVALID`, but the CLI never reaches
+it.) Under `--stage all`, stages 1 and 2 re-run — they are restartable reads and
+a file transform — and stages 3, 4 and 5 are each skipped the same way, so a
+completed import is a no-op apart from stage 1's reads.
+
+There is **no** automatic re-run against a version the server already holds, and
+nothing refuses a fresh checkpoint: a new state directory against the same exam
+version simply meets `existing_question_key` on every row, and — fail closed —
+cannot adopt them, because it never previewed those bytes. Wanting to re-import
+under keys the certification already holds has exactly two remedies: a new
+certification root, which is a platform-wide Global Admin act, or new question
+keys. A new **exam version** frees nothing, because
+`UNIQUE (certification_id, question_key)` is scoped to the certification.
 
 For an **incomplete** stage 3, a unit whose rows the server already holds is
-adopted rather than aborted. The checkpoint supplies the ids when it remembers
-them — this is the recovery after a stage-2 re-run reset the unit states but not
-the questions — and an exhaustive topic read supplies them otherwise. The run
-still stops with `EXISTING_KEYS` when a refusal for existing keys cannot be
-reconciled into a complete set at revision 1, with `PARTIAL_IMPORT` when the
-server holds some of the unit's keys and not the rest, and with
-`PRESENCE_UNKNOWN` when the refusal and the read disagree. The design behind
-this is in `docs/cissp-import-driver-presence.md`.
+adopted rather than aborted — but only on ids this checkpoint can account for.
+The checkpoint supplies them when it remembers them; this is the recovery after
+a stage-2 re-run reset the unit states but not the questions, and also after a
+crash between a preview and its confirm, where the unit still carries its
+`importId`. An exhaustive topic read may add ids only when that `importId` says
+these bytes were previewed here. The run stops with `EXISTING_KEYS` in exactly
+two situations: a refusal that mixes `existing_question_key` with another issue
+code, and rows the server holds whose ids would have to come from a listing this
+run is not entitled to trust. It stops with `PARTIAL_IMPORT` when the server
+holds some of the unit's keys and not the rest, and with `PRESENCE_UNKNOWN` when
+the refusal and the read disagree, or the read cannot conclude. The design
+behind this is in `docs/cissp-import-driver-presence.md`.
+
+**A partly-held unit is unrecoverable by the driver.** Questions cannot be
+deleted (`questions_immutable_delete`) and the remaining rows cannot be
+imported, because their keys already exist; so `PARTIAL_IMPORT` is a stop an
+operator has to resolve outside the driver — the same two remedies as above (a
+new certification root, or new keys). The code says what is true; the remedy is
+this paragraph.
 
 **Resume.** Stage 1 re-runs as pure reads plus skips. Stage 2 is a file
 transform and is recomputed idempotently from the converter output. Stage 3
@@ -754,6 +793,21 @@ mechanisation is honest about itself:
   re-verified. Its integrity is an operator responsibility, documented here and
   enforced only by the `CHECKPOINT_INVALID` refusal of an internally
   inconsistent record; one process per state directory is part of the contract.
+- **The driver will not adopt a row it cannot prove it imported.** A server id
+  from the topic listing is used only when this checkpoint previewed these exact
+  bytes (`unit.importId`). A fresh state directory against a version the server
+  already holds therefore stops with `EXISTING_KEYS`, even when every row is
+  plainly the same key at revision 1: the key is not the content, and
+  `UNIQUE (certification_id, question_key)` means "use a new exam version" frees
+  nothing. That is the owner's fail-closed decision, and its cost is that losing
+  a checkpoint loses the ability to resume that version without a new
+  certification root or new keys.
+- **A refusal's issue paths are echoed into the error.** `previewUnit`
+  interpolates the server-supplied `issue.path` into its message and
+  `rejectedError` joins `path:code` into `info`. That is safe only because the
+  Worker formats paths as `row.<n>.<column>`; a server that put content in a
+  path would have that content logged. Named here so the assumption is visible
+  rather than implied.
 
 ## Acceptance criteria
 
@@ -787,6 +841,9 @@ mechanisation is honest about itself:
     — in keys and in stems — an ambiguous confirm still adopts the exact rows by
     following `nextCursor`, and a key present only as a substring is never
     adopted.
+14. An id taken from the topic listing is adopted only when this checkpoint
+    previewed those bytes; without that, a fresh checkpoint against rows the
+    server already holds stops with `EXISTING_KEYS` and records nothing.
 
 ## Test plan
 
@@ -815,14 +872,19 @@ mechanisation is honest about itself:
   unexpired; `409` + none + expired → re-preview; `500` + all keys; `500` +
   none + unexpired → one retry then stop; partial keys → `PARTIAL_IMPORT`;
   `401`/`429` → stop, no retry.
-- Presence resolution: checkpoint-local hit with no request; half-set record
-  refused; mixed local/server in row order; decoys in keys and stems; missing
-  `nextCursor`; page bound → `PRESENCE_UNKNOWN`; later revision →
+- Presence resolution: checkpoint-local hit with no request; a record missing
+  either id refused; mixed local/server in row order; decoys in keys and stems;
+  missing `nextCursor`; page bound → `PRESENCE_UNKNOWN`; later revision →
   `PRESENCE_UNKNOWN`; refusal count greater than the read →
-  `PRESENCE_UNKNOWN`.
+  `PRESENCE_UNKNOWN`; a server-resolved id with no preview in this checkpoint →
+  `EXISTING_KEYS`.
 - Fixture fidelity: a 120-question topic sliced at `limit: 50` yields
   50 + 50 + 20 and a null cursor only on the last page. Without it the presence
   fakes can silently stop paginating and every presence test goes vacuous.
+- Secret hygiene at the artefact: a sentinel stem in the listing response and
+  sentinel password/TOTP values, then the checkpoint file and the collected log
+  lines are read and asserted not to contain any of them, alongside the stub's
+  cookie and CSRF token.
 - Publish decision table: `draft`/`submitted`/`approved` × publication
   `null`/ours/other-revision.
 - Secret hygiene: sentinel cookie, password and TOTP values; assert absence from
@@ -861,12 +923,12 @@ For a full 463-row run at batch size 5, from an empty certification:
 | Stage | Requests | Notes |
 |---|---:|---|
 | 0 | 0 | pure validation |
-| 1 | 57 | 4 reads + 4 creates + 8 domain POSTs + 8 topic-collection reads + 36 topic POSTs + 1 |
+| 1 | 61 | 4 auth (`signIn`, `csrf`, `mfa/verify`, `session`) + `certifications` list + `certifications` POST + `exam-versions` list + `exam-versions` POST + `domains` list + 8 domain POSTs + 8 topic lists + 36 topic POSTs |
 | 2 | 0 | file transform |
 | 3 | 186 | 93 units × (preview + confirm) |
 | 4 | 1 389 | 463 × (submit + review + publish) |
 | 5 | 5 | 463 published rows at 100 per export page |
-| **Total** | **≈1 637** | |
+| **Total** | **≈1 641** | |
 
 - 0.19% of the Free plan's 100 000 requests/day; peak per-invocation D1 queries
   is 21 (preview at 5 rows).
@@ -876,7 +938,17 @@ For a full 463-row run at batch size 5, from an empty certification:
 - Wall clock: at a 250 ms median round trip that is ~7 minutes; at 1 s, ~27
   minutes. The 8-hour assurance window covers either; the 10-minute preview TTL
   never binds because preview and confirm are adjacent.
-- A re-run after a complete import is 19 requests (adoption reads only) plus
-  whatever stage 5 needs.
-- Resume after any failure replays at most one unit (2 requests) plus one
+- **A completed import is not re-runnable against the same keys.** `--stage
+  upload` on a complete stage is skipped before `beginStage` and costs zero
+  requests (`driver: stage upload is already complete; nothing to do`).
+  `--stage all` after a complete import re-runs stages 1 and 2 only: stage 1 is
+  15 requests for this taxonomy (4 auth + 4 collection reads + 8 topic lists),
+  stage 2 is a file transform, and stages 3, 4 and 5 are each skipped the same
+  way — no adoption reads, and stage 5 is never reached. A fresh state
+  directory against the same exam version meets `existing_question_key` on every
+  row and cannot adopt, because it never previewed those bytes. The only
+  remedies for re-importing under existing keys are a new certification root or
+  new keys; a new exam version changes nothing, since
+  `UNIQUE (certification_id, question_key)` is scoped to the certification.
+- **Resume after any failure** replays at most one unit (2 requests) plus one
   question's chain (3 requests) plus one listing per affected topic.
