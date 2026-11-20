@@ -93,8 +93,10 @@ interface StubOptions extends ConfirmBehaviourOptions {
    * a read of any other topic sees.
    */
   omitFromListing?: { topicId: string; keys: readonly string[] };
-  /** Answers `500` on the k-th `GET …/questions` (1-based). */
+  /** Answers a mid-walk failure on the k-th `GET …/questions` (1-based). */
   failPageAt?: number;
+  /** The status that failure answers with. Defaults to `500`. */
+  failPageStatus?: number;
 }
 
 /** Every `GET …/questions` URL any stub issued, for the global `search` pin. */
@@ -272,7 +274,16 @@ function createStub(options: StubOptions = {}) {
       questionUrls.push(url);
       everyQuestionUrl.push(url);
       if (options.failPageAt === questionReads) {
-        return json({ error: { code: "service_unavailable", requestId: "stub-pages" } }, 500);
+        const status = options.failPageStatus ?? 500;
+        return json(
+          {
+            error: {
+              code: status === 429 ? "rate_limited" : "service_unavailable",
+              requestId: "stub-pages",
+            },
+          },
+          status,
+        );
       }
       const domainId = parsed.searchParams.get("domainId");
       const topicId = parsed.searchParams.get("topicId");
@@ -963,6 +974,54 @@ test("a mixed local and server unit with no preview refuses the server half", as
   assert.equal(stub.confirmCount, 0);
 });
 
+test("a mixed local and server unit adopts when this checkpoint previewed the bytes", async () => {
+  // The gate's second operand. Two rows are the checkpoint's own record, three
+  // would come from the listing, and the unit carries the importId that
+  // licenses them - so all five are adopted, in row order, from three pages.
+  const { harness, stub } = buildHarness(undefined, 5, { decoys: crowdingDecoys(115) });
+  const rows = ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"];
+  for (const key of rows) {
+    stub.seedQuestion({ key, questionId: `question-${key}`, revisionId: `revision-${key}` });
+  }
+
+  await runStages(harness, ["transform"]);
+  const resume = readCheckpoint(harness.stateDir)!;
+  resume.questions = rows.slice(0, 2).map((key) => ({
+    key,
+    unit: 1,
+    domainKey: "cissp-d1",
+    topicKey: "cissp-d1-topic-1",
+    questionId: `question-${key}`,
+    revisionId: `revision-${key}`,
+    state: "draft" as const,
+    pointerVersion: null,
+    inFlight: null,
+  }));
+  resume.units[0] = {
+    ...resume.units[0]!,
+    state: "previewed",
+    importId: "import-1",
+    expiresAt: NOW + 600_000,
+  };
+  saveCheckpoint(harness.checkpointPath, resume, undefined, NOW);
+
+  await runStages(harness, ["upload"]);
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 5);
+  assert.deepEqual(
+    checkpoint.questions.map((question) => question.key),
+    rows,
+  );
+  for (const question of checkpoint.questions) {
+    assert.equal(question.questionId, `question-${question.key}`);
+    assert.equal(question.revisionId, `revision-${question.key}`);
+  }
+  assert.equal(stub.questionReads, 3);
+  assert.equal(stub.confirmCount, 0);
+});
+
 test("a row the server holds only at a later revision stops with PRESENCE_UNKNOWN", async () => {
   // Present, but not provably the revision an import of these bytes creates:
   // adopting it would attach the review note to content this pipeline cannot
@@ -1093,6 +1152,34 @@ test("a listing that fails mid-walk stops with PROTOCOL_ERROR and records nothin
   assert.notEqual(checkpoint.units[0]!.state, "confirmed");
   assert.equal(checkpoint.questions.length, 0);
   assert.equal(checkpoint.lastError?.code, "PROTOCOL_ERROR");
+  // A 5xx on the walk is a server failure even though it is not a mutation, so
+  // it must be counted as one before PROTOCOL_ERROR propagates.
+  assert.equal(checkpoint.counters.http5xx, 1);
+  assert.equal(checkpoint.lastError?.status, 500);
+});
+
+test("a 429 mid-walk is RATE_LIMITED and is not counted as a server error", async () => {
+  // The other direction of the same guard: the increment must not fire for a
+  // status the client has its own code for, and must not double-count with the
+  // confirm that preceded it.
+  const { harness, stub } = buildHarness("confirm-409", 5, {
+    decoys: crowdingDecoys(60),
+    failPageAt: 1,
+    failPageStatus: 429,
+  });
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"], null),
+    (error: unknown) => error instanceof DriverError && error.code === "RATE_LIMITED",
+  );
+
+  assert.equal(stub.questionReads, 1);
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.counters.http5xx, 0);
+  assert.equal(checkpoint.lastError?.code, "RATE_LIMITED");
+  assert.equal(checkpoint.lastError?.status, 429);
 });
 
 test("the page bound stops the walk with PRESENCE_UNKNOWN instead of concluding absence", async () => {
@@ -1189,21 +1276,35 @@ test("no stem, cookie, CSRF token, password or TOTP code reaches the checkpoint 
   );
 
   const checkpointText = readFileSync(harness.checkpointPath, "utf8");
+  const manifestText = readFileSync(join(harness.stateDir, "upload-manifest.json"), "utf8");
   const transcript = lines.join("\n");
+  // The three artefacts acceptance criterion 6 names, all really written.
+  assert.equal(manifestText.includes("certpath-cissp-upload-manifest-v1"), true);
+  assert.equal(checkpointText.includes("cissp-1"), true);
+  // The sentinels were really consumed: a sign-in and a session read happened
+  // in the run that is being checked.
+  assert.equal(stub.calls.includes("POST /api/admin/auth/sign-in"), true);
+  assert.equal(stub.calls.includes("GET /api/admin/auth/session"), true);
   for (const needle of [stemSentinel, "stub-session", CSRF, passwordSentinel, totpSentinel]) {
     assert.equal(checkpointText.includes(needle), false, `the checkpoint contains ${needle}`);
+    assert.equal(manifestText.includes(needle), false, `the manifest contains ${needle}`);
     assert.equal(transcript.includes(needle), false, `the log contains ${needle}`);
   }
 });
 
-test("no question read ever carries `search`", () => {
+test("no question read ever carries `search`, and every one is scoped to a topic", () => {
   assert.equal(
     everyQuestionUrl.length > 0,
     true,
     "no question URL was recorded, so this pin would be vacuous",
   );
   for (const url of everyQuestionUrl) {
-    assert.equal(new URL(url).searchParams.has("search"), false, url);
+    const params = new URL(url).searchParams;
+    assert.equal(params.has("search"), false, url);
+    // The complementary claim: the read is a scoped listing, not a
+    // certification-wide crawl.
+    assert.equal(params.has("domainId"), true, url);
+    assert.equal(params.has("topicId"), true, url);
   }
 });
 

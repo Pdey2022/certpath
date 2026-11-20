@@ -233,7 +233,9 @@ test("two local rows and three found on page three come back in row order", asyn
   // back as 2, 4, 1, 3, 5. Only the rebuild from row order passes.
   const reader = paged(
     [
-      // Decoys whose ids sort first, so the three server rows are on page three.
+      // The ids interleave: `id-cissp-1` sorts before `id-cissp-100`, so the
+      // exact rows arrive one per page (cissp-1 on page 1, cissp-3 on page 2,
+      // cissp-5 on page 3) and three reads are unavoidable.
       item("cissp-100"),
       item("cissp-101"),
       item("cissp-102"),

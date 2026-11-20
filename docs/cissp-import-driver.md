@@ -387,7 +387,8 @@ and only records:
               "examVersionKey": "…", "examVersionId": "…" },
   "inputs": { "taxonomySha256": "…", "proseSha256": "…",
               "converterManifestSha256": "…", "uploadManifestSha256": "…",
-              "batchSize": 5, "converterDeclaredExamVersionId": "cissp-exam-v1" },
+              "batchSize": 5, "converterDeclaredExamVersionId": "cissp-exam-v1",
+              "unitLimit": null },
   "stages": { "taxonomy": "pending|in-progress|complete", "transform": "…",
               "upload": "…", "publish": "…", "verify": "…" },
   "taxonomy": {
@@ -398,7 +399,7 @@ and only records:
                    "domainKey": "cissp-d1", "order": 0 } ]
   },
   "units": [ { "unit": 1, "file": "upload-001.csv", "sha256": "…", "rows": 5,
-               "state": "pending|previewed|confirmed",
+               "state": "pending|previewing|previewed|confirmed",
                "importId": null, "expiresAt": null } ],
   "questions": [ { "key": "cissp-1", "unit": 1,
                    "domainKey": "cissp-d1", "topicKey": "cissp-d1-risk-management",
@@ -793,15 +794,22 @@ mechanisation is honest about itself:
   re-verified. Its integrity is an operator responsibility, documented here and
   enforced only by the `CHECKPOINT_INVALID` refusal of an internally
   inconsistent record; one process per state directory is part of the contract.
-- **The driver will not adopt a row it cannot prove it imported.** A server id
-  from the topic listing is used only when this checkpoint previewed these exact
-  bytes (`unit.importId`). A fresh state directory against a version the server
-  already holds therefore stops with `EXISTING_KEYS`, even when every row is
-  plainly the same key at revision 1: the key is not the content, and
+- **The driver will not adopt a row it cannot prove it previewed bytes for.** A
+  server id from the topic listing is used only when this checkpoint previewed
+  these exact bytes (`unit.importId`). A fresh state directory against a version
+  the server already holds therefore stops with `EXISTING_KEYS`, even when every
+  row is plainly the same key at revision 1: the key is not the content, and
   `UNIQUE (certification_id, question_key)` means "use a new exam version" frees
   nothing. That is the owner's fail-closed decision, and its cost is that losing
   a checkpoint loses the ability to resume that version without a new
   certification root or new keys.
+- **The licence is one-directional, and it leans on the single-writer
+  assumption.** It proves these bytes were *previewed here*; it does not prove
+  this pipeline created the row. The only construction that survives that gap is
+  a *concurrent* writer creating the same key between the preview and the
+  listing — which is why the assumption a few bullets above matters to this
+  claim and not only to pagination: one process per state directory, and the
+  driver is the only client that creates questions through this path.
 - **A refusal's issue paths are echoed into the error.** `previewUnit`
   interpolates the server-supplied `issue.path` into its message and
   `rejectedError` joins `path:code` into `info`. That is safe only because the
@@ -930,8 +938,8 @@ For a full 463-row run at batch size 5, from an empty certification:
 | 5 | 5 | 463 published rows at 100 per export page |
 | **Total** | **≈1 641** | |
 
-- 0.19% of the Free plan's 100 000 requests/day; peak per-invocation D1 queries
-  is 21 (preview at 5 rows).
+- 1.64% of the Free plan's 100 000 requests/day (1 641); peak per-invocation D1
+  queries is 21 (preview at 5 rows).
 - A reconcile costs nothing when the checkpoint holds every id, and one request
   per 50 questions of the affected topic otherwise; it never costs one request
   per key.

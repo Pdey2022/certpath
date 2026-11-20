@@ -120,8 +120,9 @@ which the server de-duplicates.
 | a key is present only at a later revision | `PRESENCE_UNKNOWN` |
 | a preview refusal named more existing keys than the read proves | `PRESENCE_UNKNOWN` |
 | a page's `nextCursor` is neither a string nor `null` | `PROTOCOL_ERROR` |
-| `401`/`403`/`429` mid-walk | `SESSION_LOST` / `RATE_LIMITED`, propagated |
-| `5xx` or a malformed body mid-walk | `PROTOCOL_ERROR`, propagated (and counted in `counters.http5xx`) |
+| `401`/`403`/`429` mid-walk | `SESSION_LOST` / `RATE_LIMITED`, propagated; not counted in `counters.http5xx` |
+| `5xx` mid-walk | `PROTOCOL_ERROR`, propagated, and counted in `counters.http5xx` |
+| a 2xx with an unusable body mid-walk | `PROTOCOL_ERROR`, propagated; not counted, because it carries no status |
 | some keys established present, at least one established absent | `PARTIAL_IMPORT` |
 | a refusal that mixes `existing_question_key` with another issue code | `EXISTING_KEYS` |
 | every row established, but some id would come from the listing and this checkpoint never previewed these bytes | `EXISTING_KEYS`, naming the unproven keys |
@@ -137,13 +138,17 @@ not conclude, and nothing is acted on.
 `noteStop` already writes the code to `checkpoint.lastError`, so the stop is
 visible on disk with no extra plumbing.
 
-**What the counters mean.** `counters.recoveries` counts recovery *paths* taken:
-one per create-or-adopt recovery, and one per unit presence resolve — including
-one that answers entirely from the checkpoint with no request, because the run
-did resume instead of stop. It does not count adopted rows or requests.
-`counters.http5xx` counts every `5xx` the run saw, including one that fails a
-presence walk, which is why the resolver's caller records it before letting the
-`PROTOCOL_ERROR` propagate.
+**What the counters mean.** `counters.recoveries` counts recovery *paths* taken,
+not adopted rows or requests: one per create-or-adopt recovery in
+`createWithRecovery`; one per presence resolve that returned a result, whether
+or not the caller then refused it (a resolve that throws does not count, and one
+that answers entirely from the checkpoint does); and one per publish-stage
+observation of a question whose mutation was in flight (`observeQuestion`).
+`counters.http5xx` counts a `5xx` seen on preview, confirm, submit, review or
+publish, and a `5xx` that fails a presence walk — which is why the resolver's
+caller records it before letting `PROTOCOL_ERROR` propagate. It does **not**
+count a `5xx` on a stage-1 taxonomy read, on authentication, or on the stage-4
+observation / stage-5 export reads.
 
 ## The two call sites
 
