@@ -153,7 +153,7 @@ Migrations are apply-only; rollback is a *disable*, exactly as `admin-capabiliti
 
 ## Out of scope / flagged as not covered by a product rule
 
-Proposed **ADR 0007 — Staff second factor, recovery and reset** covering: recovery-code count and format, reset authority, and the residual risk that a stolen ticket plus password can claim a first enrolment. `product-design.md` says only "both staff roles require MFA"; nothing in `product-design.md`, `build-plan.md`, `delivery-plan.md` or ADRs 0001–0006 covers recovery, lockout or MFA audit retention, so I am not deciding them (below).
+Recovery-code count and format, reset authority, and the residual risk that a stolen ticket plus password can claim a first enrolment are settled **in this record** — the recovery paragraph above and the owner decisions at the top — not in an ADR. **ADR 0007 is the public-repository ADR** ([`docs/decisions/0007-public-repository-and-licence.md`](decisions/0007-public-repository-and-licence.md)), not a staff-second-factor ADR: the "Proposed ADR 0007 — Staff second factor, recovery and reset" named in the original design was never written under that number, so this design record is the reference for those rules. `product-design.md` says only "both staff roles require MFA"; nothing in `product-design.md`, `build-plan.md`, `delivery-plan.md` or ADRs 0001–0007 covers recovery, lockout or MFA audit retention, so they stay recorded here and in the owner decisions above.
 
 ## Owner decisions required
 

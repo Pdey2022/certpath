@@ -529,8 +529,10 @@ All seven must hold. Any one missing is a stop, not a retry.
    Set-Location ..\..
    ```
 
-   `wrangler secret put` prompts for the value. **Neither secret is set today**,
-   and setting either is its own owner decision, not part of `deploy:staging`.
+   `wrangler secret put` prompts for the value. **Both secrets are set** on
+   `learner-auth-staging` (November 2026), and setting either is its own owner
+   decision, not part of `deploy:staging`. §Staff surface on staging lists the
+   four secrets the staff surface needs and the rule that keeps them distinct.
 
 6. **The three `PILOT_*` flags are `"false"`** in `apps/web/wrangler.staging.jsonc`,
    and so in the built copy. The guard asserts the built copy, which is what
@@ -539,6 +541,109 @@ All seven must hold. Any one missing is a stop, not a retry.
    `apps/web`; the flag is optional here but asserted when given) and printed the
    verified lines above, with the account line naming the id it pinned. It
    bundles locally and uploads nothing.
+
+### Staff surface on staging
+
+The staff surface (`/admin`, `/api/admin/*`, `/admin/auth/mfa/*`) needs six
+settings on `learner-auth-staging` before the first staff sign-in. Two are vars in
+[`apps/web/wrangler.staging.jsonc`](../apps/web/wrangler.staging.jsonc), so they
+ship with the deploy and are visible in a diff; four are hosted secrets. Per
+§Preconditions 5 above, every value here is a **hosted secret put with
+`wrangler secret put`** — **never a file and never an argument**: the CLI prompts
+for it, so it does not reach the shell history, a transcript, a script variable or
+a committed config.
+
+| Setting | Where it lives | What it does |
+|---|---|---|
+| `STAFF_MFA_MAX_AGE_MS` | var, `apps/web/wrangler.staging.jsonc` | `28800000` — 8 hours, one verification per staff session |
+| `STAFF_MFA_ALLOWED_METHODS` | var, `apps/web/wrangler.staging.jsonc` | `totp` — anything else, `tester-gate` included, is refused with `503`, not merely unused |
+| `CSRF_HMAC_SECRET` | hosted secret | HMACs CSRF tokens; under 32 bytes the staff configuration reads as absent and every staff route answers `503` |
+| `STAFF_RATE_LIMIT_HMAC_SECRET` | hosted secret | HMACs the rate-limit bucket digests, so no address or email is stored in the clear; under 32 bytes every staff route answers `503` |
+| `STAFF_MFA_SEAL_KEY` | hosted secret | AES-256-GCM key that encrypts each TOTP seed in `staff_totp_credentials` |
+| `ADMIN_TESTER_IPS` | hosted secret | the admin IP gate's allowlist (`apps/api/src/security/admin-gate.ts`) |
+
+```powershell
+Set-Location apps\web
+npx wrangler secret put CSRF_HMAC_SECRET -c wrangler.staging.jsonc
+npx wrangler secret put STAFF_RATE_LIMIT_HMAC_SECRET -c wrangler.staging.jsonc
+npx wrangler secret put STAFF_MFA_SEAL_KEY -c wrangler.staging.jsonc
+npx wrangler secret put ADMIN_TESTER_IPS -c wrangler.staging.jsonc
+Set-Location ..\..
+```
+
+1. **All four secrets are at least 32 random bytes, and all four are distinct.**
+   Generate each one separately. One value reused across two purposes means a
+   single disclosure is a break in both, and the four have different lifetimes:
+   the seal key must never change (below), the others may be rotated.
+2. **`ADMIN_TESTER_IPS` equals `STAGING_TESTER_IPS`.** The two gates read one
+   list each and nothing in code maps one name onto the other, so the same value
+   is written into both secrets, and both are updated **in the same session**
+   whenever the tester's egress address changes. The list is maintained twice on
+   purpose. Drift is an **outage, never wider access**: the staging gate
+   (`stagingTesterGate`, `apps/api/src/index.ts`) runs before routing on every
+   request, so an address missing from `STAGING_TESTER_IPS` answers `403` before
+   the admin gate is reached at all, and an address that passes staging but is
+   not on `ADMIN_TESTER_IPS` answers `403` from the admin gate (or `503` if that
+   secret is unset). **Why this is not code:** mapping one name onto the other —
+   reading `STAGING_TESTER_IPS` inside `adminTesterGate`, or having one secret
+   copy the other — would make a single list serve two gates and weaken the
+   documented guarantee that passing the staging gate is not the same permission
+   as reaching `/admin`. Two lists, one sitting, is the rule; do not "simplify"
+   it in `admin-gate.ts` or `staging-gate.ts`.
+3. **Set `STAFF_MFA_SEAL_KEY` before the first enrolment, then keep it.** It wraps
+   every TOTP seed. Changing or unsetting it makes `openTotpSeed`
+   (`apps/api/src/security/totp.ts`, called from
+   `apps/api/src/security/staff-mfa.ts`) return `null`, and the routes report that
+   as `400 invalid_code` — the same answer as a mistyped code, so the symptom
+   looks like a user who cannot type, not a key problem. Re-wrapping the row is
+   not available either: `staff_totp_credentials_secret_immutable`
+   (`db/migrations/0023_staff_second_factor.sql`) aborts any update of
+   `secret_ciphertext`, `secret_iv` or `key_version` ("a TOTP secret is replaced,
+   never rewritten"). Recovery is then a printed recovery code, or `staff:provision`
+   if every Global Admin is locked out — an owner-approved act, not a fix-up.
+4. **`ADMIN_TESTER_LOCAL` stays unset on staging.** With it set,
+   `readStaffSecurityConfiguration`
+   (`apps/api/src/security/staff-configuration.ts`) accepts an `http:` loopback
+   `PUBLIC_SITE_ORIGIN`, i.e. an origin check satisfiable by a local address on a
+   host real requests reach. Local development sets it in
+   `apps/web/.dev.vars.example`, which is not the staging Worker; it appears nowhere
+   in `apps/web/wrangler.staging.jsonc` and must not be added there or as a secret.
+5. **Two post-checks prove the admin gate still bites.** First, from an address
+   **not** on the list:
+
+   ```powershell
+   curl.exe -i https://learner-auth-staging.certpath.workers.dev/admin
+   ```
+
+   Expected `403`. Which gate answers depends on where the address stands: off
+   both lists, the staging gate refuses first (it wraps every request); on
+   `STAGING_TESTER_IPS` but not on `ADMIN_TESTER_IPS`, the admin gate refuses. A
+   `200` means a gate is not enforcing — stop and escalate; do not add an address
+   to make it pass. Then unset the admin list and read the same path, and one
+   deeper `/admin` path, again:
+
+   ```powershell
+   Set-Location apps\web
+   npx wrangler secret delete ADMIN_TESTER_IPS -c wrangler.staging.jsonc
+   Set-Location ..\..
+   curl.exe -i https://learner-auth-staging.certpath.workers.dev/admin
+   curl.exe -i https://learner-auth-staging.certpath.workers.dev/admin/content/certifications
+   ```
+
+   Expected `503` on both — unset closes the surface, it does not open it; the
+   gate covers every `/admin` path, page and API alike. Restore the secret **in the same
+   session** as the delete, to the value of `STAGING_TESTER_IPS` (point 2 above),
+   then repeat the first read and expect `403` again from the off-list address. A
+   staging that answers `503` to every `/admin` path is fail-closed, but it is not
+   ready to hand to a tester.
+
+The six settings make the surface reachable; they do not create an account. The
+two Global Admins and one Manager are created by `npm run staff:provision` against
+`certpath-learner-staging`, which requires the database name and the UUID recorded
+for it together — `--remote --database certpath-learner-staging
+--expect-database-id <the UUID in apps/web/wrangler.staging.jsonc>`. The allowlist
+and the guards are in `apps/api/src/staff-provisioning.ts`. That is a remote write
+and an owner-approved step, and its printed enrolment tickets are the only copy.
 
 ### Afterwards: what to check
 
