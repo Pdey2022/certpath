@@ -1,0 +1,29 @@
+Copyright (c) 2026 DeyLabs (deylabs.co.uk). All rights reserved.
+
+This repository is published for transparency and evaluation. It is not open
+source. Publication is subject to GitHub's Terms of Service, which permit any
+GitHub user to view this public repository and to fork it through GitHub.
+Nothing beyond that is granted: no licence and no other right to copy, modify,
+merge, publish, distribute, sublicense or sell any part of this repository is
+given by its publication.
+
+As a condition of using this repository's content, you may not use it to build,
+operate or train a competing product. This is a condition of use, not a
+separate right reserved by copyright: ideas and methods are not copyrightable,
+and nothing here claims otherwise.
+
+Content that carries its own `license_reference` is governed by that reference
+and not by this notice. The question importer records a `license_reference` per
+question, so a bank imported under another licence keeps that licence and is not
+claimed by this file.
+
+The CertPath name, its branding, and all question, explanation and study content
+it produces are likewise reserved. Any content that appears in this repository is
+the property of its respective owner.
+
+CISSP and CISM are trademarks of their respective owners. CertPath is independent
+and is not affiliated with or endorsed by the certification bodies.
+
+THE SOFTWARE AND DOCUMENTATION ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.

@@ -1,5 +1,10 @@
 # CertPath foundation
 
+> **All rights reserved.** Copyright (c) 2026 DeyLabs (deylabs.co.uk). This
+> repository is public for transparency and evaluation; it is not open source.
+> GitHub's Terms of Service let any GitHub user view this public repository and
+> fork it through GitHub — nothing beyond that is granted. See [LICENSE](LICENSE).
+
 This repository contains the CertPath prototype and the first protected
 untimed learner-practice slice. The public site is server-rendered with React
 Router on Cloudflare Workers. A Hono API is mounted at the same-origin `/api`
