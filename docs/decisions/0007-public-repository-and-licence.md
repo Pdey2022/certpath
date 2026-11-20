@@ -7,8 +7,8 @@
 ## Context
 
 Branch protection and repository rulesets — the features that make a required
-`verify` check, a linear `main` and a blocked force push real rather than
-conventions — are not available on GitHub's free plan for private repositories.
+`verify` check and a blocked force push real rather than conventions — are not
+available on GitHub's free plan for private repositories.
 They are available on the paid plan (Pro, roughly $4 per month at the published
 price) and on public repositories.
 
@@ -36,10 +36,12 @@ plan to clean it later.
 - The competing-product sentence is a **condition of use**, not a reserved
   copyright right: ideas and methods are not copyrightable, and the notice does
   not claim otherwise.
-- Content that carries its own `license_reference` is governed by **that**
-  reference, not by `LICENSE`. The importer records a `license_reference` per
-  question, so a future licensed bank keeps its own licence and is not silently
-  claimed by this file.
+- Content **imported from a third party** that carries its own
+  `license_reference` is governed by **that** reference, not by `LICENSE`. The
+  importer records a `license_reference` per question, so a future licensed bank
+  keeps its own licence and is not silently claimed by this file. The owner's own
+  bank carries `All rights reserved (owner-authored)` and is covered by
+  `LICENSE` like everything else here; the carve-out is for imported banks only.
 - The trademark disclaimer and the as-is paragraph stay.
 
 ### Done before publishing
@@ -49,24 +51,45 @@ plan to clean it later.
   was found were deliberate fakes: test fixtures and stub secrets that are not
   credentials anywhere, plus the public Cloudflare account id that the workflows
   already pin. Nothing secret had to be rewritten or rotated.
-- **Local agent checkpoints removed.** 139 local `refs/agents/*` refs were
-  deleted and pruned. They were never on `origin` — `git push --all` publishes
-  `refs/heads/*` only — but they existed in the working clone and were one
-  `git push --mirror` away from being published. `git fetch origin <sha>` for the
-  pruned commits failed, confirming GitHub never held them.
-- **Ignore rules checked for renames.** A study folder had been renamed once; the
-  `.gitignore` pattern covers the folder rather than one path, and the history
-  checks in `docs/deployments.md` now follow renames.
+- **Agent checkpoints are a standing check, not a one-off cleanup.** 139 local
+  `refs/agents/*` refs were deleted and pruned on 2026-11-20. They were never on
+  `origin` — `git push --all` publishes `refs/heads/*` only — but they existed in
+  the working clone and were one `git push --mirror` away from being published.
+  `git fetch origin <sha>` for the pruned commits failed, so they are **not
+  retrievable from GitHub by SHA now**; a SHA is served only while a ref reaches
+  it, so that shows they are gone, not that they were never there — the claim
+  rests on the refs having been local-only.
+  The harness recreates checkpoint refs every session, so the clone is not
+  permanently clean: at the time of writing 7 such refs exist (6 under
+  `refs/agents/` plus `refs/stash`). Before any publish,
+  `git for-each-ref refs/agents refs/stash` must print nothing. What makes the
+  current state safe is that the study file is **not reachable from any ref right
+  now** — `git rev-list --objects --all` returns no match — not the earlier
+  deletion.
+- **Ignore rules checked for renames.** A study folder had been renamed once, and
+  `git log --all -- <path>` alone would miss it under the old name. The
+  `.gitignore` pattern covers the folder rather than one path, and the two
+  complementary history checks in `docs/deployments.md` cover both questions:
+  `git rev-list --objects --all` lists every reachable object with the single
+  path it is first reached under, and `git log --all --full-history --
+  '*CISSP*'` matches the glob against each commit's tree. Neither follows a
+  rename by itself.
 
 ### Protections now in place
 
 - **`main` is protected**: the `verify` check is required in strict mode, and
   force pushes and branch deletions are blocked.
-- **Secret scanning and push protection** are enabled on the repository, so a
-  credential offered in a push is refused before it lands.
+- **Secret scanning and push protection** are enabled on the repository
+  (Settings → Code security, verified 2026-11-20). Push protection is not
+  absolute: it covers only the secret patterns GitHub recognises, and a writer
+  can bypass a block with a recorded reason. It is a backstop that catches the
+  common accident, not a guarantee, and it does not replace the audit above or
+  the push rule below.
 - **One push rule**, in [`docs/deployments.md`](../deployments.md)
   § *Pushing refs*: a named branch only; never `--all`, `--mirror`, `--tags` or
-  `--follow-tags`; check `--dry-run` and the object reachability first.
+  `--follow-tags`; check which refs and commits a push would send (`--dry-run`
+  plus `git log origin/<branch>..<branch>`), that `refs/agents` and `refs/stash`
+  are empty, and the object reachability first.
 
 ## Alternatives considered
 
@@ -94,6 +117,14 @@ plan to clean it later.
   price ladder (ADR 0003), the risk register and delivery plan
   (`docs/delivery-plan.md`), and the content gaps recorded in
   `docs/pilot-hardening.md`.
+- **The bank's composition is published.**
+  `tools/cissp-convert/taxonomy.json` carries the blueprint the import driver
+  uses, including per-domain and per-topic `expectedQuestions`: **484** in total,
+  **211** in Domain 1, and **171** mapped to the per-domain `general` topics.
+  Anyone reading the repository can see how the bank is built and where it is
+  thin (the gaps themselves are recorded in `docs/pilot-hardening.md`). The owner
+  accepted this: the numbers describe the exam's structure and the bank's shape,
+  not its questions.
 - **`main` cannot be rewritten.** A leaked object cannot be removed by force
   pushing a cleaned history; it would still be addressable by SHA, and forks
   would still hold it. Rotation, not history editing, is the response to a

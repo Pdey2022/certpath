@@ -4,10 +4,27 @@ How CertPath reaches Cloudflare Workers, what a merge to `main` does, and how
 to undo it. The pipeline is `.github/workflows/ci.yml` (continuous) and
 `.github/workflows/deploy-production.yml` (manual).
 
-The **first automatic deploy happens when the owner merges this change to
-`main`**: both publish jobs are guarded by `github.event_name == 'push' &&
-github.ref == 'refs/heads/main'`, so a pull request, a manual `CI` dispatch and
-this branch publish nothing.
+## The first live deploy (2026-11-20)
+
+The first merge to `main` ran the pipeline: the public site published, and the
+staging publish was deliberately gated. Run
+[44780344874](https://github.com/Pdey2022/certpath/actions/runs/44780344874) on
+commit `16247bf` ("CISSP import driver (Phase 3) and two-tier Cloudflare deploy
+pipeline (#184)"):
+
+| Job | Outcome |
+|---|---|
+| `verify` | success |
+| `publish-site` | **success** — `DEPLOYED_COMMIT=16247bf` was stamped into the artefact and verified in the log |
+| `publish-staging` | **success** — its deploy step was skipped by the schema gate, with a notice naming `0023_staff_second_factor.sql`; `learner-auth-staging` was not published |
+
+Live checks against `certpath-site` after the deploy: `/` 200 with the full
+server-rendered HTML, `/exams` 200, `/robots.txt` 200 (`Allow: /`,
+`Disallow: /app`, `Disallow: /admin`), `/sitemap.xml` 200.
+
+Both publish jobs are guarded by `github.event_name == 'push' &&
+github.ref == 'refs/heads/main'`, so a pull request or a manual `CI` dispatch
+publishes nothing.
 
 ## Two tiers
 
@@ -202,8 +219,8 @@ Where to read it:
 the workflow files were linted by hand when they were written.
 
 CI cannot prove a deploy: `npm run verify` runs no network command, and the
-publish jobs only run on a push to `main`. The first live proof was the first
-merge, and the first live deploy succeeded.
+publish jobs only run on a push to `main`. The first live deploy is recorded at
+the top of this document (run `44780344874`, commit `16247bf`).
 
 ## Pushing refs: never `--all`, `--mirror` or `--tags`
 
@@ -218,8 +235,8 @@ publishes refs nobody reviewed.
 
 | Command | What it actually publishes | Why it is prohibited |
 |---|---|---|
-| `git push --all` | every `refs/heads/*` — **not** `refs/agents/*`, which are not heads | every *unpublished local branch* in the clone, not the one you meant. This clone holds two: `backup/magic-link-pre-rebase` and `test/local-d1-learner-practice-mock` |
-| `git push --mirror` | every ref, and it **deletes** origin refs that are absent locally | it destroys as well as publishes: a ref that exists on `origin` but not locally is removed |
+| `git push --all` | every `refs/heads/*` — **not** `refs/agents/*` or `refs/stash`, which are not heads | every *unpublished local branch* in the clone, not the one you meant. At the time of writing this clone holds two: `backup/magic-link-pre-rebase` and `test/local-d1-learner-practice-mock` (`git for-each-ref --format='%(refname)' refs/heads` lists them all) |
+| `git push --mirror` | every ref — `refs/heads/*`, `refs/tags/*`, `refs/agents/*` and `refs/stash` — and it **deletes** origin refs that are absent locally | it publishes the agent checkpoints that `--all` leaves alone (the harness recreates them every session, so they are always present), and it destroys as well as publishes: a ref that exists on `origin` but not locally is removed |
 | `git push origin --tags` | every tag | a tag keeps the commit it names reachable, including commits no branch points at any more |
 | `git push --follow-tags` | annotated tags reachable from the pushed ref | the same exposure, limited to the tags you are carrying |
 
@@ -232,30 +249,59 @@ git push origin <branch-name>
 ### Before any push from a new working copy
 
 ```powershell
-git push --dry-run origin <branch-name>   # what would actually be sent
-git ls-remote origin                      # what origin already holds
+git push --dry-run origin <branch-name>              # which refs would be updated
+git log --oneline origin/<branch-name>..<branch-name> # which commits those refs carry
+git ls-remote origin                                 # what origin already holds
 ```
 
-`--dry-run` answers "what would be sent" for exactly that ref — it lists the
-updates without uploading anything. `ls-remote` shows what is already published.
-Neither replaces the history checks below.
+`--dry-run` previews **which refs would be updated** and uploads nothing. It does
+not exercise server-side push protection or secret scanning — nothing reaches the
+server for either to inspect — and it does not list the commits the ref carries,
+so pair it with the `git log` line above. `ls-remote` shows what is already
+published. None of the three replaces the reachability checks below.
+
+### Agent checkpoint refs are recreated every session
+
+139 `refs/agents/*` refs were deleted and pruned on 2026-11-20. That was not a
+one-off cleanup: the agent harness recreates checkpoint refs every session, so at
+the time of writing 7 such refs exist (6 under `refs/agents/` plus `refs/stash`).
+
+Before any publish, the check is that the list is empty:
+
+```powershell
+git for-each-ref --format='%(refname)' refs/agents refs/stash   # must print nothing
+```
+
+What makes the current state safe is not the earlier deletion but the fact that
+the study file is **not reachable from any ref right now**:
+`git rev-list --objects --all` returns no match for it. The refs come back, so
+the check has to be repeated, not remembered.
 
 ### Is a path reachable from any ref?
 
-`git log --all -- <path>` is not enough: it does not follow renames, and a rename
-has already happened in this repository once — the `.gitignore` pattern
-`docs/CISSP*/` covers a renamed study folder. A check that cannot see a rename
-passes while the object is still reachable.
+`git log --all -- <path>` matches that path in each commit, so a file that was
+renamed is found only under its current name. That matters here: the `.gitignore`
+pattern `docs/CISSP*/` covers a renamed study folder, so a check that sees only
+the new path can pass while the object is still reachable under the old one.
 
 ```powershell
 git rev-list --objects --all | Select-String -Pattern 'CISSP'
 git log --all --full-history -- '*CISSP*'
 ```
 
-The first lists objects — paths and blobs — reachable from every ref, whatever
-the current name; the second follows the history of any matching path through
-renames. An object listed by either is published the moment a ref that reaches it
-is pushed.
+The two commands answer different halves of the question, and neither follows a
+rename on its own:
+
+- `git rev-list --objects --all` lists every object reachable from any ref with
+  the path it is reached under. Each object is named **once**, by the first path
+  that reaches it, so a blob reachable under several names appears under one of
+  them only.
+- `git log --all --full-history -- '*CISSP*'` matches the glob against each
+  commit's tree, so it finds a matching name in any commit, whatever the path is
+  today, and keeps those commits in the history it prints.
+
+An object listed by either is published the moment a ref that reaches it is
+pushed.
 
 A file excluded by `.gitignore` is not protected once it has been committed on
 any ref: ignore rules govern new adds, not existing history. The only reliable
