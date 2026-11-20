@@ -38,13 +38,22 @@ import {
   setInFlight,
   setQuestionState,
   setUnitState,
+  reconcileUnits,
   unitsInScope,
   type Checkpoint,
   type QuestionRecord,
   type QuestionState,
+  type UnitRecord,
 } from "./checkpoint.ts";
-import { decideConfirm, decideNextStep, mapWorkflowState, type ConfirmObservation } from "./decide.ts";
+import {
+  decideConfirm,
+  decideNextStep,
+  mapWorkflowState,
+  type ConfirmObservation,
+  type ConfirmedQuestionIds,
+} from "./decide.ts";
 import { DriverError, type DriverErrorCode } from "./errors.ts";
+import { resolveUnitPresence, type PresentQuestion, type UnitPresence } from "./presence.ts";
 import {
   buildUnits,
   buildUploadManifest,
@@ -529,20 +538,17 @@ function runTransformStage(context: Context): void {
   const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
   writeUploadArtifacts(options.stateDir, units, manifestText);
   checkpoint.inputs.uploadManifestSha256 = sha256(manifestText);
-  checkpoint.units = units.map((unit) => ({
-    unit: unit.unit,
-    file: unit.file,
-    sha256: unit.sha256,
-    rows: unit.rows,
-    state: "pending",
-    importId: null,
-    expiresAt: null,
-  }));
+  // Re-running this stage must not discard what stage 3 already confirmed: the
+  // unit list is derived from the same converter output, so every unchanged
+  // unit keeps its state. Rebuilding the records from scratch here is what made
+  // a resume start again at unit 1.
+  const preserved = reconcileUnits(checkpoint, units);
   finishStage(checkpoint, "transform");
   persist(context);
   log(
     context,
-    `transform: ${validated.rows.length} rows in ${units.length} unit(s) of at most ${options.batchSize} outside the repository`,
+    `transform: ${validated.rows.length} rows in ${units.length} unit(s) of at most ${options.batchSize} outside the repository` +
+      (preserved > 0 ? `; kept ${preserved} confirmed unit(s) from the checkpoint` : ""),
   );
 }
 
@@ -550,10 +556,7 @@ function unitBytes(context: Context, unit: UnitArtifact): Uint8Array {
   return new TextEncoder().encode(unit.contents);
 }
 
-async function previewUnit(
-  context: Context,
-  unit: UnitArtifact,
-): Promise<{ importId: string; expiresAt: number }> {
+async function previewUnit(context: Context, unit: UnitArtifact): Promise<PreviewOpening> {
   const certification = context.checkpoint.target.certificationId!;
   const examVersion = context.checkpoint.target.examVersionId!;
   const bytes = unitBytes(context, unit);
@@ -573,7 +576,7 @@ async function previewUnit(
         );
       }
       noteSuccess(context);
-      return { importId: parsed.importId, expiresAt: parsed.expiresAt };
+      return { kind: "previewed", importId: parsed.importId, expiresAt: parsed.expiresAt };
     }
     if (outcome.kind === "rejected") {
       noteOutcome(context, outcome);
@@ -582,7 +585,15 @@ async function previewUnit(
         .slice(0, 10)
         .map((issue) => `${issue.path}:${issue.code}`)
         .join(" ");
-      if (issues.some((issue) => issue.code === "existing_question_key")) {
+      const existingKeyIssues = issues.filter((issue) => issue.code === "existing_question_key").length;
+      // A refusal whose every issue is `existing_question_key` is not a content
+      // error: it says the server already holds every row of this unit, which
+      // the caller resolves by presence. One other code anywhere and it is the
+      // refusal it looks like.
+      if (issues.length > 0 && existingKeyIssues === issues.length) {
+        return { kind: "existing-keys", existingKeyIssues };
+      }
+      if (existingKeyIssues > 0) {
         throw new DriverError(
           "EXISTING_KEYS",
           `unit ${unit.unit} was refused by the import validator${issueList ? ` (${issueList})` : ""}`,
@@ -607,71 +618,397 @@ async function previewUnit(
   throw new DriverError("PREVIEW_REJECTED", `unit ${unit.unit} could not be previewed`);
 }
 
-async function reconcileUnit(context: Context, unit: number): Promise<ConfirmObservation> {
+function rowsForUnit(context: Context, unit: number): SourceRow[] {
   const rows = unitRows(context.validated.rows, context.options.batchSize).get(unit);
   if (!rows) throw new DriverError("CHECKPOINT_INVALID", `unit ${unit} has no rows`);
-  const ids = idMapFrom(context.checkpoint);
-  const certification = context.checkpoint.target.certificationId!;
-  const examVersion = context.checkpoint.target.examVersionId!;
-  const present: Array<{ key: string; questionId: string; revisionId: string }> = [];
-  const missing: string[] = [];
-  for (const row of rows) {
-    const domainId = ids.domainIds.get(row.domainKey);
-    const topicId = ids.topicIds.get(row.topicKey);
-    if (domainId === undefined || topicId === undefined) {
-      throw new DriverError("CHECKPOINT_INVALID", "the checkpoint has no id for a row's taxonomy");
-    }
-    const items = await context.api.searchQuestions(certification, examVersion, {
-      domainId,
-      topicId,
-      search: row.key,
-    });
-    const exact = items.find((item) => item.questionKey === row.key) ?? null;
-    if (exact === null) missing.push(row.key);
-    else present.push({ key: row.key, questionId: exact.id, revisionId: exact.currentRevisionId });
-  }
-  noteRecovery(context.checkpoint);
-  if (present.length === 0) return { kind: "none" };
-  if (missing.length > 0) {
-    return {
-      kind: "some",
-      presentKeys: present.map((item) => item.key),
-      missingKeys: missing,
-    };
-  }
-  return { kind: "all", ids: present };
+  return rows;
 }
 
-function recordConfirmedUnit(
+/**
+ * The unit's rows as presence input, in row order.
+ */
+function presenceRows(context: Context, unit: number): Array<{ key: string; domainKey: string; topicKey: string }> {
+  return rowsForUnit(context, unit).map((row) => ({
+    key: row.key,
+    domainKey: row.domainKey,
+    topicKey: row.topicKey,
+  }));
+}
+
+/**
+ * Resolves a unit's rows against the checkpoint first and the server second.
+ *
+ * The checkpoint answers without a request when it holds the ids; only the rows
+ * it cannot answer are read, and then by one exhaustive listing of each row's
+ * own topic - never by one `search` per key. `PRESENCE_UNKNOWN` on the way out
+ * means the read could not conclude, which is not the same claim as "absent".
+ *
+ * A 5xx on the walk is a server failure the operator needs counted, so it is
+ * recorded as one before it propagates; the code the client produced
+ * (`PROTOCOL_ERROR`) travels unchanged.
+ */
+async function readUnitPresence(
+  context: Context,
+  unit: number,
+  options: { refusedExistingKeys?: number } = {},
+): Promise<UnitPresence> {
+  const certification = context.checkpoint.target.certificationId!;
+  const examVersion = context.checkpoint.target.examVersionId!;
+  let presence: UnitPresence;
+  try {
+    presence = await resolveUnitPresence({
+      unit,
+      rows: presenceRows(context, unit),
+      ids: idMapFrom(context.checkpoint),
+      questions: context.checkpoint.questions,
+      readPage: (domainId, topicId, cursor) =>
+        context.api.listQuestions(certification, examVersion, { domainId, topicId, cursor }),
+      ...(options.refusedExistingKeys === undefined
+        ? {}
+        : { refusedExistingKeys: options.refusedExistingKeys }),
+    });
+  } catch (error) {
+    if (error instanceof DriverError && error.status !== undefined && error.status >= 500) {
+      noteServerError(context.checkpoint);
+    }
+    throw error;
+  }
+  noteRecovery(context.checkpoint);
+  return presence;
+}
+
+/** How many of a presence result came from the server rather than the file. */
+function fromServer(presence: UnitPresence): number {
+  const items =
+    presence.kind === "all" ? presence.ids : presence.kind === "some" ? presence.present : [];
+  return items.filter((item) => item.source === "server").length;
+}
+
+/**
+ * The observation `decideConfirm` reads, mapped down from the richer presence
+ * result. `decide.ts` stays a pure decision table: the revision check and the
+ * page walk are properties of the *read*, not of the decision.
+ */
+function observationFrom(presence: UnitPresence): ConfirmObservation {
+  if (presence.kind === "all") {
+    return {
+      kind: "all",
+      ids: presence.ids.map((item) => ({
+        key: item.key,
+        questionId: item.questionId,
+        revisionId: item.revisionId,
+      })),
+    };
+  }
+  if (presence.kind === "some") {
+    return {
+      kind: "some",
+      presentKeys: presence.present.map((item) => item.key),
+      missingKeys: presence.missingKeys,
+    };
+  }
+  return { kind: "none" };
+}
+
+/** The confirm's positional arrays, checked against the keys the preview sent. */
+function confirmedIds(
+  unit: number,
+  confirmation: ConfirmResponse,
+  keys: readonly string[],
+): ConfirmedQuestionIds[] {
+  if (
+    confirmation.questionKeys.length !== keys.length ||
+    confirmation.questionIds.length !== keys.length ||
+    confirmation.revisionIds.length !== keys.length
+  ) {
+    throw new DriverError(
+      "PROTOCOL_ERROR",
+      `unit ${unit} confirm answered for ${confirmation.questionKeys.length} key(s) of ${keys.length}`,
+    );
+  }
+  return keys.map((key, index) => {
+    if (confirmation.questionKeys[index] !== key) {
+      throw new DriverError("PROTOCOL_ERROR", `unit ${unit} confirm returned a different key order`);
+    }
+    return {
+      key,
+      questionId: confirmation.questionIds[index]!,
+      revisionId: confirmation.revisionIds[index]!,
+    };
+  });
+}
+
+/**
+ * Records a unit's questions and marks it confirmed. Every row of the unit must
+ * be accounted for: a unit is never confirmed while one of its keys has no
+ * server id, because the publish stage would silently skip that question.
+ */
+function recordUnitQuestions(
   context: Context,
   unit: UnitArtifact,
-  confirmation: ConfirmResponse,
+  entries: readonly ConfirmedQuestionIds[],
 ): void {
-  const rows = unitRows(context.validated.rows, context.options.batchSize).get(unit.unit);
-  if (!rows) throw new DriverError("CHECKPOINT_INVALID", `unit ${unit.unit} has no rows`);
-  const records: QuestionRecord[] = [];
-  for (const [index, row] of rows.entries()) {
-    if (confirmation.questionKeys[index] !== row.key) {
+  const rows = rowsForUnit(context, unit.unit);
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  const records = new Map<string, QuestionRecord>();
+  for (const entry of entries) {
+    const row = byKey.get(entry.key);
+    if (row === undefined) {
+      // A second net over the server-answer class, unreachable from both call
+      // sites: a confirm's keys are checked against `opening.keys`, and presence
+      // only ever returns rows it was given. If it is ever reached the server
+      // named a foreign key and the driver has a bug; either way, naming the key
+      // and stopping closed is the honest answer, so it stays.
       throw new DriverError(
         "PROTOCOL_ERROR",
-        `unit ${unit.unit} confirm returned a different key order`,
+        `unit ${unit.unit} reported key ${entry.key}, which is not one of its rows`,
       );
     }
-    records.push({
+    records.set(entry.key, {
       key: row.key,
       unit: unit.unit,
       domainKey: row.domainKey,
       topicKey: row.topicKey,
-      questionId: confirmation.questionIds[index]!,
-      revisionId: confirmation.revisionIds[index]!,
+      questionId: entry.questionId,
+      revisionId: entry.revisionId,
       state: "draft",
       pointerVersion: null,
       inFlight: null,
     });
   }
-  addQuestions(context.checkpoint, records);
+  if (records.size !== rows.length) {
+    const missing = rows.filter((row) => !records.has(row.key)).map((row) => row.key);
+    throw new DriverError(
+      "PARTIAL_IMPORT",
+      `unit ${unit.unit} has ${rows.length} row(s) but only ${records.size} are on the server ` +
+        `(${missing.slice(0, 5).join(", ")})`,
+    );
+  }
+  addQuestions(context.checkpoint, [...records.values()]);
+  // A unit refused at preview is `previewing` when it is adopted, and
+  // `previewing -> confirmed` is deliberately not a legal edge: `previewed` is
+  // the state that proves a preview attempt produced an importId we could
+  // confirm, and widening the table would let a future path confirm a unit
+  // whose preview never ran. Adoption therefore takes the two legal steps in
+  // memory and persists once. The intermediate is never written: `previewed`
+  // with a null importId is a state the resume loop does not handle.
+  const unitRecord = context.checkpoint.units.find((candidate) => candidate.unit === unit.unit);
+  if (unitRecord === undefined) {
+    throw new DriverError("CHECKPOINT_INVALID", `unit ${unit.unit} is not in the checkpoint`);
+  }
+  if (unitRecord.state === "previewing") setUnitState(context.checkpoint, unit.unit, "previewed");
   setUnitState(context.checkpoint, unit.unit, "confirmed");
   persist(context);
+}
+
+interface UnitPreview {
+  importId: string;
+  expiresAt: number;
+}
+
+/** What `previewUnit` can answer with. */
+type PreviewOpening =
+  | { kind: "previewed"; importId: string; expiresAt: number }
+  /** Every issue was `existing_question_key`: the server holds every row. */
+  | { kind: "existing-keys"; existingKeyIssues: number };
+
+/** What the driver holds when it is about to confirm one unit. */
+interface UnitOpening {
+  /** `null` when the server already holds every key the unit wants. */
+  preview: UnitPreview | null;
+  /** The keys the preview covers, in row order; empty when there is no preview. */
+  keys: string[];
+  /** Rows the server already held, resolved by presence. */
+  adopted: PresentQuestion[];
+}
+
+/**
+ * Previews a unit, or reconciles it when the validator refuses its keys.
+ *
+ * `existing_question_key` is evidence, not a verdict: the rows are on the
+ * server, and the driver's job is to record that rather than to stop a run that
+ * only the checkpoint's own gap made look new. The read is the same presence
+ * resolution an ambiguous confirm uses, cross-checked against the number of
+ * keys the refusal itself named.
+ *
+ * Only a whole unit is adopted, and only on ids this run can account for
+ * (`previewed`): see the `EXISTING_KEYS` throw below.
+ *
+ * The preview is all-or-nothing, so a server that holds some of a unit's keys
+ * is a state nobody can proceed from: it stops with `PARTIAL_IMPORT` rather
+ * than importing the rest and leaving the unit half in one place and half in
+ * another.
+ *
+ * `previewed` is true when this checkpoint holds an `importId` for the unit,
+ * which means these exact bytes were previewed here at some point
+ * (`reconcileUnits` clears the `importId` when a unit's bytes move).
+ */
+async function openUnit(
+  context: Context,
+  unit: UnitArtifact,
+  previewed: boolean,
+): Promise<UnitOpening> {
+  const keys = rowsForUnit(context, unit.unit).map((row) => row.key);
+  const opened = await previewUnit(context, unit);
+  if (opened.kind === "previewed") {
+    return { preview: opened, keys, adopted: [] };
+  }
+  const presence = await readUnitPresence(context, unit.unit, {
+    refusedExistingKeys: opened.existingKeyIssues,
+  });
+  if (presence.kind === "all") {
+    // Fail closed. An id from the listing proves the key exists, not that the
+    // row holds the bytes this unit carries: `UNIQUE (certification_id,
+    // question_key)` is scoped to the certification, so a re-import after the
+    // source was corrected meets the same keys holding the *old* content, at
+    // revision 1. Publishing those rows would attach the review note to content
+    // this pipeline never sent. Adopt a server-resolved id only when this
+    // checkpoint previewed these exact bytes; a checkpoint-local id is the
+    // run's own record and needs no such licence.
+    const unproven = presence.ids.filter((item) => item.source === "server");
+    if (unproven.length > 0 && !previewed) {
+      throw new DriverError(
+        "EXISTING_KEYS",
+        `unit ${unit.unit} needs ${unproven.length} row(s) this run never previewed ` +
+          `(${unproven.slice(0, 5).map((item) => item.key).join(", ")}); ` +
+          "its ids would come from a listing that proves the key, not the content",
+      );
+    }
+    return { preview: null, keys: [], adopted: presence.ids };
+  }
+  if (presence.kind === "some") {
+    throw new DriverError(
+      "PARTIAL_IMPORT",
+      `unit ${unit.unit} has ${presence.present.length} of ${unit.rows} row(s) on the server; ` +
+        `absent: ${presence.missingKeys.slice(0, 5).join(", ")}`,
+    );
+  }
+  // `none` reaches here only when the refusal named no key at all, which the
+  // resolver's count cross-check already refuses. Fail closed rather than
+  // believing either answer.
+  throw new DriverError(
+    "PRESENCE_UNKNOWN",
+    `unit ${unit.unit} was refused for existing keys but its topic listing shows none of them`,
+  );
+}
+
+function markPreviewed(context: Context, unit: number, preview: UnitPreview): void {
+  setUnitState(context.checkpoint, unit, "previewed", {
+    importId: preview.importId,
+    expiresAt: preview.expiresAt,
+  });
+  persist(context);
+}
+
+/**
+ * One unit end to end: preview, confirm, and adopt what the server already
+ * holds. Returns only when the unit is `confirmed` on disk.
+ */
+async function confirmUnit(context: Context, unit: UnitArtifact, record: UnitRecord): Promise<void> {
+  const { checkpoint } = context;
+  if (record.state === "previewing") {
+    // A crash before the preview response. Nothing was created; start over.
+    setUnitState(checkpoint, record.unit, "pending");
+    persist(context);
+  }
+  if (record.state === "previewed" && record.importId !== null) {
+    // A crash after preview: reuse nothing across a restart; re-preview the
+    // same bytes so the confirmation is adjacent to a fresh preview.
+    setUnitState(checkpoint, record.unit, "previewing");
+    persist(context);
+  } else if (record.state === "pending") {
+    setUnitState(checkpoint, record.unit, "previewing");
+    persist(context);
+  }
+
+  // `importId` is the discriminator the fail-closed adoption needs, and it is
+  // read *after* the state fix-ups above: recovering a `previewed` unit moves
+  // it back to `previewing` but keeps the id, which is exactly the evidence
+  // that these bytes were previewed here.
+  const previewed = record.importId !== null;
+
+  let opening = await openUnit(context, unit, previewed);
+  if (opening.preview !== null) markPreviewed(context, record.unit, opening.preview);
+
+  let retried = false;
+  for (;;) {
+    const preview = opening.preview;
+    if (preview === null) {
+      recordUnitQuestions(context, unit, opening.adopted);
+      noteSuccess(context);
+      log(
+        context,
+        `upload: unit ${unit.unit} adopted ${opening.adopted.length} question(s) ` +
+          `(${opening.adopted.filter((item) => item.source === "server").length} resolved by an exact topic read)`,
+      );
+      return;
+    }
+
+    if (context.deps.now() > preview.expiresAt - PREVIEW_EXPIRY_MARGIN_MS) {
+      setUnitState(checkpoint, record.unit, "previewing");
+      persist(context);
+      opening = await openUnit(context, unit, previewed);
+      if (opening.preview !== null) markPreviewed(context, record.unit, opening.preview);
+      retried = false;
+      continue;
+    }
+
+    const outcome = await context.api.confirmImport(
+      context.checkpoint.target.certificationId!,
+      preview.importId,
+    );
+    if (outcome.kind === "ok") {
+      const confirmation = confirmResponse(outcome.text);
+      recordUnitQuestions(context, unit, [
+        ...opening.adopted,
+        ...confirmedIds(unit.unit, confirmation, opening.keys),
+      ]);
+      noteSuccess(context);
+      log(context, `upload: unit ${unit.unit} confirmed ${opening.keys.length} question(s)`);
+      return;
+    }
+
+    if (outcome.kind === "rejected" && outcome.status !== 409) {
+      noteOutcome(context, outcome);
+      throw outcomeError(outcome, "CONFIRM_FAILED");
+    }
+    if (outcome.kind === "rejected" && outcome.status === 409) noteConflict(checkpoint);
+    noteOutcome(context, outcome);
+    const presence = await readUnitPresence(context, unit.unit);
+    const decision = decideConfirm({
+      outcome: "ambiguous",
+      observation: observationFrom(presence),
+      previewExpired: context.deps.now() >= preview.expiresAt,
+      retried,
+    });
+    if (decision.action === "adopt") {
+      recordUnitQuestions(context, unit, [...opening.adopted, ...decision.ids]);
+      noteSuccess(context);
+      log(
+        context,
+        `upload: unit ${unit.unit} adopted ${decision.ids.length} question(s) after reconciliation ` +
+          `(${fromServer(presence)} resolved by an exact topic read)`,
+      );
+      return;
+    }
+    if (decision.action === "retry") {
+      retried = true;
+      noteFailure(context);
+      continue;
+    }
+    if (decision.action === "re-preview") {
+      setUnitState(checkpoint, record.unit, "previewing");
+      persist(context);
+      opening = await openUnit(context, unit, previewed);
+      if (opening.preview !== null) markPreviewed(context, record.unit, opening.preview);
+      retried = false;
+      continue;
+    }
+    if (decision.action === "stop") {
+      throw new DriverError(decision.code, decision.detail);
+    }
+    throw new DriverError("CONFIRM_FAILED", `unit ${unit.unit} did not confirm`);
+  }
 }
 
 async function runUploadStage(context: Context): Promise<void> {
@@ -694,110 +1031,7 @@ async function runUploadStage(context: Context): Promise<void> {
     if (record.state === "confirmed") continue;
     const unit = byNumber.get(record.unit);
     if (!unit) throw new DriverError("CHECKPOINT_INVALID", `unit ${record.unit} has no file`);
-    if (record.state === "previewing") {
-      // A crash before the preview response. Nothing was created; start over.
-      setUnitState(checkpoint, record.unit, "pending");
-      persist(context);
-    }
-    if (record.state === "previewed" && record.importId !== null) {
-      // A crash after preview: reuse nothing across a restart; re-preview the
-      // same bytes so the confirmation is adjacent to a fresh preview.
-      setUnitState(checkpoint, record.unit, "previewing");
-      persist(context);
-    } else if (record.state === "pending") {
-      setUnitState(checkpoint, record.unit, "previewing");
-      persist(context);
-    }
-
-    let preview = await previewUnit(context, unit);
-    setUnitState(checkpoint, record.unit, "previewed", {
-      importId: preview.importId,
-      expiresAt: preview.expiresAt,
-    });
-    persist(context);
-
-    let retried = false;
-    for (;;) {
-      if (context.deps.now() > preview.expiresAt - PREVIEW_EXPIRY_MARGIN_MS) {
-        setUnitState(checkpoint, record.unit, "previewing");
-        persist(context);
-        preview = await previewUnit(context, unit);
-        setUnitState(checkpoint, record.unit, "previewed", {
-          importId: preview.importId,
-          expiresAt: preview.expiresAt,
-        });
-        persist(context);
-        retried = false;
-        continue;
-      }
-
-      const outcome = await context.api.confirmImport(
-        context.checkpoint.target.certificationId!,
-        preview.importId,
-      );
-      if (outcome.kind === "ok") {
-        const confirmation = confirmResponse(outcome.text);
-        recordConfirmedUnit(context, unit, confirmation);
-        noteSuccess(context);
-        log(context, `upload: unit ${unit.unit} confirmed ${unit.rows} question(s)`);
-        break;
-      }
-
-      if (outcome.kind === "rejected" && outcome.status !== 409) {
-        noteOutcome(context, outcome);
-        throw outcomeError(outcome, "CONFIRM_FAILED");
-      }
-      if (outcome.kind === "rejected" && outcome.status === 409) noteConflict(checkpoint);
-      noteOutcome(context, outcome);
-      const observation = await reconcileUnit(context, unit.unit);
-      const decision = decideConfirm({
-        outcome: "ambiguous",
-        observation,
-        previewExpired: context.deps.now() >= preview.expiresAt,
-        retried,
-      });
-      if (decision.action === "adopt") {
-        const rows = unitRows(context.validated.rows, options.batchSize).get(unit.unit)!;
-        const records: QuestionRecord[] = decision.ids.map((item, index) => ({
-          key: item.key,
-          unit: unit.unit,
-          domainKey: rows[index]!.domainKey,
-          topicKey: rows[index]!.topicKey,
-          questionId: item.questionId,
-          revisionId: item.revisionId,
-          state: "draft",
-          pointerVersion: null,
-          inFlight: null,
-        }));
-        addQuestions(checkpoint, records);
-        setUnitState(checkpoint, record.unit, "confirmed");
-        persist(context);
-        noteSuccess(context);
-        log(context, `upload: unit ${unit.unit} adopted ${unit.rows} question(s) after reconciliation`);
-        break;
-      }
-      if (decision.action === "retry") {
-        retried = true;
-        noteFailure(context);
-        continue;
-      }
-      if (decision.action === "re-preview") {
-        setUnitState(checkpoint, record.unit, "previewing");
-        persist(context);
-        preview = await previewUnit(context, unit);
-        setUnitState(checkpoint, record.unit, "previewed", {
-          importId: preview.importId,
-          expiresAt: preview.expiresAt,
-        });
-        persist(context);
-        retried = false;
-        continue;
-      }
-      if (decision.action === "stop") {
-        throw new DriverError(decision.code, decision.detail);
-      }
-      throw new DriverError("CONFIRM_FAILED", `unit ${unit.unit} did not confirm`);
-    }
+    await confirmUnit(context, unit, record);
   }
 
   const remaining = units.filter((unit) => unit.state !== "confirmed");

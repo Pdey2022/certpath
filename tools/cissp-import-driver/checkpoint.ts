@@ -306,12 +306,75 @@ export function setUnitState(
   return record;
 }
 
+/**
+ * Re-derives the unit list from the transformer's current output, keeping the
+ * state a previous process recorded.
+ *
+ * Stage 2 is restarted on every invocation - `--stage all` re-runs it - and it
+ * is a pure function of the converter output, so its output must not be a way
+ * to lose what stage 3 already did. A unit whose file, digest and row count are
+ * unchanged keeps its state, `importId` and expiry; anything else starts at
+ * `pending`, which is the only safe reading of a unit whose bytes moved.
+ */
+export function reconcileUnits(
+  checkpoint: Checkpoint,
+  units: ReadonlyArray<Pick<UnitRecord, "unit" | "file" | "sha256" | "rows">>,
+): number {
+  const previous = new Map(checkpoint.units.map((record) => [record.unit, record]));
+  let preserved = 0;
+  checkpoint.units = units.map((unit) => {
+    const record = previous.get(unit.unit);
+    if (
+      record !== undefined &&
+      record.file === unit.file &&
+      record.sha256 === unit.sha256 &&
+      record.rows === unit.rows
+    ) {
+      if (record.state === "confirmed") preserved += 1;
+      return { ...record };
+    }
+    return {
+      unit: unit.unit,
+      file: unit.file,
+      sha256: unit.sha256,
+      rows: unit.rows,
+      state: "pending",
+      importId: null,
+      expiresAt: null,
+    };
+  });
+  return preserved;
+}
+
+/**
+ * Records questions the server confirmed or already held.
+ *
+ * `question_key` is the join key, so re-recording a key the server reports with
+ * the same ids is a no-op rather than an error: a resume that reconciles a unit
+ * an earlier process imported must land on the record that is already there,
+ * including the workflow state a later stage may have advanced. The same key
+ * with different ids or a different unit is a server state the driver cannot
+ * explain, and it stops.
+ */
 export function addQuestions(checkpoint: Checkpoint, records: readonly QuestionRecord[]): void {
   for (const record of records) {
-    if (checkpoint.questions.some((candidate) => candidate.key === record.key)) {
-      throw new DriverError("CHECKPOINT_INVALID", `question ${record.key} is already in the checkpoint`);
+    const existing = checkpoint.questions.find((candidate) => candidate.key === record.key);
+    if (existing === undefined) {
+      checkpoint.questions.push({ ...record });
+      continue;
     }
-    checkpoint.questions.push({ ...record });
+    if (existing.questionId !== record.questionId || existing.revisionId !== record.revisionId) {
+      throw new DriverError(
+        "CHECKPOINT_INVALID",
+        `question ${record.key} is already in the checkpoint with different server ids`,
+      );
+    }
+    if (existing.unit !== record.unit) {
+      throw new DriverError(
+        "CHECKPOINT_INVALID",
+        `question ${record.key} is already in the checkpoint for unit ${existing.unit}`,
+      );
+    }
   }
 }
 

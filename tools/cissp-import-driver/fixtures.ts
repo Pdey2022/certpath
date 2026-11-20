@@ -89,6 +89,45 @@ export function proseFixture(
   };
 }
 
+export interface PageRequest {
+  cursor: string | null;
+  limit: number;
+}
+
+export interface PageOf<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+/**
+ * One page of a collection ordered by ascending id, exactly as the Worker's
+ * `pageClause`/`pageResult` pair does it: `id > cursor`, `LIMIT limit`, and a
+ * `nextCursor` set to the last id of the page only when more remain.
+ *
+ * The driver's earlier fake returned every match and hardcoded `nextCursor:
+ * null`, which made a "these rows are missing" answer impossible to reproduce
+ * and every presence test vacuous. Fakes that cannot express the defect cannot
+ * catch it, so the paging lives here once and its own test walks 120 items.
+ */
+export function pageOf<T>(items: readonly T[], request: PageRequest, idOf: (item: T) => string): PageOf<T> {
+  if (!Number.isInteger(request.limit) || request.limit < 1) {
+    throw new Error(`pageOf needs a positive integer limit, got ${request.limit}`);
+  }
+  const ordered = [...items].sort((left, right) => {
+    const a = idOf(left);
+    const b = idOf(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const remaining =
+    request.cursor === null ? ordered : ordered.filter((item) => idOf(item) > request.cursor!);
+  const page = remaining.slice(0, request.limit);
+  const last = page.at(-1);
+  return {
+    items: page,
+    nextCursor: remaining.length > request.limit && last !== undefined ? idOf(last) : null,
+  };
+}
+
 export interface RowOptions {
   key: string;
   domainId?: string;
@@ -220,7 +259,16 @@ export function writeFixture(
   const prosePath = join(root, "prose.json");
   writeFileSync(prosePath, `${JSON.stringify(proseFixture(taxonomy), null, 2)}\n`, "utf8");
   const batchesDir = join(root, "batches");
-  writeConverterOutput(batchesDir, [{ name: "batch-001.csv", rows }], taxonomy);
+  // The converter caps a batch at ten rows, so a larger fixture is written as
+  // several batches, exactly as the real converter output is.
+  const batches: BatchSpec[] = [];
+  for (let start = 0; start < rows.length; start += 10) {
+    batches.push({
+      name: `batch-${String(batches.length + 1).padStart(3, "0")}.csv`,
+      rows: rows.slice(start, start + 10),
+    });
+  }
+  writeConverterOutput(batchesDir, batches, taxonomy);
   return { batchesDir, taxonomyPath, prosePath, taxonomy, rows };
 }
 

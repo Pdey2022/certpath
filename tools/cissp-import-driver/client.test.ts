@@ -93,16 +93,16 @@ test("query parameters are built exactly, and omitted when null", () => {
     buildUrl("http://localhost:5173", paths.questions("cert-1", "ver-1"), {
       domainId: "d1",
       topicId: "t1",
-      search: "cissp-12",
       limit: 50,
+      cursor: "question-9",
     }),
   );
   assert.equal(questions.pathname, "/api/admin/content/certifications/cert-1/exam-versions/ver-1/questions");
   assert.deepEqual(Object.fromEntries(questions.searchParams), {
     domainId: "d1",
     topicId: "t1",
-    search: "cissp-12",
     limit: "50",
+    cursor: "question-9",
   });
 });
 
@@ -210,6 +210,66 @@ test("a timeout is ambiguous with no status", async () => {
   const outcome = await api.confirmImport("cert-1", "import-1");
   assert.equal(outcome.kind, "ambiguous");
   assert.equal(outcome.kind === "ambiguous" ? outcome.reason : null, "timeout");
+});
+
+test("the question listing asks by domain and topic, never by search, and demands a cursor or null", async () => {
+  const pages: Array<{ items: unknown[]; nextCursor: unknown }> = [
+    {
+      items: [
+        {
+          id: "question-1",
+          questionKey: "cissp-1",
+          currentRevisionId: "revision-1",
+          revisionNumber: 1,
+          lockVersion: 1,
+          // A stem is in the body and must not survive the parse.
+          stem: "A stem the driver must not keep",
+          workflowState: "draft",
+        },
+      ],
+      nextCursor: "question-1",
+    },
+    { items: [], nextCursor: null },
+    { items: [], nextCursor: undefined },
+  ];
+  let index = 0;
+  const { fetchImpl, calls } = recorder(({ url }) => {
+    if (url.includes("/csrf")) return csrfResponse();
+    const page = pages[index]!;
+    index += 1;
+    return jsonResponse(page);
+  });
+  const api = new StaffApi({ origin: "http://localhost:5173", fetchImpl });
+  await api.readCsrf();
+
+  const first = await api.listQuestions("cert-1", "ver-1", { domainId: "d1", topicId: "t1" });
+  assert.deepEqual(first.items, [
+    { id: "question-1", questionKey: "cissp-1", currentRevisionId: "revision-1", revisionNumber: 1 },
+  ]);
+  assert.equal(first.nextCursor, "question-1");
+  const firstUrl = new URL(calls.at(-1)!.url);
+  assert.deepEqual(Object.fromEntries(firstUrl.searchParams), {
+    domainId: "d1",
+    topicId: "t1",
+    limit: "50",
+  });
+  assert.equal(firstUrl.searchParams.has("search"), false);
+  assert.equal(first.items[0]!.hasOwnProperty("stem"), false);
+
+  const second = await api.listQuestions("cert-1", "ver-1", {
+    domainId: "d1",
+    topicId: "t1",
+    cursor: "question-1",
+    limit: 2,
+  });
+  assert.equal(second.nextCursor, null);
+  assert.equal(new URL(calls.at(-1)!.url).searchParams.get("limit"), "2");
+
+  // An absent cursor is a protocol violation, not the end of the list.
+  await assert.rejects(
+    api.listQuestions("cert-1", "ver-1", { domainId: "d1", topicId: "t1", cursor: "question-1" }),
+    (error: unknown) => error instanceof DriverError && error.code === "PROTOCOL_ERROR",
+  );
 });
 
 test("the preview carries the CSV content type and the exact bytes", async () => {

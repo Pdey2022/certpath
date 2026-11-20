@@ -30,7 +30,7 @@
     "typecheck:tools": "tsc --noEmit -p tools/cissp-convert/tsconfig.json && tsc --noEmit -p tools/cissp-import-driver/tsconfig.json",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present && npm run test:tools",
-    "test:tools": "tsx --test tools/cissp-convert/cli.test.ts tools/cissp-import-driver/contract.test.ts tools/cissp-import-driver/transform.test.ts tools/cissp-import-driver/validate.test.ts tools/cissp-import-driver/checkpoint.test.ts tools/cissp-import-driver/decide.test.ts tools/cissp-import-driver/client.test.ts tools/cissp-import-driver/run.test.ts tools/cissp-import-driver/cli.test.ts",
+    "test:tools": "tsx --test tools/cissp-convert/cli.test.ts tools/cissp-import-driver/contract.test.ts tools/cissp-import-driver/transform.test.ts tools/cissp-import-driver/validate.test.ts tools/cissp-import-driver/checkpoint.test.ts tools/cissp-import-driver/decide.test.ts tools/cissp-import-driver/client.test.ts tools/cissp-import-driver/presence.test.ts tools/cissp-import-driver/run.test.ts tools/cissp-import-driver/cli.test.ts",
     "check:isolation": "node apps/web/scripts/check-d1-isolation.mjs",
     "db:export": "node apps/web/scripts/d1-export.mjs",
     "db:rehearse": "node apps/web/scripts/d1-restore-rehearse.mjs",
