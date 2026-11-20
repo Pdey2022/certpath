@@ -53,6 +53,7 @@ import {
   type ConfirmedQuestionIds,
 } from "./decide.ts";
 import { DriverError, type DriverErrorCode } from "./errors.ts";
+import { resolveUnitPresence, type PresentQuestion, type UnitPresence } from "./presence.ts";
 import {
   buildUnits,
   buildUploadManifest,
@@ -555,10 +556,7 @@ function unitBytes(context: Context, unit: UnitArtifact): Uint8Array {
   return new TextEncoder().encode(unit.contents);
 }
 
-async function previewUnit(
-  context: Context,
-  unit: UnitArtifact,
-): Promise<{ importId: string; expiresAt: number }> {
+async function previewUnit(context: Context, unit: UnitArtifact): Promise<PreviewOpening> {
   const certification = context.checkpoint.target.certificationId!;
   const examVersion = context.checkpoint.target.examVersionId!;
   const bytes = unitBytes(context, unit);
@@ -578,7 +576,7 @@ async function previewUnit(
         );
       }
       noteSuccess(context);
-      return { importId: parsed.importId, expiresAt: parsed.expiresAt };
+      return { kind: "previewed", importId: parsed.importId, expiresAt: parsed.expiresAt };
     }
     if (outcome.kind === "rejected") {
       noteOutcome(context, outcome);
@@ -587,7 +585,15 @@ async function previewUnit(
         .slice(0, 10)
         .map((issue) => `${issue.path}:${issue.code}`)
         .join(" ");
-      if (issues.some((issue) => issue.code === "existing_question_key")) {
+      const existingKeyIssues = issues.filter((issue) => issue.code === "existing_question_key").length;
+      // A refusal whose every issue is `existing_question_key` is not a content
+      // error: it says the server already holds every row of this unit, which
+      // the caller resolves by presence. One other code anywhere and it is the
+      // refusal it looks like.
+      if (issues.length > 0 && existingKeyIssues === issues.length) {
+        return { kind: "existing-keys", existingKeyIssues };
+      }
+      if (existingKeyIssues > 0) {
         throw new DriverError(
           "EXISTING_KEYS",
           `unit ${unit.unit} was refused by the import validator${issueList ? ` (${issueList})` : ""}`,
@@ -619,70 +625,80 @@ function rowsForUnit(context: Context, unit: number): SourceRow[] {
 }
 
 /**
- * Reads the server's own record of a unit's keys, one search per key and an
- * exact `questionKey` match (the route's `search` is `LIKE`, so `cissp-12` also
- * matches `cissp-120`). `keys` narrows the read to the rows a preview covered;
- * the default is the whole unit.
+ * The unit's rows as presence input. `keys` narrows the read to the rows a
+ * preview covered; the default is the whole unit.
  */
-async function readUnitKeys(
+function presenceRows(
   context: Context,
   unit: number,
-  keys: readonly string[] | null = null,
-): Promise<{ present: ConfirmedQuestionIds[]; missing: string[] }> {
-  const rows = rowsForUnit(context, unit).filter((row) => keys === null || keys.includes(row.key));
-  const ids = idMapFrom(context.checkpoint);
+  keys: readonly string[] | null,
+): Array<{ key: string; domainKey: string; topicKey: string }> {
+  return rowsForUnit(context, unit)
+    .filter((row) => keys === null || keys.includes(row.key))
+    .map((row) => ({ key: row.key, domainKey: row.domainKey, topicKey: row.topicKey }));
+}
+
+/**
+ * Resolves a unit's rows against the checkpoint first and the server second.
+ *
+ * The checkpoint answers without a request when it holds the ids; only the rows
+ * it cannot answer are read, and then by one exhaustive listing of each row's
+ * own topic - never by one `search` per key. `PRESENCE_UNKNOWN` on the way out
+ * means the read could not conclude, which is not the same claim as "absent".
+ */
+async function readUnitPresence(
+  context: Context,
+  unit: number,
+  options: { keys?: readonly string[] | null; refusedExistingKeys?: number } = {},
+): Promise<UnitPresence> {
   const certification = context.checkpoint.target.certificationId!;
   const examVersion = context.checkpoint.target.examVersionId!;
-  const present: ConfirmedQuestionIds[] = [];
-  const missing: string[] = [];
-  for (const row of rows) {
-    const domainId = ids.domainIds.get(row.domainKey);
-    const topicId = ids.topicIds.get(row.topicKey);
-    if (domainId === undefined || topicId === undefined) {
-      throw new DriverError("CHECKPOINT_INVALID", "the checkpoint has no id for a row's taxonomy");
-    }
-    const items = await context.api.searchQuestions(certification, examVersion, {
-      domainId,
-      topicId,
-      search: row.key,
-    });
-    const exact = items.find((item) => item.questionKey === row.key) ?? null;
-    if (exact === null) missing.push(row.key);
-    else present.push({ key: row.key, questionId: exact.id, revisionId: exact.currentRevisionId });
-  }
+  const presence = await resolveUnitPresence({
+    unit,
+    rows: presenceRows(context, unit, options.keys ?? null),
+    ids: idMapFrom(context.checkpoint),
+    questions: context.checkpoint.questions,
+    readPage: (domainId, topicId, cursor) =>
+      context.api.listQuestions(certification, examVersion, { domainId, topicId, cursor }),
+    ...(options.refusedExistingKeys === undefined
+      ? {}
+      : { refusedExistingKeys: options.refusedExistingKeys }),
+  });
   noteRecovery(context.checkpoint);
-  return { present, missing };
+  return presence;
 }
 
-/** The observation `decideConfirm` reads: what the reconciling read found. */
-function observeUnit(read: { present: ConfirmedQuestionIds[]; missing: string[] }): ConfirmObservation {
-  if (read.present.length === 0) return { kind: "none" };
-  if (read.missing.length > 0) {
+/** How many of a presence result came from the server rather than the file. */
+function fromServer(presence: UnitPresence): number {
+  const items =
+    presence.kind === "all" ? presence.ids : presence.kind === "some" ? presence.present : [];
+  return items.filter((item) => item.source === "server").length;
+}
+
+/**
+ * The observation `decideConfirm` reads, mapped down from the richer presence
+ * result. `decide.ts` stays a pure decision table: the revision check and the
+ * page walk are properties of the *read*, not of the decision.
+ */
+function observationFrom(presence: UnitPresence): ConfirmObservation {
+  if (presence.kind === "all") {
     return {
-      kind: "some",
-      presentKeys: read.present.map((item) => item.key),
-      missingKeys: read.missing,
+      kind: "all",
+      ids: presence.ids.map((item) => ({
+        key: item.key,
+        questionId: item.questionId,
+        revisionId: item.revisionId,
+      })),
     };
   }
-  return { kind: "all", ids: read.present };
-}
-
-/** A preview of only the given rows, labelled with its parent unit in the log. */
-function subsetUnit(
-  context: Context,
-  unit: UnitArtifact,
-  rows: readonly SourceRow[],
-): UnitArtifact {
-  if (rows.length === 0) {
-    throw new DriverError("CHECKPOINT_INVALID", `unit ${unit.unit} has no rows left to import`);
+  if (presence.kind === "some") {
+    return {
+      kind: "some",
+      presentKeys: presence.present.map((item) => item.key),
+      missingKeys: presence.missingKeys,
+    };
   }
-  const [artifact] = buildUnits(
-    rows,
-    idMapFrom(context.checkpoint),
-    rows.length,
-    QUESTION_IMPORT_MAX_BYTES,
-  );
-  return { ...artifact!, unit: unit.unit, file: unit.file };
+  return { kind: "none" };
 }
 
 /** The confirm's positional arrays, checked against the keys the preview sent. */
@@ -755,6 +771,18 @@ function recordUnitQuestions(
     );
   }
   addQuestions(context.checkpoint, [...records.values()]);
+  // A unit refused at preview is `previewing` when it is adopted, and
+  // `previewing -> confirmed` is deliberately not a legal edge: `previewed` is
+  // the state that proves a preview attempt produced an importId we could
+  // confirm, and widening the table would let a future path confirm a unit
+  // whose preview never ran. Adoption therefore takes the two legal steps in
+  // memory and persists once. The intermediate is never written: `previewed`
+  // with a null importId is a state the resume loop does not handle.
+  const unitRecord = context.checkpoint.units.find((candidate) => candidate.unit === unit.unit);
+  if (unitRecord === undefined) {
+    throw new DriverError("CHECKPOINT_INVALID", `unit ${unit.unit} is not in the checkpoint`);
+  }
+  if (unitRecord.state === "previewing") setUnitState(context.checkpoint, unit.unit, "previewed");
   setUnitState(context.checkpoint, unit.unit, "confirmed");
   persist(context);
 }
@@ -764,14 +792,20 @@ interface UnitPreview {
   expiresAt: number;
 }
 
+/** What `previewUnit` can answer with. */
+type PreviewOpening =
+  | { kind: "previewed"; importId: string; expiresAt: number }
+  /** Every issue was `existing_question_key`: the server holds every row. */
+  | { kind: "existing-keys"; existingKeyIssues: number };
+
 /** What the driver holds when it is about to confirm one unit. */
 interface UnitOpening {
   /** `null` when the server already holds every key the unit wants. */
   preview: UnitPreview | null;
   /** The keys the preview covers, in row order; empty when there is no preview. */
   keys: string[];
-  /** Rows the server already held, adopted from its own record. */
-  adopted: ConfirmedQuestionIds[];
+  /** Rows the server already held, resolved by presence. */
+  adopted: PresentQuestion[];
 }
 
 /**
@@ -779,42 +813,41 @@ interface UnitOpening {
  *
  * `existing_question_key` is evidence, not a verdict: the rows are on the
  * server, and the driver's job is to record that rather than to stop a run that
- * only the checkpoint's own gap made look new. The read is the same by-key
- * reconciliation an ambiguous confirm uses. When every key is present the unit
- * is adopted whole; when some are present only the missing rows are previewed,
- * so an existing question and its revision are never sent again. A refusal the
- * server cannot corroborate, and a genuine race that makes the reduced preview
- * collide, are still fatal.
+ * only the checkpoint's own gap made look new. The read is the same presence
+ * resolution an ambiguous confirm uses, cross-checked against the number of
+ * keys the refusal itself named.
+ *
+ * Only a whole unit is adopted. The preview is all-or-nothing, so a server that
+ * holds some of a unit's keys is a state nobody can proceed from: it stops with
+ * `PARTIAL_IMPORT` rather than importing the rest and leaving the unit half in
+ * one place and half in another.
  */
 async function openUnit(context: Context, unit: UnitArtifact): Promise<UnitOpening> {
   const keys = rowsForUnit(context, unit.unit).map((row) => row.key);
-  try {
-    return { preview: await previewUnit(context, unit), keys, adopted: [] };
-  } catch (error) {
-    if (!(error instanceof DriverError) || error.code !== "EXISTING_KEYS") throw error;
-    const read = await readUnitKeys(context, unit.unit);
-    if (read.present.length === 0) {
-      // The validator named keys the server cannot show. Nothing here is
-      // something the driver can explain, so the refusal stands.
-      throw error;
-    }
-    if (read.missing.length === 0) {
-      log(
-        context,
-        `upload: unit ${unit.unit} is already on the server; adopting ${read.present.length} question(s)`,
-      );
-      return { preview: null, keys: [], adopted: read.present };
-    }
-    const present = new Set(read.present.map((item) => item.key));
-    const missing = rowsForUnit(context, unit.unit).filter((row) => !present.has(row.key));
-    log(
-      context,
-      `upload: unit ${unit.unit} has ${read.present.length} of ${unit.rows} row(s) on the server; ` +
-        `importing the ${missing.length} that are missing`,
-    );
-    const preview = await previewUnit(context, subsetUnit(context, unit, missing));
-    return { preview, keys: missing.map((row) => row.key), adopted: read.present };
+  const opened = await previewUnit(context, unit);
+  if (opened.kind === "previewed") {
+    return { preview: opened, keys, adopted: [] };
   }
+  const presence = await readUnitPresence(context, unit.unit, {
+    refusedExistingKeys: opened.existingKeyIssues,
+  });
+  if (presence.kind === "all") {
+    return { preview: null, keys: [], adopted: presence.ids };
+  }
+  if (presence.kind === "some") {
+    throw new DriverError(
+      "PARTIAL_IMPORT",
+      `unit ${unit.unit} has ${presence.present.length} of ${unit.rows} row(s) on the server; ` +
+        `absent: ${presence.missingKeys.slice(0, 5).join(", ")}`,
+    );
+  }
+  // `none` reaches here only when the refusal named no key at all, which the
+  // resolver's count cross-check already refuses. Fail closed rather than
+  // believing either answer.
+  throw new DriverError(
+    "PRESENCE_UNKNOWN",
+    `unit ${unit.unit} was refused for existing keys but its topic listing shows none of them`,
+  );
 }
 
 function markPreviewed(context: Context, unit: number, preview: UnitPreview): void {
@@ -855,7 +888,11 @@ async function confirmUnit(context: Context, unit: UnitArtifact, record: UnitRec
     if (preview === null) {
       recordUnitQuestions(context, unit, opening.adopted);
       noteSuccess(context);
-      log(context, `upload: unit ${unit.unit} adopted ${opening.adopted.length} question(s)`);
+      log(
+        context,
+        `upload: unit ${unit.unit} adopted ${opening.adopted.length} question(s) ` +
+          `(${opening.adopted.filter((item) => item.source === "server").length} resolved by an exact topic read)`,
+      );
       return;
     }
 
@@ -891,10 +928,10 @@ async function confirmUnit(context: Context, unit: UnitArtifact, record: UnitRec
     noteOutcome(context, outcome);
     // Only the keys the preview covered decide this: the rows adopted before
     // it were already on the server and are not evidence of anything.
-    const observation = observeUnit(await readUnitKeys(context, unit.unit, opening.keys));
+    const presence = await readUnitPresence(context, unit.unit, { keys: opening.keys });
     const decision = decideConfirm({
       outcome: "ambiguous",
-      observation,
+      observation: observationFrom(presence),
       previewExpired: context.deps.now() >= preview.expiresAt,
       retried,
     });
@@ -903,7 +940,8 @@ async function confirmUnit(context: Context, unit: UnitArtifact, record: UnitRec
       noteSuccess(context);
       log(
         context,
-        `upload: unit ${unit.unit} adopted ${decision.ids.length} question(s) after reconciliation`,
+        `upload: unit ${unit.unit} adopted ${decision.ids.length} question(s) after reconciliation ` +
+          `(${fromServer(presence)} resolved by an exact topic read)`,
       );
       return;
     }

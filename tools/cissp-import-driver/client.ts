@@ -256,8 +256,6 @@ export interface QuestionItem {
   questionKey: string;
   currentRevisionId: string;
   revisionNumber: number;
-  lockVersion: number;
-  workflowState: string;
 }
 
 export interface PreviewResponse {
@@ -636,39 +634,58 @@ export class StaffApi {
     });
   }
 
-  async searchQuestions(
+  /**
+   * One page of a topic's questions, in ascending `question.id` order.
+   *
+   * This is the presence read: `domainId` and `topicId` scope it, `cursor` and
+   * `limit` page it, and nothing filters it. The driver never sends `search`
+   * here - the route's `search` is `LIKE '%…%'` over the key *or* the stem and
+   * is ordered by question id, so an exact key can sit behind `cissp-120` and
+   * a stem that quotes it, and a substring match is never the row.
+   *
+   * `nextCursor` must be a string or `null`. The contract is
+   * `nextCursor: id.nullable()` with `.strict()`, so an absent cursor is a
+   * protocol violation; reading it as "end of list" would let a dropped cursor
+   * become a false "these keys are missing". `paginate` treats a missing
+   * cursor as the end and has no bound, which is why this walk does not use it.
+   */
+  async listQuestions(
     certificationId: string,
     examVersionId: string,
-    input: { domainId: string; topicId: string; search: string },
-  ): Promise<QuestionItem[]> {
+    input: { domainId: string; topicId: string; cursor?: string | null; limit?: number },
+  ): Promise<Page<QuestionItem>> {
     const outcome = await this.call({
       method: "GET",
       path: paths.questions(certificationId, examVersionId),
       query: {
         domainId: input.domainId,
         topicId: input.topicId,
-        search: input.search,
-        limit: 50,
+        limit: input.limit ?? 50,
+        cursor: input.cursor ?? undefined,
       },
     });
     const body = asRecord(this.mustJson<unknown>(outcome, "PROTOCOL_ERROR"));
     if (!body || !Array.isArray(body["items"])) {
-      throw new DriverError("PROTOCOL_ERROR", "the question search response is missing items");
+      throw new DriverError("PROTOCOL_ERROR", "the question page response is missing items");
     }
-    return body["items"].flatMap((item) => {
+    const nextCursor = body["nextCursor"];
+    if (nextCursor !== null && typeof nextCursor !== "string") {
+      throw new DriverError("PROTOCOL_ERROR", "the question page cursor is neither a string nor null");
+    }
+    const items = body["items"].map((item) => {
       const record = asRecord(item);
-      if (!record) return [];
-      return [
-        {
-          id: requireString(record, "id"),
-          questionKey: requireString(record, "questionKey"),
-          currentRevisionId: requireString(record, "currentRevisionId"),
-          revisionNumber: requireNumber(record, "revisionNumber"),
-          lockVersion: requireNumber(record, "lockVersion"),
-          workflowState: String(record["workflowState"] ?? "unknown"),
-        },
-      ];
+      if (!record) throw new DriverError("PROTOCOL_ERROR", "a question page item is not an object");
+      // Exactly four fields are read. `stem` (a 200-character preview),
+      // `lockVersion` and `workflowState` are parsed and discarded: nothing of
+      // this response is stored on an item, logged, or put in an error detail.
+      return {
+        id: requireString(record, "id"),
+        questionKey: requireString(record, "questionKey"),
+        currentRevisionId: requireString(record, "currentRevisionId"),
+        revisionNumber: requireNumber(record, "revisionNumber"),
+      };
     });
+    return { items, nextCursor };
   }
 
   async readRevisionState(

@@ -89,6 +89,45 @@ export function proseFixture(
   };
 }
 
+export interface PageRequest {
+  cursor: string | null;
+  limit: number;
+}
+
+export interface PageOf<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+/**
+ * One page of a collection ordered by ascending id, exactly as the Worker's
+ * `pageClause`/`pageResult` pair does it: `id > cursor`, `LIMIT limit`, and a
+ * `nextCursor` set to the last id of the page only when more remain.
+ *
+ * The driver's earlier fake returned every match and hardcoded `nextCursor:
+ * null`, which made a "these rows are missing" answer impossible to reproduce
+ * and every presence test vacuous. Fakes that cannot express the defect cannot
+ * catch it, so the paging lives here once and its own test walks 120 items.
+ */
+export function pageOf<T>(items: readonly T[], request: PageRequest, idOf: (item: T) => string): PageOf<T> {
+  if (!Number.isInteger(request.limit) || request.limit < 1) {
+    throw new Error(`pageOf needs a positive integer limit, got ${request.limit}`);
+  }
+  const ordered = [...items].sort((left, right) => {
+    const a = idOf(left);
+    const b = idOf(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const remaining =
+    request.cursor === null ? ordered : ordered.filter((item) => idOf(item) > request.cursor!);
+  const page = remaining.slice(0, request.limit);
+  const last = page.at(-1);
+  return {
+    items: page,
+    nextCursor: remaining.length > request.limit && last !== undefined ? idOf(last) : null,
+  };
+}
+
 export interface RowOptions {
   key: string;
   domainId?: string;

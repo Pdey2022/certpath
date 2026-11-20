@@ -11,7 +11,7 @@ import {
   type Checkpoint,
 } from "./checkpoint.ts";
 import { DriverError } from "./errors.ts";
-import { writeFixture } from "./fixtures.ts";
+import { pageOf, writeFixture } from "./fixtures.ts";
 import { reviewNote, runDriver, type RunDependencies, type RunOptions } from "./run.ts";
 import { validateInputs } from "./validate.ts";
 
@@ -58,13 +58,47 @@ interface StubQuestion {
   topicId: string;
   questionId: string;
   revisionId: string;
+  revisionNumber: number;
+  stem: string;
   state: "draft" | "submitted" | "approved" | "published";
   publication: { revisionId: string; state: "published"; pointerVersion: number } | null;
 }
 
-function createStub(
-  options: { behaviour?: ConfirmBehaviour } & ConfirmBehaviourOptions = {},
-) {
+interface DecoySpec {
+  key: string;
+  domainId?: string;
+  topicId?: string;
+  stem?: string;
+  revisionNumber?: number;
+}
+
+interface SeedSpec extends DecoySpec {
+  questionId?: string;
+  revisionId?: string;
+}
+
+interface StubOptions extends ConfirmBehaviourOptions {
+  behaviour?: ConfirmBehaviour;
+  /**
+   * Questions the server already holds, in the topic a unit's rows sit in.
+   * Their ids sort before a confirmed question's, so they occupy the early
+   * pages and push the exact rows past the first one - the shape of the live
+   * defect.
+   */
+  decoys?: readonly DecoySpec[];
+  /**
+   * Keys the server holds but the listing does not return. A server answering
+   * two reads differently is the situation the refusal cross-check exists for.
+   */
+  omitFromListing?: readonly string[];
+  /** Answers `500` on the k-th `GET …/questions` (1-based). */
+  failPageAt?: number;
+}
+
+/** Every `GET …/questions` URL any stub issued, for the global `search` pin. */
+const everyQuestionUrl: string[] = [];
+
+function createStub(options: StubOptions = {}) {
   const behaviour = options.behaviour ?? "ok";
   const previews = new Map<string, { keys: string[]; domainId: string; topicId: string }>();
   const questions = new Map<string, StubQuestion>();
@@ -78,9 +112,34 @@ function createStub(
   let publishCount = 0;
   let revisionReads = 0;
   let publicationReads = 0;
+  let questionReads = 0;
+  let seeded = 0;
+  const questionUrls: string[] = [];
   let observedUnitStateDuringConfirm: string | null = null;
   let observedConfirmBody: string | null = null;
   let observedQuestionStateDuringReview: string | null = null;
+
+  /** Seeds a question the server already holds, as a previous run left it. */
+  function seedQuestion(spec: SeedSpec): void {
+    seeded += 1;
+    const index = String(seeded).padStart(4, "0");
+    questions.set(spec.key, {
+      key: spec.key,
+      domainId: spec.domainId ?? "dom-1",
+      topicId: spec.topicId ?? "top-cissp-d1-topic-1",
+      // `decoy-` sorts before the `question-` a confirm creates, which is what
+      // puts an exact row past the first page.
+      questionId: spec.questionId ?? `decoy-${index}`,
+      revisionId: spec.revisionId ?? `decoy-revision-${index}`,
+      revisionNumber: spec.revisionNumber ?? 1,
+      stem: spec.stem ?? `Synthetic stem for ${spec.key}`,
+      state: "draft",
+      publication: null,
+    });
+  }
+
+  for (const decoy of options.decoys ?? []) seedQuestion(decoy);
+  const omitted = new Set(options.omitFromListing ?? []);
 
   function json(body: unknown, status = 200): Response {
     return new Response(JSON.stringify(body), {
@@ -190,6 +249,8 @@ function createStub(
           topicId: preview.topicId,
           questionId: `question-${index}`,
           revisionId: `revision-${index}`,
+          revisionNumber: 1,
+          stem: `Synthetic stem for ${key}`,
           state: "draft",
           publication: null,
         });
@@ -206,23 +267,43 @@ function createStub(
     }
 
     if (path.endsWith("/questions")) {
-      const search = parsed.searchParams.get("search") ?? "";
+      questionReads += 1;
+      questionUrls.push(url);
+      everyQuestionUrl.push(url);
+      if (options.failPageAt === questionReads) {
+        return json({ error: { code: "service_unavailable", requestId: "stub-pages" } }, 500);
+      }
       const domainId = parsed.searchParams.get("domainId");
       const topicId = parsed.searchParams.get("topicId");
-      const items = [...questions.values()]
-        .filter((question) => question.key.includes(search))
+      const search = parsed.searchParams.get("search");
+      const limitParam = parsed.searchParams.get("limit");
+      // A faithful page store: the route's default is 25 and its ceiling is 50,
+      // it filters by domain, topic and (when asked) a substring of the key or
+      // the stem, orders by `question.id` and only then applies `cursor`.
+      const limit = limitParam === null ? 25 : Math.min(Number(limitParam), 50);
+      const cursor = parsed.searchParams.get("cursor");
+      const matching = [...questions.values()]
+        .filter((question) => !omitted.has(question.key))
         .filter((question) => domainId === null || question.domainId === domainId)
         .filter((question) => topicId === null || question.topicId === topicId)
-        .map((question) => ({
+        .filter(
+          (question) =>
+            search === null || question.key.includes(search) || question.stem.includes(search),
+        )
+        .map((question) => ({ question, id: question.questionId }));
+      const page = pageOf(matching, { cursor, limit }, (item) => item.id);
+      return json({
+        items: page.items.map(({ question }) => ({
           id: question.questionId,
           questionKey: question.key,
           currentRevisionId: question.revisionId,
-          revisionNumber: 1,
+          revisionNumber: question.revisionNumber,
           lockVersion: 1,
-          stem: "Synthetic stem",
+          stem: question.stem,
           workflowState: question.state,
-        }));
-      return json({ items, nextCursor: null });
+        })),
+        nextCursor: page.nextCursor,
+      });
     }
 
     const revisionMatch = /\/questions\/([^/]+)\/revisions\/([^/]+)(\/submit|\/review)?$/.exec(path);
@@ -304,6 +385,11 @@ function createStub(
     calls,
     previewBatches,
     confirmBatches,
+    questionUrls,
+    seedQuestion,
+    get questionReads() {
+      return questionReads;
+    },
     get confirmCount() {
       return confirmCount;
     },
@@ -354,7 +440,7 @@ interface Harness {
 function buildHarness(
   behaviour?: ConfirmBehaviour,
   rowCount = 5,
-  stubOptions: ConfirmBehaviourOptions = {},
+  stubOptions: StubOptions = {},
 ): { harness: Harness; stub: ReturnType<typeof createStub> } {
   const root = makeTempDir();
   const fixture = writeFixture(root, { rowCount });
@@ -432,6 +518,20 @@ function buildHarness(
     repoRoot: join(root, "repo"),
   };
   return { harness: { options, checkpointPath: join(stateDir, "checkpoint.json"), stateDir, deps }, stub };
+}
+
+/**
+ * Questions the server already holds whose keys *contain* the unit's first two
+ * rows as substrings (`cissp-120` contains `cissp-1`), plus one whose stem
+ * quotes `cissp-3`. Their ids are `decoy-NNNN`, which sorts before the
+ * `question-N` a confirm creates, so they fill the early pages and push the
+ * exact rows past the first one - the shape of the live defect.
+ */
+function crowdingDecoys(count: number): DecoySpec[] {
+  return Array.from({ length: count }, (_, index) => ({
+    key: `cissp-${100 + index}`,
+    ...(index === 3 ? { stem: "Synthetic stem quoting cissp-3" } : {}),
+  }));
 }
 
 async function runStages(
@@ -592,7 +692,10 @@ test("a refused preview keeps its own code instead of collapsing into PREVIEW_RE
 });
 
 test("a partial reconciliation stops the run with PARTIAL_IMPORT and leaves the unit unconfirmed", async () => {
-  const { harness, stub } = buildHarness("partial-then-500");
+  // The confirm commits two rows of five and then answers 500. The read has to
+  // establish the other three *absent* - so the topic is crowded enough that
+  // the listing needs more than one page - before "some" is an honest answer.
+  const { harness, stub } = buildHarness("partial-then-500", 5, { decoys: crowdingDecoys(60) });
   await assert.rejects(
     runStages(harness, ["transform", "upload"]),
     (error: unknown) => error instanceof DriverError && error.code === "PARTIAL_IMPORT",
@@ -601,6 +704,8 @@ test("a partial reconciliation stops the run with PARTIAL_IMPORT and leaves the 
   assert.notEqual(checkpoint.units[0]!.state, "confirmed");
   assert.equal(checkpoint.questions.length, 0);
   assert.equal(stub.confirmCount, 1);
+  assert.equal(stub.questionReads > 1, true);
+  assert.equal(checkpoint.lastError?.code, "PARTIAL_IMPORT");
 });
 
 test("a 401 on the confirm stops the run without a second attempt", async () => {
@@ -699,15 +804,19 @@ test("an interrupted upload resumes at the first unconfirmed unit, not at unit 1
   assert.equal(stub.questions.size, 20);
 });
 
-test("a unit whose keys are all on the server is adopted, not retried and not fatal", async () => {
+test("a unit whose keys are all in the checkpoint is adopted with no questions read", async () => {
+  // The live incident, as a regression: the rows are on the server *and* in
+  // the checkpoint's question list, the unit says `pending` because a stage-2
+  // re-run reset the unit states but not the questions. The old read sent five
+  // `search` probes, saw only the first page of each, and reported 3 of 5 rows
+  // missing when all five existed. Presence is a checkpoint-local fact, so this
+  // must cost zero `GET …/questions`.
   const { harness, stub } = buildHarness();
   await runStages(harness, ["transform", "upload"]);
   const confirms = stub.confirmCount;
   const previews = stub.previewCount;
+  assert.equal(stub.questionReads, 0);
 
-  // The state a pre-fix resume left behind: the rows are on the server and in
-  // the checkpoint's question list, but the unit says `pending` and the upload
-  // stage is still in progress.
   const checkpoint = readCheckpoint(harness.stateDir)!;
   checkpoint.units = checkpoint.units.map((unit) => ({
     ...unit,
@@ -724,31 +833,24 @@ test("a unit whose keys are all on the server is adopted, not retried and not fa
   assert.equal(after.units[0]!.state, "confirmed");
   assert.equal(after.stages.upload, "complete");
   assert.equal(after.questions.length, 5);
-  // One refused preview, then the by-key read: no second preview, no second
-  // confirm, and nothing written back.
+  // One refused preview, then the checkpoint's own answer: no second preview,
+  // no second confirm, nothing written back, and not one question read.
   assert.equal(stub.previewCount, previews + 1);
   assert.equal(stub.confirmCount, confirms);
+  assert.equal(stub.questionReads, 0);
   assert.equal(stub.questions.size, 5);
 });
 
-test("a unit whose keys partly exist imports only the rows that are missing", async () => {
-  const { harness, stub } = buildHarness();
-  // Three of unit 1's five rows are already on the server, e.g. from an earlier
-  // chunking of the same source rows.
-  const seeded = new Map<string, string>();
-  for (const [index, key] of ["cissp-1", "cissp-3", "cissp-5"].entries()) {
-    const questionId = `seeded-question-${index + 1}`;
-    seeded.set(key, questionId);
-    stub.questions.set(key, {
-      key,
-      domainId: "dom-1",
-      topicId: "top-cissp-d1-topic-1",
-      questionId,
-      revisionId: `seeded-revision-${index + 1}`,
-      state: "draft",
-      publication: null,
-    });
+test("a unit the server already holds is adopted through one exhaustive topic listing", async () => {
+  // The checkpoint knows nothing; the server holds all five rows behind 115
+  // decoys whose ids sort first, so page one cannot contain them. Only the
+  // cursor-followed walk can answer, and it must answer for all five.
+  const lines: string[] = [];
+  const { harness, stub } = buildHarness(undefined, 5, { decoys: crowdingDecoys(115) });
+  for (const key of ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"]) {
+    stub.seedQuestion({ key, questionId: `question-${key}` });
   }
+  harness.deps.log = (line) => lines.push(line);
 
   await runStages(harness, ["transform", "upload"]);
 
@@ -756,29 +858,215 @@ test("a unit whose keys partly exist imports only the rows that are missing", as
   assert.equal(checkpoint.units[0]!.state, "confirmed");
   assert.equal(checkpoint.stages.upload, "complete");
   assert.deepEqual(
-    checkpoint.questions.map((question) => question.key).sort(),
+    checkpoint.questions.map((question) => question.key),
     ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"],
   );
-  // The refused preview carried all five rows; the accepted preview and the
-  // confirm carried only the two that were missing, so the three that existed
-  // were never sent again.
-  assert.deepEqual(stub.previewBatches[0], [
-    "cissp-1",
-    "cissp-2",
-    "cissp-3",
-    "cissp-4",
-    "cissp-5",
-  ]);
-  assert.deepEqual(stub.previewBatches[1], ["cissp-2", "cissp-4"]);
-  assert.deepEqual(stub.confirmBatches, [["cissp-2", "cissp-4"]]);
-  assert.equal(stub.questions.size, 5);
-  // The rows that were already there kept their own question and revision.
-  for (const [key, questionId] of seeded) {
-    assert.equal(stub.questions.get(key)!.questionId, questionId);
+  for (const question of checkpoint.questions) {
+    assert.equal(question.questionId, `question-${question.key}`);
+    assert.equal(question.revisionId, stub.questions.get(question.key)!.revisionId);
   }
-  // And the checkpoint holds the server's ids for every row of the unit.
+  // Three pages: 115 decoys then the five exact rows. A first page is not an
+  // answer, and the request count is what proves more than one was read.
+  assert.equal(stub.questionReads, 3);
+  assert.equal(stub.confirmCount, 0);
+  assert.equal(stub.questions.size, 120);
+  assert.equal(checkpoint.counters.recoveries >= 1, true);
+  assert.equal(
+    lines.some((line) => line.includes("adopted 5 question(s) (5 resolved by an exact topic read)")),
+    true,
+    lines.join("\n"),
+  );
+});
+
+test("a row the server holds only at a later revision stops with PRESENCE_UNKNOWN", async () => {
+  // Present, but not provably the revision an import of these bytes creates:
+  // adopting it would attach the review note to content this pipeline cannot
+  // show it wrote.
+  const { harness, stub } = buildHarness(undefined, 5);
+  for (const key of ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"]) {
+    stub.seedQuestion({ key, ...(key === "cissp-3" ? { revisionNumber: 2 } : {}) });
+  }
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"]),
+    (error: unknown) => error instanceof DriverError && error.code === "PRESENCE_UNKNOWN",
+  );
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.lastError?.code, "PRESENCE_UNKNOWN");
+  assert.equal(stub.confirmCount, 0);
+});
+
+test("a refusal the listing cannot corroborate stops with PRESENCE_UNKNOWN", async () => {
+  // The live incident, as an end-to-end case: the preview names five existing
+  // keys and the listing shows two. Two server answers disagreeing is not a
+  // partial import and certainly not five missing rows - the run stops.
+  const { harness, stub } = buildHarness(undefined, 5, {
+    omitFromListing: ["cissp-3", "cissp-4", "cissp-5"],
+  });
+  for (const key of ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"]) {
+    stub.seedQuestion({ key });
+  }
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"]),
+    (error: unknown) => error instanceof DriverError && error.code === "PRESENCE_UNKNOWN",
+  );
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.lastError?.code, "PRESENCE_UNKNOWN");
+  assert.equal(stub.confirmCount, 0);
+});
+
+test("a unit the server partly holds stops with PARTIAL_IMPORT instead of importing the rest", async () => {
+  // Four of unit 1's five rows are on the server, e.g. under a checkpoint this
+  // process no longer has. The preview is all-or-nothing, so no reduced preview
+  // could import the fifth row without leaving the unit half here and half
+  // there: the refusal named four existing keys, the exhausted listing proves
+  // four present and one absent, and the run stops.
+  const { harness, stub } = buildHarness(undefined, 5);
+  for (const key of ["cissp-1", "cissp-2", "cissp-3", "cissp-5"]) {
+    stub.seedQuestion({ key, questionId: `seeded-${key}` });
+  }
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"]),
+    (error: unknown) => error instanceof DriverError && error.code === "PARTIAL_IMPORT",
+  );
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.lastError?.code, "PARTIAL_IMPORT");
+  assert.equal(stub.confirmCount, 0);
+  assert.deepEqual(stub.previewBatches, [
+    ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"],
+  ]);
+  assert.equal(stub.questions.size, 4);
+});
+
+test("an ambiguous confirm in a crowded topic adopts the exact rows, never a substring", async () => {
+  // The decoder for the original bug: 115 questions whose keys contain the
+  // unit's rows as substrings, one whose stem quotes a row key, all in the same
+  // topic. `search=cissp-1` returns decoys; only the walked listing holds the
+  // exact row, and a substring match is never adopted.
+  const { harness, stub } = buildHarness("commit-then-500", 5, { decoys: crowdingDecoys(115) });
+
+  await runStages(harness, ["transform", "upload"]);
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(checkpoint.units[0]!.state, "confirmed");
+  assert.deepEqual(
+    checkpoint.questions.map((question) => question.key),
+    ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"],
+  );
   for (const question of checkpoint.questions) {
     assert.equal(question.questionId, stub.questions.get(question.key)!.questionId);
+    assert.equal(stub.questions.get(question.key)!.key, question.key);
+  }
+  assert.equal(stub.questionReads > 1, true);
+  assert.equal(stub.questions.size, 120);
+});
+
+test("a key that exists only as a substring is never adopted", async () => {
+  // `cissp-100` … `cissp-214` contain `cissp-1` and `cissp-2`; `cissp-1` itself
+  // is nowhere. The confirm never commits, the walk exhausts the topic without
+  // an exact match, and the run stops - twice read, six pages, nothing adopted.
+  const { harness, stub } = buildHarness("confirm-409", 5, { decoys: crowdingDecoys(115) });
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"], null),
+    (error: unknown) => error instanceof DriverError && error.code === "CONFIRM_FAILED",
+  );
+
+  assert.equal(stub.confirmCount, 2); // the confirm, then its single retry
+  assert.equal(stub.questions.size, 115); // only the decoys the fake was given
+  assert.equal(stub.questionReads, 6); // two exhausted reads of three pages
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.lastError?.code, "CONFIRM_FAILED");
+});
+
+test("a listing that fails mid-walk stops with PROTOCOL_ERROR and records nothing", async () => {
+  const { harness, stub } = buildHarness("confirm-409", 5, {
+    decoys: crowdingDecoys(60),
+    failPageAt: 2,
+  });
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"], null),
+    (error: unknown) => error instanceof DriverError && error.code === "PROTOCOL_ERROR",
+  );
+
+  assert.equal(stub.questionReads, 2);
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.lastError?.code, "PROTOCOL_ERROR");
+});
+
+test("the page bound stops the walk with PRESENCE_UNKNOWN instead of concluding absence", async () => {
+  // 2 100 rows is 42 pages at 50 per page, past the 40-page bound. A bounded
+  // read that cannot finish must say so, not report 5 000 rows absent.
+  const { harness, stub } = buildHarness("confirm-409", 5, { decoys: crowdingDecoys(2_100) });
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"], null),
+    (error: unknown) => error instanceof DriverError && error.code === "PRESENCE_UNKNOWN",
+  );
+
+  assert.equal(stub.questionReads, 40);
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.lastError?.code, "PRESENCE_UNKNOWN");
+});
+
+test("the question fixture is a real page store: 120 rows at limit 50 is 50 + 50 + 20", async () => {
+  // Without this, the fake can silently stop paginating and every presence test
+  // above becomes vacuous in the same way the original tests were.
+  const stub = createStub({ decoys: crowdingDecoys(120) });
+  const readPage = async (cursor: string | null) => {
+    const url = new URL(
+      `${ORIGIN}/api/admin/content/certifications/cert-1/exam-versions/version-1/questions`,
+    );
+    url.searchParams.set("domainId", "dom-1");
+    url.searchParams.set("topicId", "top-cissp-d1-topic-1");
+    url.searchParams.set("limit", "50");
+    if (cursor !== null) url.searchParams.set("cursor", cursor);
+    const response = await stub.fetchImpl(url.toString());
+    assert.equal(response.status, 200);
+    return (await response.json()) as { items: Array<{ id: string }>; nextCursor: string | null };
+  };
+
+  const first = await readPage(null);
+  assert.equal(first.items.length, 50);
+  assert.equal(typeof first.nextCursor, "string");
+  const second = await readPage(first.nextCursor);
+  assert.equal(second.items.length, 50);
+  assert.equal(typeof second.nextCursor, "string");
+  const third = await readPage(second.nextCursor);
+  assert.equal(third.items.length, 20);
+  assert.equal(third.nextCursor, null);
+
+  const seen = new Set([...first.items, ...second.items, ...third.items].map((item) => item.id));
+  assert.equal(seen.size, 120);
+  assert.equal(stub.questionReads, 3);
+});
+
+test("no question read ever carries `search`", () => {
+  assert.equal(
+    everyQuestionUrl.length > 0,
+    true,
+    "no question URL was recorded, so this pin would be vacuous",
+  );
+  for (const url of everyQuestionUrl) {
+    assert.equal(new URL(url).searchParams.has("search"), false, url);
   }
 });
 

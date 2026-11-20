@@ -117,10 +117,7 @@ const RESTARTABLE_STAGES: ReadonlySet<StageName> = new Set(["taxonomy", "transfo
 
 const UNIT_TRANSITIONS: Record<UnitState, readonly UnitState[]> = {
   pending: ["previewing"],
-  // `previewing` -> `confirmed` is the reconciled outcome: the preview was
-  // refused because the server already held every key, and the by-key read
-  // proved it. Nothing was created, and no preview ever succeeded.
-  previewing: ["previewed", "pending", "confirmed"],
+  previewing: ["previewed", "pending"],
   previewed: ["previewing", "confirmed"],
   confirmed: [],
 };
