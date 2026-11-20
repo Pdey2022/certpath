@@ -579,17 +579,20 @@ Set-Location ..\..
    list each and nothing in code maps one name onto the other, so the same value
    is written into both secrets, and both are updated **in the same session**
    whenever the tester's egress address changes. The list is maintained twice on
-   purpose. Drift is an **outage, never wider access**: the staging gate
-   (`stagingTesterGate`, `apps/api/src/index.ts`) runs before routing on every
-   request, so an address missing from `STAGING_TESTER_IPS` answers `403` before
-   the admin gate is reached at all, and an address that passes staging but is
-   not on `ADMIN_TESTER_IPS` answers `403` from the admin gate (or `503` if that
-   secret is unset). **Why this is not code:** mapping one name onto the other —
-   reading `STAGING_TESTER_IPS` inside `adminTesterGate`, or having one secret
-   copy the other — would make a single list serve two gates and weaken the
-   documented guarantee that passing the staging gate is not the same permission
-   as reaching `/admin`. Two lists, one sitting, is the rule; do not "simplify"
-   it in `admin-gate.ts` or `staging-gate.ts`.
+   purpose. Drift is an **outage, never wider access**: `stagingTesterGate` is a
+   `use("*")` middleware in the API app, ahead of every route, and staging sets
+   `STAGING_LEARNER_AUTH_ENABLED="true"`, so it wraps every request the app
+   serves. An address that passes the admin gate but is missing from
+   `STAGING_TESTER_IPS` still answers `403` on every API call, and there is no
+   data path that avoids the API; an address on the staging list but not on
+   `ADMIN_TESTER_IPS` answers `403` from the admin gate, and `503` when that
+   secret is unset. The worst either drift can do is shut a gate. **Why this is
+   not code:** mapping one name onto the other — reading `STAGING_TESTER_IPS`
+   inside `adminTesterGate`, or having one secret copy the other — would make a
+   single list serve two gates and weaken the documented guarantee that passing
+   the staging gate is not the same permission as reaching `/admin`. Two lists,
+   one sitting, is the rule; do not "simplify" it in `admin-gate.ts` or
+   `staging-gate.ts`.
 3. **Set `STAFF_MFA_SEAL_KEY` before the first enrolment, then keep it.** It wraps
    every TOTP seed. Changing or unsetting it makes `openTotpSeed`
    (`apps/api/src/security/totp.ts`, called from
