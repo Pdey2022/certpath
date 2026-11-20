@@ -2,7 +2,8 @@
 
 - Status: Accepted, with owner approval on 2026-11-20.
 - Scope: The repository's visibility, the licence it carries, and the
-  protections that had to be in place before anything was published.
+  protections that were put in place as it was published, before the first
+  deploy.
 
 ## Context
 
@@ -38,13 +39,18 @@ plan to clean it later.
   not claim otherwise.
 - Content **imported from a third party** that carries its own
   `license_reference` is governed by **that** reference, not by `LICENSE`. The
-  importer records a `license_reference` per question, so a future licensed bank
-  keeps its own licence and is not silently claimed by this file. The owner's own
-  bank carries `All rights reserved (owner-authored)` and is covered by
-  `LICENSE` like everything else here; the carve-out is for imported banks only.
+  importer records a `license_reference` per question **revision**, and nothing
+  verifies that the value names a real licence, so a future licensed bank keeps
+  its own licence and is not silently claimed by this file. The owner's own bank
+  carries `All rights reserved (owner-authored)` and is covered by `LICENSE` like
+  everything else here; the carve-out is for imported banks only.
 - The trademark disclaimer and the as-is paragraph stay.
 
-### Done before publishing
+### Done before publication
+
+Both items below were finished **before** the repository was made public at
+16:42:48 UTC on 2026-11-20 — that ordering is the premise of this decision, not
+a claim about the settings described in the next section.
 
 - **History audited for credentials.** The objects in the published history were
   searched for tokens, keys, passwords, `.dev.vars` content and account ids. What
@@ -52,12 +58,13 @@ plan to clean it later.
   credentials anywhere, plus the public Cloudflare account id that the workflows
   already pin. Nothing secret had to be rewritten or rotated.
 - **Agent checkpoints are a standing check, not a one-off cleanup.** 139 local
-  `refs/agents/*` refs were deleted and pruned on 2026-11-20. They were never on
-  `origin` — `git push --all` publishes `refs/heads/*` only — but they existed in
-  the working clone and were one `git push --mirror` away from being published.
+  `refs/agents/*` refs were deleted and pruned, before 16:30 UTC. They were never
+  on `origin` — `git push --all` publishes `refs/heads/*` only — but they existed
+  in the working clone and were one `git push --mirror` away from being published.
   `git fetch origin <sha>` for the pruned commits failed, so they are **not
-  retrievable from GitHub by SHA now**; a SHA is served only while a ref reaches
-  it, so that shows they are gone, not that they were never there — the claim
+  retrievable from GitHub by SHA now**: a SHA is served only while some ref on the
+  server reaches it — `refs/pull/*/head` counts — and fetching by SHA needs all 40
+  characters. That shows they are gone, not that they were never there; the claim
   rests on the refs having been local-only.
   The harness recreates checkpoint refs every session, so the clone is not
   permanently clean: at the time of writing 7 such refs exist (6 under
@@ -77,8 +84,23 @@ plan to clean it later.
 
 ### Protections now in place
 
+The protections were enabled minutes **after** publication and before the first
+deploy. The order of events on 2026-11-20 (UTC) was:
+
+| Event | Time |
+|---|---|
+| History audit; 139 `refs/agents/*` refs deleted and pruned | before 16:30 |
+| Repository made public | 16:42:48 |
+| Branch protection on `main` (`verify` strict; force pushes and deletions blocked) | shortly after 16:42 |
+| `CLOUDFLARE_ACCOUNT_ID` secret | 16:46:32 |
+| `CLOUDFLARE_API_TOKEN` secret | 17:02:24 |
+| `production` environment | 17:04:10 |
+| First live deploy (`publish-site`, run `44780344874`, commit `16247bf`) | 17:12:57 |
+
 - **`main` is protected**: the `verify` check is required in strict mode, and
-  force pushes and branch deletions are blocked.
+  force pushes and branch deletions are blocked — **except for the repository
+  administrator, who can still bypass them** (`enforce_admins` is off, and no
+  ruleset enforces against admins). The protection binds everyone else.
 - **Secret scanning and push protection** are enabled on the repository
   (Settings → Code security, verified 2026-11-20). Push protection is not
   absolute: it covers only the secret patterns GitHub recognises, and a writer
@@ -89,7 +111,10 @@ plan to clean it later.
   § *Pushing refs*: a named branch only; never `--all`, `--mirror`, `--tags` or
   `--follow-tags`; check which refs and commits a push would send (`--dry-run`
   plus `git log origin/<branch>..<branch>`), that `refs/agents` and `refs/stash`
-  are empty, and the object reachability first.
+  are empty, and the object reachability first. It **binds the person pushing**:
+  nothing server-side rejects `git push origin refs/agents/…`, a `refs/stash`
+  push, a tag push or `--mirror` — branch protection covers `main` only — so it
+  is a discipline, not an enforcement point.
 
 ## Alternatives considered
 
@@ -115,16 +140,18 @@ plan to clean it later.
   retrievable by SHA, and commercial information in the repository is disclosed
   permanently. That includes documentation the owner accepted publishing: the
   price ladder (ADR 0003), the risk register and delivery plan
-  (`docs/delivery-plan.md`), and the content gaps recorded in
-  `docs/pilot-hardening.md`.
+  (`docs/delivery-plan.md`), and the bank's content gaps, which
+  `docs/cissp-bank-import.md` § *Honest limitations* records in full — 171
+  questions are domain-only and map to `general`, and 211 of 484 items are
+  Domain 1.
 - **The bank's composition is published.**
   `tools/cissp-convert/taxonomy.json` carries the blueprint the import driver
   uses, including per-domain and per-topic `expectedQuestions`: **484** in total,
   **211** in Domain 1, and **171** mapped to the per-domain `general` topics.
   Anyone reading the repository can see how the bank is built and where it is
-  thin (the gaps themselves are recorded in `docs/pilot-hardening.md`). The owner
-  accepted this: the numbers describe the exam's structure and the bank's shape,
-  not its questions.
+  thin (the gaps themselves are recorded in `docs/cissp-bank-import.md`
+  § *Honest limitations*). The owner accepted this: the numbers describe the
+  exam's structure and the bank's shape, not its questions.
 - **`main` cannot be rewritten.** A leaked object cannot be removed by force
   pushing a cleaned history; it would still be addressable by SHA, and forks
   would still hold it. Rotation, not history editing, is the response to a

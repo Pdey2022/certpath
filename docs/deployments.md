@@ -149,7 +149,10 @@ the target's Worker name (`certpath-site` or `certpath-pilot`).
 
 **`main` is protected.** Branch protection requires the `verify` check in strict
 mode (a branch must be up to date before it merges), and force pushes and branch
-deletions are blocked. The protection exists because the branch protection and
+deletions are blocked — **except for the repository administrator, who can still
+bypass them** (`enforce_admins` is off, and no ruleset enforces against admins).
+The protection binds everyone else. It was enabled shortly after publication and
+before the first deploy. The protection exists because the branch protection and
 ruleset features this repository needs are not available on the free private
 plan; the repository is public instead of paying for Pro (ADR 0007).
 
@@ -231,12 +234,15 @@ Deleting a branch is not a way to un-publish what was on it. Treat every push as
 irreversible.
 
 That is why these commands are prohibited rather than discouraged: each one
-publishes refs nobody reviewed.
+publishes refs nobody reviewed. The rule binds the person pushing — **no
+server-side control rejects any of these pushes.** Branch protection covers
+`main` only; nothing on the server refuses `git push origin refs/agents/…`, a
+`refs/stash` push, a tag push or `--mirror`.
 
 | Command | What it actually publishes | Why it is prohibited |
 |---|---|---|
-| `git push --all` | every `refs/heads/*` — **not** `refs/agents/*` or `refs/stash`, which are not heads | every *unpublished local branch* in the clone, not the one you meant. At the time of writing this clone holds two: `backup/magic-link-pre-rebase` and `test/local-d1-learner-practice-mock` (`git for-each-ref --format='%(refname)' refs/heads` lists them all) |
-| `git push --mirror` | every ref — `refs/heads/*`, `refs/tags/*`, `refs/agents/*` and `refs/stash` — and it **deletes** origin refs that are absent locally | it publishes the agent checkpoints that `--all` leaves alone (the harness recreates them every session, so they are always present), and it destroys as well as publishes: a ref that exists on `origin` but not locally is removed |
+| `git push --all` | every `refs/heads/*` — **not** `refs/agents/*` or `refs/stash`, which are not heads | every *unpublished local branch* in the clone, not the one you meant. `git for-each-ref --format='%(refname)' refs/heads` lists them; the list changes, so read it rather than trusting a remembered one |
+| `git push --mirror` | every ref — `refs/heads/*`, `refs/tags/*`, `refs/agents/*` and `refs/stash` — and it **deletes** origin refs that are absent locally | it publishes the agent checkpoints that `--all` leaves alone whenever they exist, and it destroys as well as publishes: a ref that exists on `origin` but not locally is removed |
 | `git push origin --tags` | every tag | a tag keeps the commit it names reachable, including commits no branch points at any more |
 | `git push --follow-tags` | annotated tags reachable from the pushed ref | the same exposure, limited to the tags you are carrying |
 

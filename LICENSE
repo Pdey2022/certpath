@@ -14,8 +14,9 @@ and nothing here claims otherwise.
 
 Content imported from a third party that carries its own `license_reference` is
 governed by that reference and not by this notice. The question importer records
-a `license_reference` per question, so a bank imported under another licence
-keeps that licence and is not claimed by this file. The owner's own bank carries
+a `license_reference` per question revision, and nothing verifies that the value
+names a real licence; a bank imported under another licence keeps that licence
+and is not claimed by this file. The owner's own bank carries
 `All rights reserved (owner-authored)` and is covered by this notice like
 everything else here.
 
