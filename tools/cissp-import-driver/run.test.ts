@@ -36,6 +36,7 @@ type ConfirmBehaviour =
   | "commit-then-500"
   | "partial-then-500"
   | "unauthorized"
+  | "confirm-409"
   // The three Stage 3/4 mutations that commit and then lose the answer. Each
   // one must be reconciled by observation, never re-sent blind.
   | "submit-then-500"
@@ -120,9 +121,33 @@ function createStub(
       const text = typeof body === "string" ? body : new TextDecoder().decode(body as Uint8Array);
       const rows = parseCsv(text).slice(1);
       previewCount += 1;
-      const importId = `import-${previewCount}`;
       const keys = rows.map((row) => row[1]!);
       previewBatches.push(keys);
+      // The server refuses a preview that would duplicate a key it already
+      // holds: 400 with one issue per row, exactly as the import validator does.
+      const duplicated = keys.filter((key) => questions.has(key));
+      if (duplicated.length > 0) {
+        return json(
+          {
+            error: {
+              code: "validation_failed",
+              requestId: "stub-14",
+              issues: rows.flatMap((row, index) =>
+                questions.has(row[1]!)
+                  ? [{ path: `row.${index + 2}.question_key`, code: "existing_question_key" }]
+                  : [],
+              ),
+            },
+            summary: {
+              parsedRows: rows.length,
+              validRows: rows.length - duplicated.length,
+              invalidRows: duplicated.length,
+            },
+          },
+          400,
+        );
+      }
+      const importId = `import-${previewCount}`;
       previews.set(importId, { keys, domainId: rows[0]![3]!, topicId: rows[0]![4]! });
       return json(
         {
@@ -148,6 +173,9 @@ function createStub(
 
       if (behaviour === "unauthorized") {
         return json({ error: { code: "unauthenticated", requestId: "stub-2" } }, 401);
+      }
+      if (behaviour === "confirm-409") {
+        return json({ error: { code: "conflict", requestId: "stub-15" } }, 409);
       }
       if (options.failConfirmWhen?.(preview.keys) === true) {
         return json({ error: { code: "unauthenticated", requestId: "stub-16" } }, 401);
@@ -669,4 +697,105 @@ test("an interrupted upload resumes at the first unconfirmed unit, not at unit 1
   // Four previews before the interruption, one after it.
   assert.equal(stub.previewBatches.length, 5);
   assert.equal(stub.questions.size, 20);
+});
+
+test("a unit whose keys are all on the server is adopted, not retried and not fatal", async () => {
+  const { harness, stub } = buildHarness();
+  await runStages(harness, ["transform", "upload"]);
+  const confirms = stub.confirmCount;
+  const previews = stub.previewCount;
+
+  // The state a pre-fix resume left behind: the rows are on the server and in
+  // the checkpoint's question list, but the unit says `pending` and the upload
+  // stage is still in progress.
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  checkpoint.units = checkpoint.units.map((unit) => ({
+    ...unit,
+    state: "pending" as const,
+    importId: null,
+    expiresAt: null,
+  }));
+  checkpoint.stages.upload = "in-progress";
+  saveCheckpoint(harness.checkpointPath, checkpoint, undefined, NOW);
+
+  await runStages(harness, ["upload"]);
+
+  const after = readCheckpoint(harness.stateDir)!;
+  assert.equal(after.units[0]!.state, "confirmed");
+  assert.equal(after.stages.upload, "complete");
+  assert.equal(after.questions.length, 5);
+  // One refused preview, then the by-key read: no second preview, no second
+  // confirm, and nothing written back.
+  assert.equal(stub.previewCount, previews + 1);
+  assert.equal(stub.confirmCount, confirms);
+  assert.equal(stub.questions.size, 5);
+});
+
+test("a unit whose keys partly exist imports only the rows that are missing", async () => {
+  const { harness, stub } = buildHarness();
+  // Three of unit 1's five rows are already on the server, e.g. from an earlier
+  // chunking of the same source rows.
+  const seeded = new Map<string, string>();
+  for (const [index, key] of ["cissp-1", "cissp-3", "cissp-5"].entries()) {
+    const questionId = `seeded-question-${index + 1}`;
+    seeded.set(key, questionId);
+    stub.questions.set(key, {
+      key,
+      domainId: "dom-1",
+      topicId: "top-cissp-d1-topic-1",
+      questionId,
+      revisionId: `seeded-revision-${index + 1}`,
+      state: "draft",
+      publication: null,
+    });
+  }
+
+  await runStages(harness, ["transform", "upload"]);
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.stages.upload, "complete");
+  assert.deepEqual(
+    checkpoint.questions.map((question) => question.key).sort(),
+    ["cissp-1", "cissp-2", "cissp-3", "cissp-4", "cissp-5"],
+  );
+  // The refused preview carried all five rows; the accepted preview and the
+  // confirm carried only the two that were missing, so the three that existed
+  // were never sent again.
+  assert.deepEqual(stub.previewBatches[0], [
+    "cissp-1",
+    "cissp-2",
+    "cissp-3",
+    "cissp-4",
+    "cissp-5",
+  ]);
+  assert.deepEqual(stub.previewBatches[1], ["cissp-2", "cissp-4"]);
+  assert.deepEqual(stub.confirmBatches, [["cissp-2", "cissp-4"]]);
+  assert.equal(stub.questions.size, 5);
+  // The rows that were already there kept their own question and revision.
+  for (const [key, questionId] of seeded) {
+    assert.equal(stub.questions.get(key)!.questionId, questionId);
+  }
+  // And the checkpoint holds the server's ids for every row of the unit.
+  for (const question of checkpoint.questions) {
+    assert.equal(question.questionId, stub.questions.get(question.key)!.questionId);
+  }
+});
+
+test("a genuinely new conflict still stops the run and records no question", async () => {
+  // Reconciling an existing key must not turn a real refusal into an import:
+  // a 409 whose keys the server does not hold is still a stop.
+  const { harness, stub } = buildHarness("confirm-409");
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"], null),
+    (error: unknown) => error instanceof DriverError && error.code === "CONFIRM_FAILED",
+  );
+
+  assert.equal(stub.confirmCount, 2); // the confirm, then its single retry
+  assert.equal(stub.questions.size, 0);
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  assert.equal(checkpoint.counters.conflicts, 2);
+  assert.equal(checkpoint.lastError?.code, "CONFIRM_FAILED");
 });

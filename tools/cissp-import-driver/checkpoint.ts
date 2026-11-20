@@ -117,7 +117,10 @@ const RESTARTABLE_STAGES: ReadonlySet<StageName> = new Set(["taxonomy", "transfo
 
 const UNIT_TRANSITIONS: Record<UnitState, readonly UnitState[]> = {
   pending: ["previewing"],
-  previewing: ["previewed", "pending"],
+  // `previewing` -> `confirmed` is the reconciled outcome: the preview was
+  // refused because the server already held every key, and the by-key read
+  // proved it. Nothing was created, and no preview ever succeeded.
+  previewing: ["previewed", "pending", "confirmed"],
   previewed: ["previewing", "confirmed"],
   confirmed: [],
 };
@@ -346,12 +349,35 @@ export function reconcileUnits(
   return preserved;
 }
 
+/**
+ * Records questions the server confirmed or already held.
+ *
+ * `question_key` is the join key, so re-recording a key the server reports with
+ * the same ids is a no-op rather than an error: a resume that reconciles a unit
+ * an earlier process imported must land on the record that is already there,
+ * including the workflow state a later stage may have advanced. The same key
+ * with different ids or a different unit is a server state the driver cannot
+ * explain, and it stops.
+ */
 export function addQuestions(checkpoint: Checkpoint, records: readonly QuestionRecord[]): void {
   for (const record of records) {
-    if (checkpoint.questions.some((candidate) => candidate.key === record.key)) {
-      throw new DriverError("CHECKPOINT_INVALID", `question ${record.key} is already in the checkpoint`);
+    const existing = checkpoint.questions.find((candidate) => candidate.key === record.key);
+    if (existing === undefined) {
+      checkpoint.questions.push({ ...record });
+      continue;
     }
-    checkpoint.questions.push({ ...record });
+    if (existing.questionId !== record.questionId || existing.revisionId !== record.revisionId) {
+      throw new DriverError(
+        "CHECKPOINT_INVALID",
+        `question ${record.key} is already in the checkpoint with different server ids`,
+      );
+    }
+    if (existing.unit !== record.unit) {
+      throw new DriverError(
+        "CHECKPOINT_INVALID",
+        `question ${record.key} is already in the checkpoint for unit ${existing.unit}`,
+      );
+    }
   }
 }
 
