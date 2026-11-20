@@ -293,6 +293,15 @@ function executeArguments(target: ProvisioningTarget, sql: string): string[] {
       "the verified database target is incomplete; refusing to run",
     );
   }
+  // The binding name is the last thing standing between a run and an
+  // unintended database: `pinRemoteTarget` builds it, but a hand-assembled
+  // target must not be able to address some other binding in some other config.
+  if (target.bindingName !== pinnedDatabaseBinding) {
+    throw new ProvisioningAbort(
+      "wrong-binding",
+      `the pinned target must address the ${pinnedDatabaseBinding} binding, saw ${target.bindingName}; refusing to run`,
+    );
+  }
   return [
     "d1",
     "execute",

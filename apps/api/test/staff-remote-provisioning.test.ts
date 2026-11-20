@@ -385,6 +385,36 @@ describe("remote staff provisioning", () => {
     expect(await snapshot()).toEqual(before);
   });
 
+  it("refuses a target that does not address the pinned binding", async () => {
+    const identifiers = await buildIdentifiers("binding");
+    const before = await snapshot();
+    const { runner, state } = createMockRunner();
+    const wrongBinding: ProvisioningTarget = {
+      ...pinnedTarget,
+      bindingName: "DB",
+    };
+
+    // Every remote read and write goes through `executeArguments`, so both the
+    // pre-write check and the write itself must refuse the same target.
+    expect(
+      await abortCode(() => applyProvisioning(runner, wrongBinding, identifiers)),
+    ).toBe("wrong-binding");
+    expect(
+      await abortCode(() =>
+        assertNoExistingTesterRows(runner, wrongBinding, {
+          emails: identifiers.emails,
+          certificationSlug: identifiers.certificationSlug,
+        }),
+      ),
+    ).toBe("wrong-binding");
+    expect(
+      await abortCode(() => confirmProvisioning(runner, wrongBinding, identifiers)),
+    ).toBe("wrong-binding");
+
+    expect(state.calls).toEqual([]);
+    expect(await snapshot()).toEqual(before);
+  });
+
   it("refuses a pair that is not on the allowlist before spawning the CLI", async () => {
     const before = await snapshot();
     const { runner, state } = createMockRunner();
