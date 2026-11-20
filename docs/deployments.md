@@ -4,10 +4,27 @@ How CertPath reaches Cloudflare Workers, what a merge to `main` does, and how
 to undo it. The pipeline is `.github/workflows/ci.yml` (continuous) and
 `.github/workflows/deploy-production.yml` (manual).
 
-The **first automatic deploy happens when the owner merges this change to
-`main`**: both publish jobs are guarded by `github.event_name == 'push' &&
-github.ref == 'refs/heads/main'`, so a pull request, a manual `CI` dispatch and
-this branch publish nothing.
+## The first live deploy (2026-11-20)
+
+The first merge to `main` ran the pipeline: the public site published, and the
+staging publish was deliberately gated. Run
+[44780344874](https://github.com/Pdey2022/certpath/actions/runs/44780344874) on
+commit `16247bf` ("CISSP import driver (Phase 3) and two-tier Cloudflare deploy
+pipeline (#184)"):
+
+| Job | Outcome |
+|---|---|
+| `verify` | success |
+| `publish-site` | **success** — `DEPLOYED_COMMIT=16247bf` was stamped into the artefact and verified in the log |
+| `publish-staging` | **success** — its deploy step was skipped by the schema gate, with a notice naming `0023_staff_second_factor.sql`; `learner-auth-staging` was not published |
+
+Live checks against `certpath-site` after the deploy: `/` 200 with the full
+server-rendered HTML, `/exams` 200, `/robots.txt` 200 (`Allow: /`,
+`Disallow: /app`, `Disallow: /admin`), `/sitemap.xml` 200.
+
+Both publish jobs are guarded by `github.event_name == 'push' &&
+github.ref == 'refs/heads/main'`, so a pull request or a manual `CI` dispatch
+publishes nothing.
 
 ## Two tiers
 
@@ -55,9 +72,10 @@ Both app deploys assert the account on the command line, with one shared rule
 
 `--allow-pilot-flags` is a staging-only override; the pilot CLI refuses it as an
 unknown argument, so a pilot deploy has no way to waive an assertion. The public
-site's `deploy:site` carries no script-level guard: its account comes from
-`CLOUDFLARE_ACCOUNT_ID`, which the workflow asserts equals
-`ef67137c4d1556f7f51f1cb3f1f420f3` before the step runs.
+site's `deploy:site` has no script-level *account* assertion — its account comes
+from `CLOUDFLARE_ACCOUNT_ID`, which the workflow asserts equals
+`ef67137c4d1556f7f51f1cb3f1f420f3` before the step runs — but its artefact and
+its `DEPLOYED_COMMIT` stamp are asserted by `assertSiteDeployConfig`.
 
 The pilot **database** is not provisioned: `wrangler.pilot.jsonc` still carries
 the all-zero `database_id`, so the production `app` dispatch fails loudly at the
@@ -101,13 +119,14 @@ next merge publishes the staging Worker.
 The public site carries no D1 binding, so there is no schema to gate; the
 production workflow's gate step is scoped to the `app` target.
 
-## Required GitHub settings
+## GitHub settings (in place)
 
-The owner creates these once, in **Settings -> Secrets and variables -> Actions**:
+These are done, not outstanding. They were created and verified on 2026-11-20,
+against the first live deploy.
 
-| Secret | Value | Used for |
+| Secret (Settings -> Secrets and variables -> Actions) | Value | Used for |
 |---|---|---|
-| `CLOUDFLARE_API_TOKEN` | an API token for the Certpath account with **Workers Scripts:Edit** and **D1:Read** | every deploy, the migration gate, `wrangler deployments status` |
+| `CLOUDFLARE_API_TOKEN` | an API token for the Certpath account scoped to **Workers Scripts:Edit** and **D1:Read**; verified live by the first deploy | every deploy, the migration gate, `wrangler deployments status` |
 | `CLOUDFLARE_ACCOUNT_ID` | `ef67137c4d1556f7f51f1cb3f1f420f3` (the Certpath account) | pinning Wrangler to that account |
 
 If either secret is absent, or the account id is not the Certpath account, every
@@ -122,12 +141,20 @@ deploy scripts redact it from anything Wrangler prints.
 separate, owner-only credential with **D1:Edit**; it is never stored in Actions
 secrets, never used by a workflow, and never held by the deploy token.
 
-Production also needs an **environment** named `production`
-(**Settings -> Environments**) with required reviewers (and, if desired, a
-deployment-branch rule limiting it to `main`). Without it, the production
-workflow deploys without an approval step. It cannot be reached by a push: its
-only trigger is `workflow_dispatch`, and it additionally requires the `confirm`
-input to equal the target's Worker name (`certpath-site` or `certpath-pilot`).
+The **`production` environment** exists (**Settings -> Environments**), with the
+owner as its required reviewer. Without it, the production workflow would deploy
+without an approval step. It cannot be reached by a push: its only trigger is
+`workflow_dispatch`, and it additionally requires the `confirm` input to equal
+the target's Worker name (`certpath-site` or `certpath-pilot`).
+
+**`main` is protected.** Branch protection requires the `verify` check in strict
+mode (a branch must be up to date before it merges), and force pushes and branch
+deletions are blocked — **except for the repository administrator, who can still
+bypass them** (`enforce_admins` is off, and no ruleset enforces against admins).
+The protection binds everyone else. It was enabled shortly after publication and
+before the first deploy. The protection exists because the branch protection and
+ruleset features this repository needs are not available on the free private
+plan; the repository is public instead of paying for Pro (ADR 0007).
 
 ## The deployed commit
 
@@ -195,5 +222,93 @@ Where to read it:
 the workflow files were linted by hand when they were written.
 
 CI cannot prove a deploy: `npm run verify` runs no network command, and the
-publish jobs only run on a push to `main`. The first live proof is the first
-merge.
+publish jobs only run on a push to `main`. The first live deploy is recorded at
+the top of this document (run `44780344874`, commit `16247bf`).
+
+## Pushing refs: never `--all`, `--mirror` or `--tags`
+
+The repository is public (ADR 0007). Only refs that reach `origin` are published,
+and **a pushed commit stays retrievable on GitHub by its SHA after the ref that
+pointed at it is deleted**, and persists in any fork taken while it was there.
+Deleting a branch is not a way to un-publish what was on it. Treat every push as
+irreversible.
+
+That is why these commands are prohibited rather than discouraged: each one
+publishes refs nobody reviewed. The rule binds the person pushing — **no
+server-side control rejects any of these pushes.** Branch protection covers
+`main` only; nothing on the server refuses `git push origin refs/agents/…`, a
+`refs/stash` push, a tag push or `--mirror`.
+
+| Command | What it actually publishes | Why it is prohibited |
+|---|---|---|
+| `git push --all` | every `refs/heads/*` — **not** `refs/agents/*` or `refs/stash`, which are not heads | every *unpublished local branch* in the clone, not the one you meant. `git for-each-ref --format='%(refname)' refs/heads` lists them; the list changes, so read it rather than trusting a remembered one |
+| `git push --mirror` | every ref — `refs/heads/*`, `refs/tags/*`, `refs/agents/*` and `refs/stash` — and it **deletes** origin refs that are absent locally | it publishes the agent checkpoints that `--all` leaves alone whenever they exist, and it destroys as well as publishes: a ref that exists on `origin` but not locally is removed |
+| `git push origin --tags` | every tag | a tag keeps the commit it names reachable, including commits no branch points at any more |
+| `git push --follow-tags` | annotated tags reachable from the pushed ref | the same exposure, limited to the tags you are carrying |
+
+Push a named branch only:
+
+```powershell
+git push origin <branch-name>
+```
+
+### Before any push from a new working copy
+
+```powershell
+git push --dry-run origin <branch-name>              # which refs would be updated
+git log --oneline origin/<branch-name>..<branch-name> # which commits those refs carry
+git ls-remote origin                                 # what origin already holds
+```
+
+`--dry-run` previews **which refs would be updated** and uploads nothing. It does
+not exercise server-side push protection or secret scanning — nothing reaches the
+server for either to inspect — and it does not list the commits the ref carries,
+so pair it with the `git log` line above. `ls-remote` shows what is already
+published. None of the three replaces the reachability checks below.
+
+### Agent checkpoint refs are recreated every session
+
+139 `refs/agents/*` refs were deleted and pruned on 2026-11-20. That was not a
+one-off cleanup: the agent harness recreates checkpoint refs every session, so at
+the time of writing 7 such refs exist (6 under `refs/agents/` plus `refs/stash`).
+
+Before any publish, the check is that the list is empty:
+
+```powershell
+git for-each-ref --format='%(refname)' refs/agents refs/stash   # must print nothing
+```
+
+What makes the current state safe is not the earlier deletion but the fact that
+the study file is **not reachable from any ref right now**:
+`git rev-list --objects --all` returns no match for it. The refs come back, so
+the check has to be repeated, not remembered.
+
+### Is a path reachable from any ref?
+
+`git log --all -- <path>` matches that path in each commit, so a file that was
+renamed is found only under its current name. That matters here: the `.gitignore`
+pattern `docs/CISSP*/` covers a renamed study folder, so a check that sees only
+the new path can pass while the object is still reachable under the old one.
+
+```powershell
+git rev-list --objects --all | Select-String -Pattern 'CISSP'
+git log --all --full-history -- '*CISSP*'
+```
+
+The two commands answer different halves of the question, and neither follows a
+rename on its own:
+
+- `git rev-list --objects --all` lists every object reachable from any ref with
+  the path it is reached under. Each object is named **once**, by the first path
+  that reaches it, so a blob reachable under several names appears under one of
+  them only.
+- `git log --all --full-history -- '*CISSP*'` matches the glob against each
+  commit's tree, so it finds a matching name in any commit, whatever the path is
+  today, and keeps those commits in the history it prints.
+
+An object listed by either is published the moment a ref that reaches it is
+pushed.
+
+A file excluded by `.gitignore` is not protected once it has been committed on
+any ref: ignore rules govern new adds, not existing history. The only reliable
+control is not to publish the ref.
