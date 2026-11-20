@@ -38,6 +38,7 @@ import {
   setInFlight,
   setQuestionState,
   setUnitState,
+  reconcileUnits,
   unitsInScope,
   type Checkpoint,
   type QuestionRecord,
@@ -529,20 +530,17 @@ function runTransformStage(context: Context): void {
   const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
   writeUploadArtifacts(options.stateDir, units, manifestText);
   checkpoint.inputs.uploadManifestSha256 = sha256(manifestText);
-  checkpoint.units = units.map((unit) => ({
-    unit: unit.unit,
-    file: unit.file,
-    sha256: unit.sha256,
-    rows: unit.rows,
-    state: "pending",
-    importId: null,
-    expiresAt: null,
-  }));
+  // Re-running this stage must not discard what stage 3 already confirmed: the
+  // unit list is derived from the same converter output, so every unchanged
+  // unit keeps its state. Rebuilding the records from scratch here is what made
+  // a resume start again at unit 1.
+  const preserved = reconcileUnits(checkpoint, units);
   finishStage(checkpoint, "transform");
   persist(context);
   log(
     context,
-    `transform: ${validated.rows.length} rows in ${units.length} unit(s) of at most ${options.batchSize} outside the repository`,
+    `transform: ${validated.rows.length} rows in ${units.length} unit(s) of at most ${options.batchSize} outside the repository` +
+      (preserved > 0 ? `; kept ${preserved} confirmed unit(s) from the checkpoint` : ""),
   );
 }
 

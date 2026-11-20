@@ -220,7 +220,16 @@ export function writeFixture(
   const prosePath = join(root, "prose.json");
   writeFileSync(prosePath, `${JSON.stringify(proseFixture(taxonomy), null, 2)}\n`, "utf8");
   const batchesDir = join(root, "batches");
-  writeConverterOutput(batchesDir, [{ name: "batch-001.csv", rows }], taxonomy);
+  // The converter caps a batch at ten rows, so a larger fixture is written as
+  // several batches, exactly as the real converter output is.
+  const batches: BatchSpec[] = [];
+  for (let start = 0; start < rows.length; start += 10) {
+    batches.push({
+      name: `batch-${String(batches.length + 1).padStart(3, "0")}.csv`,
+      rows: rows.slice(start, start + 10),
+    });
+  }
+  writeConverterOutput(batchesDir, batches, taxonomy);
   return { batchesDir, taxonomyPath, prosePath, taxonomy, rows };
 }
 

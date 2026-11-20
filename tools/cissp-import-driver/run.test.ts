@@ -46,6 +46,11 @@ type ConfirmBehaviour =
   | "preview-401"
   | "preview-429";
 
+interface ConfirmBehaviourOptions {
+  /** Refuses the confirm for the first preview whose keys satisfy this. */
+  failConfirmWhen?: (keys: readonly string[]) => boolean;
+}
+
 interface StubQuestion {
   key: string;
   domainId: string;
@@ -56,12 +61,16 @@ interface StubQuestion {
   publication: { revisionId: string; state: "published"; pointerVersion: number } | null;
 }
 
-function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
+function createStub(
+  options: { behaviour?: ConfirmBehaviour } & ConfirmBehaviourOptions = {},
+) {
   const behaviour = options.behaviour ?? "ok";
   const previews = new Map<string, { keys: string[]; domainId: string; topicId: string }>();
   const questions = new Map<string, StubQuestion>();
   const reviewNotes: string[] = [];
   const calls: string[] = [];
+  const previewBatches: string[][] = [];
+  const confirmBatches: string[][] = [];
   let previewCount = 0;
   let confirmCount = 0;
   let submitCount = 0;
@@ -113,6 +122,7 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
       previewCount += 1;
       const importId = `import-${previewCount}`;
       const keys = rows.map((row) => row[1]!);
+      previewBatches.push(keys);
       previews.set(importId, { keys, domainId: rows[0]![3]!, topicId: rows[0]![4]! });
       return json(
         {
@@ -132,11 +142,15 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
       const preview = previews.get(importId);
       if (!preview) return json({ error: { code: "not_found", requestId: "stub-1" } }, 404);
       observedConfirmBody = typeof init?.body === "string" ? init.body : "not-a-string";
+      confirmBatches.push(preview.keys);
       const checkpoint = readCheckpoint(readOnlyStateDir);
       observedUnitStateDuringConfirm = checkpoint?.units[0]?.state ?? null;
 
       if (behaviour === "unauthorized") {
         return json({ error: { code: "unauthenticated", requestId: "stub-2" } }, 401);
+      }
+      if (options.failConfirmWhen?.(preview.keys) === true) {
+        return json({ error: { code: "unauthenticated", requestId: "stub-16" } }, 401);
       }
       const toCreate = behaviour === "partial-then-500" ? preview.keys.slice(0, 2) : preview.keys;
       for (const key of toCreate) {
@@ -260,6 +274,8 @@ function createStub(options: { behaviour?: ConfirmBehaviour } = {}) {
     questions,
     reviewNotes,
     calls,
+    previewBatches,
+    confirmBatches,
     get confirmCount() {
       return confirmCount;
     },
@@ -310,6 +326,7 @@ interface Harness {
 function buildHarness(
   behaviour?: ConfirmBehaviour,
   rowCount = 5,
+  stubOptions: ConfirmBehaviourOptions = {},
 ): { harness: Harness; stub: ReturnType<typeof createStub> } {
   const root = makeTempDir();
   const fixture = writeFixture(root, { rowCount });
@@ -364,7 +381,7 @@ function buildHarness(
   saveCheckpoint(join(stateDir, "checkpoint.json"), checkpoint, undefined, NOW);
   readOnlyStateDir = stateDir;
 
-  const stub = createStub({ behaviour });
+  const stub = createStub({ behaviour, ...stubOptions });
   const options = {
     origin: ORIGIN,
     batchesDir: fixture.batchesDir,
@@ -392,9 +409,13 @@ function buildHarness(
 async function runStages(
   harness: Harness,
   stages: Array<"transform" | "upload" | "publish" | "verify">,
+  unitLimit: number | null = 1,
 ): Promise<void> {
   for (const stage of stages) {
-    await runDriver({ ...harness.options, stage, unitLimit: stage === "transform" ? null : 1 }, harness.deps);
+    await runDriver(
+      { ...harness.options, stage, unitLimit: stage === "transform" ? null : unitLimit },
+      harness.deps,
+    );
   }
 }
 
@@ -591,4 +612,61 @@ test("a successful invocation clears the previous run's last error", async () =>
   saveCheckpoint(harness.checkpointPath, checkpoint, undefined, NOW);
   await runStages(harness, ["transform"]);
   assert.equal(readCheckpoint(harness.stateDir)!.lastError, null);
+});
+
+test("an interrupted upload resumes at the first unconfirmed unit, not at unit 1", async () => {
+  // Stage 2 re-runs on every invocation (`--stage all` includes it) and it used
+  // to rebuild `checkpoint.units` from scratch: the confirmations of the first
+  // process came back as `pending`, so the next process started at unit 1 and
+  // the server's own keys stopped it there. The observed evidence was a
+  // checkpoint with every unit pending while 440 questions were already on disk
+  // and in the database.
+  let interrupt = true;
+  const { harness, stub } = buildHarness(undefined, 20, {
+    failConfirmWhen: (keys) => interrupt && keys.includes("cissp-16"),
+  });
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"], null),
+    (error: unknown) => error instanceof DriverError && error.code === "SESSION_LOST",
+  );
+  const interrupted = readCheckpoint(harness.stateDir)!;
+  assert.deepEqual(
+    interrupted.units.map((unit) => unit.state),
+    ["confirmed", "confirmed", "confirmed", "previewed"],
+  );
+  assert.equal(interrupted.questions.length, 15);
+  const confirmsBeforeResume = stub.confirmCount;
+  assert.equal(confirmsBeforeResume, 4);
+
+  interrupt = false;
+  // A fresh process: the checkpoint is reloaded from disk and stage 2 re-runs
+  // over the same converter output before the upload stage starts.
+  await runStages(harness, ["transform", "upload"], null);
+
+  const after = readCheckpoint(harness.stateDir)!;
+  assert.deepEqual(
+    after.units.map((unit) => unit.state),
+    ["confirmed", "confirmed", "confirmed", "confirmed"],
+  );
+  assert.equal(after.stages.upload, "complete");
+  assert.equal(after.questions.length, 20);
+  // The second process's first preview and first confirm cover unit 4 only.
+  assert.deepEqual(stub.previewBatches[4], [
+    "cissp-16",
+    "cissp-17",
+    "cissp-18",
+    "cissp-19",
+    "cissp-20",
+  ]);
+  assert.deepEqual(stub.confirmBatches[confirmsBeforeResume], [
+    "cissp-16",
+    "cissp-17",
+    "cissp-18",
+    "cissp-19",
+    "cissp-20",
+  ]);
+  // Four previews before the interruption, one after it.
+  assert.equal(stub.previewBatches.length, 5);
+  assert.equal(stub.questions.size, 20);
 });
