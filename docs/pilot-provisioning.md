@@ -12,22 +12,25 @@ triggers 141`; export #2 (data-bearing, after the smoke fixture) and rehearsal #
 exited 0 — `replay: schema 101, data 43, triggers 141`, with the `audit_events`
 count equal to the manifest.
 
-No Worker is deployed (`learner-auth-staging` answers `code: 10007`, checked
-18 November 2026), no secret is set and no route exists. Apart from the recorded
-staging id, every `database_id` in the committed Wrangler configs is still the
-all-zero placeholder; test fixtures carry their own literal ids.
-The database now has **22 applied migrations**, last
-`0022_pilot_events_retention.sql`: the retention floor landed after the 5C run
-and was applied remotely on 18 November 2026, under owner approval, so the
-twelve-month floor is enforced there as well — §Pre-enablement step below records
-that run and its evidence.
+**State on 20 November 2026 stands beside the 5C snapshot above:** the staging
+Worker `learner-auth-staging` **is deployed** — twice through the CI pipeline that
+follows a merge to `main`, most recently at `main` = `32b3003`, with the migration
+gate clearing both times (`Schema gate clear: no pending migration`) — and **five
+secrets are set** on it: `ADMIN_TESTER_IPS`, `CSRF_HMAC_SECRET`,
+`STAFF_MFA_SEAL_KEY`, `STAFF_RATE_LIMIT_HMAC_SECRET` and `STAGING_TESTER_IPS`.
+Names only: no secret value belongs in this repository. The database has **23
+applied migrations**, last `0023_staff_second_factor.sql`, applied remotely on
+20 November 2026 after an export — §Pre-enablement steps record both the `0022` and
+the `0023` runs with their evidence. Apart from the recorded staging id, every
+`database_id` in the committed Wrangler configs is still the all-zero placeholder;
+test fixtures carry their own literal ids.
 
-**Not approved to run:** deploying the staging Worker or setting its secrets.
-Each is a separate owner decision. (Applying `0022` remotely was such a decision;
-the owner gave it and it ran on 18 November 2026 — §Pre-enablement step.)
-The deployment now has a guarded command — `npm run deploy:staging`, guard and
-rollback described in §Deploying the staging Worker. Having the command is not an
-approval to run it, and it has never been run.
+**Each remote act is still its own owner decision.** Deploying the Worker, setting
+a secret and applying a migration were separate approvals; the ones dated
+20 November 2026 were given and performed, and nothing here approves a repeat. The
+deployment has a guarded command — `npm run deploy:staging`, guard and rollback
+described in §Deploying the staging Worker — and the six staff settings it needs
+are named, never valued, in §Staff surface on staging.
 
 This document is both the record of that run and the from-scratch path for a
 future rebuild. Each step is a checked step rather than an improvisation; only an
@@ -37,10 +40,12 @@ owner-approved execution changes Cloudflare state.
 
 5C creates **one resource**: the D1 database `certpath-learner-staging` in the
 account where the staging Worker (`learner-auth-staging`) will be deployed. That
-Worker does not exist yet: it answered `code: 10007` (not found) on 18 November
-2026, after the database id was recorded (#134). Its
+Worker did not exist during the run — it answered `code: 10007` (not found) on
+18 November 2026, after the database id was recorded (#134) — and it has since
+been deployed by the pipeline (§State above). Its
 `apps/web/wrangler.staging.jsonc` gained a `*/5 * * * *` cron and the three
-pilot event flags, all `"false"`, in #141 — code only, not deployed.
+pilot event flags, all `"false"`, in #141, and the two staff MFA policy vars in
+#187: configuration only, no flag flipped.
 
 It does **not** create:
 
@@ -75,7 +80,7 @@ remote writes should be re-run without a new approval.
 |---|---|---|
 | 1 | Preflight: account matches, database **absent** (`--expect-absent`) | done 17 November 2026 — exited 0 with `database certpath-learner-staging: absent`, before the create |
 | 2 | Create the database | done 17 November 2026 at 22:25:00Z — created in region `WEUR`; the uuid was recorded in #134 |
-| 3 | Record the uuid **locally**, apply the chain | done 17 November 2026 — 21 applied migrations, last `0021_pilot_events.sql` (22 today, §Pre-enablement step) |
+| 3 | Record the uuid **locally**, apply the chain | done 17 November 2026 — 21 applied migrations, last `0021_pilot_events.sql` (23 today, §Pre-enablement steps) |
 | 4 | Repo PR with the uuid, merged and pulled | done — #134 |
 | 5 | Preflight again: database present | done |
 | 6 | Export #1 (first non-empty baseline) | done, exit 0 |
@@ -342,13 +347,15 @@ asserted account and database. Evidence from the run:
   ('pilot_events_no_delete','pilot_events_received_at_idx')` → trigger
   `pilot_events_no_delete`, index `pilot_events_received_at_idx`.
 
-`PILOT_EVENTS_RETENTION_ENABLED` still stays `"false"` on staging, because the
-Worker that would run the prune is not deployed. Turning the flag on before the
-floor existed would have run a prune against a table with no floor — the window
-would be a promise the database cannot keep, which is the one thing
+`PILOT_EVENTS_RETENTION_ENABLED` still stays `"false"` on staging — and since
+20 November 2026 that is no longer because of the schema. The floor it relies on is
+in place (`0022`), and the Worker is deployed (§State), so what is missing is the
+owner's decision to flip the flag and ship it, not the table. Turning the flag on
+before the floor existed would have run a prune against a table with no floor —
+the window would be a promise the database cannot keep, which is the one thing
 [`docs/pilot-events-retention.md`](pilot-events-retention.md) says is enforced in
-storage rather than by the job. The order still holds; only its first half is
-now satisfied.
+storage rather than by the job. The order still holds: the floor first, then the
+flag, and the flag is still unflipped.
 
 The procedure below is kept as written: it is the correct step for a future
 rebuild, or for any database that stops short of the last migration.
@@ -379,7 +386,38 @@ and a repeat run would need a new one. It changes no repository file: no migrati
 is edited, no checksum line changes, and `apps/web/wrangler.staging.jsonc` stays
 exactly as committed.
 
-## Deploying the staging Worker: `deploy:staging` — the command exists, nothing ran
+### `0023_staff_second_factor.sql` — **done 20 November 2026**
+
+5F's migration adds the staff second-factor tables, and `npm run staff:provision`
+writes three rows into `staff_mfa_enrolment_tickets`, which only `0023` creates.
+So the staging ledger had to leave `0022` behind before any staff account could be
+provisioned. **It is applied**, under owner approval given for this step: the
+database now has **23 applied migrations**, last
+`0023_staff_second_factor.sql`. An export was taken to a local directory outside
+the repository (`certpath-staging-exports`) **before** the apply, so a dump of the
+database as it stood at `0022` exists in case the slice has to be backed out;
+keep it with its manifest per
+[`docs/data-export-and-restore.md`](data-export-and-restore.md) §Retention.
+
+Evidence from the run (repository root):
+
+```powershell
+npx wrangler d1 migrations apply certpath-learner-staging --remote -c apps/web/wrangler.staging.jsonc
+npx wrangler d1 migrations list certpath-learner-staging --remote -c apps/web/wrangler.staging.jsonc
+```
+
+- `apply` → exit 0, `Executed 31 commands`;
+- `list` → **`No migrations to apply`**;
+- `SELECT COUNT(*) AS applied, MAX(name) AS last FROM d1_migrations` → `23` and
+  `0023_staff_second_factor.sql`.
+
+Expected on a re-read: `23` and `0023_staff_second_factor.sql`. `22` means the
+apply did not reach the remote database; any other last name means the ledger does
+not match `db/migrations/*.sql`. A repeat `apply` is a remote write and needs a new
+approval — after this step there is nothing to apply, so `migrations list` is the
+read that proves it, and `apply` should print `No migrations to apply`.
+
+## Deploying the staging Worker: `deploy:staging` — the command exists and has run
 
 Until #149 there was no guarded way to ship this Worker. Only
 `npm run build:staging` existed, and the raw form the other runbooks use —
@@ -388,10 +426,11 @@ file. `build:site`, `build:pilot`, `build:staging` and `build:preview` all write
 it, so a pilot build followed by a staging deploy would have shipped a D1-bound
 `certpath-pilot` Worker to the staging host.
 
-`npm run deploy:staging` is that command now. **It has never been run:** no
-Worker is deployed (`learner-auth-staging` answers `code: 10007`, checked
-18 November 2026), no secret is set and no route exists. What changed is that the
-deployment has a name, a guard and a rollback.
+`npm run deploy:staging` is that command now. **It has been run:** the staging
+Worker is deployed, twice through the CI pipeline on merges to `main`, most
+recently at `main` = `32b3003`, and the migration gate cleared both times. The
+secrets it needs are set (§Staff surface on staging names them). What the command
+adds is the name, the guard and the rollback around every future deploy.
 
 ### The command
 
@@ -504,10 +543,12 @@ All seven must hold. Any one missing is a stop, not a retry.
    may omit the flag and then prints `Account: not asserted (...)`.
 2. **`npm run build:staging` exited 0** in this checkout after the last change.
    It asserts the bundle entry is `workers/staging-app.ts`.
-3. **The staging database has 22 applied migrations**, last
-   `0022_pilot_events_retention.sql` (§Pre-enablement step). The Worker carries a
-   `*/5 * * * *` cron; shipping the prune before the floor exists would run a job
-   against a table with no floor. Re-read the ledger:
+3. **The staging database has 23 applied migrations**, last
+   `0023_staff_second_factor.sql` (§Pre-enablement steps). Two reasons, not one:
+   the Worker carries a `*/5 * * * *` cron, and shipping the prune before the
+   twelve-month floor exists would run a job against a table with no floor; and
+   the staff surface enrols through tables that only `0023` creates. Re-read the
+   ledger:
 
    ```powershell
    Set-Location apps\web
@@ -529,8 +570,10 @@ All seven must hold. Any one missing is a stop, not a retry.
    Set-Location ..\..
    ```
 
-   `wrangler secret put` prompts for the value. **Neither secret is set today**,
-   and setting either is its own owner decision, not part of `deploy:staging`.
+   `wrangler secret put` prompts for the value. **Both secrets are set** on
+   `learner-auth-staging` (November 2026), and setting either is its own owner
+   decision, not part of `deploy:staging`. §Staff surface on staging lists the
+   four secrets the staff surface needs and the rule that keeps them distinct.
 
 6. **The three `PILOT_*` flags are `"false"`** in `apps/web/wrangler.staging.jsonc`,
    and so in the built copy. The guard asserts the built copy, which is what
@@ -539,6 +582,152 @@ All seven must hold. Any one missing is a stop, not a retry.
    `apps/web`; the flag is optional here but asserted when given) and printed the
    verified lines above, with the account line naming the id it pinned. It
    bundles locally and uploads nothing.
+
+### Staff surface on staging
+
+The staff surface — the `/admin` pages and the `/api/admin/auth/*` calls beneath
+them, including `/api/admin/auth/mfa/*` — needs six settings on
+`learner-auth-staging` before the first staff sign-in. Two are vars in
+[`apps/web/wrangler.staging.jsonc`](../apps/web/wrangler.staging.jsonc), so they
+ship with the deploy and are reviewable in a diff; four are hosted secrets. Per
+§Preconditions 5 above, a secret is always **put with `wrangler secret put`, which
+prompts for the value** — **never a file and never an argument**: it does not reach
+the shell history, a transcript, a script variable or a committed config. All five
+secrets this document names (these four plus `STAGING_TESTER_IPS`) are already set
+on the Worker; what follows is what each must be, not how to invent the values
+again.
+
+| Setting | Where it lives | What it does |
+|---|---|---|
+| `STAFF_MFA_MAX_AGE_MS` | var, `apps/web/wrangler.staging.jsonc` | `28800000` — 8 hours, one verification per staff session |
+| `STAFF_MFA_ALLOWED_METHODS` | var, `apps/web/wrangler.staging.jsonc` | `totp`. The accepted labels are `totp`, `webauthn` and `sms`; a policy naming any other label, `tester-gate` included, makes the whole staff configuration read as absent and every staff route answer `503`. Staging names only the one label a route can actually mint. |
+| `CSRF_HMAC_SECRET` | hosted secret | HMACs the CSRF tokens on the mutating staff routes; under 32 bytes the staff configuration reads as absent and `/api/admin/auth/*` answers `503` |
+| `STAFF_RATE_LIMIT_HMAC_SECRET` | hosted secret | HMACs the rate-limit bucket digests, so no address or email is stored in the clear. Read only by the `/api/admin/auth/*` router, which answers `503` while it is missing or under 32 bytes |
+| `STAFF_MFA_SEAL_KEY` | hosted secret | AES-256-GCM key that encrypts each TOTP seed in `staff_totp_credentials`; under 32 characters the three enrolment and verify routes answer `503` (point 3) |
+| `ADMIN_TESTER_IPS` | hosted secret | the admin IP gate's allowlist (`apps/api/src/security/admin-gate.ts`) |
+
+```powershell
+Set-Location apps\web
+npx wrangler secret put CSRF_HMAC_SECRET -c wrangler.staging.jsonc
+npx wrangler secret put STAFF_RATE_LIMIT_HMAC_SECRET -c wrangler.staging.jsonc
+npx wrangler secret put STAFF_MFA_SEAL_KEY -c wrangler.staging.jsonc
+npx wrangler secret put ADMIN_TESTER_IPS -c wrangler.staging.jsonc
+Set-Location ..\..
+```
+
+1. **All four secrets are at least 32 random bytes, and all four are distinct.**
+   Generate each one separately. One value reused across two purposes means a
+   single disclosure is a break in both, and the four have different lifetimes:
+   the seal key must never change (below), the others may be rotated.
+2. **`ADMIN_TESTER_IPS` equals `STAGING_TESTER_IPS`.** The two gates read one
+   list each and nothing in code maps one name onto the other, so the same value
+   is written into both secrets, and both are updated **in the same session**
+   whenever the tester's egress address changes. The list is maintained twice on
+   purpose. Drift is an **outage, never wider access**: `stagingTesterGate` wraps
+   every request in the staging Worker's `fetch` (`apps/web/workers/staging-app.ts`),
+   before routing and before the admin gate ever reads its own list, and the API app
+   repeats the same gate in a `use("*")` middleware. An address missing from
+   `STAGING_TESTER_IPS` therefore answers `403` on every path — page or API —
+   whatever the admin list says; an address on the staging list but not on
+   `ADMIN_TESTER_IPS` answers `403` from the admin gate, and `503` when that
+   secret is unset. The worst either drift can do is shut a gate. **Why this is
+   not code:** mapping one name onto the other — reading `STAGING_TESTER_IPS`
+   inside `adminTesterGate`, or having one secret copy the other — would make a
+   single list serve two gates and weaken the documented guarantee that passing
+   the staging gate is not the same permission as reaching `/admin`. Two lists,
+   one sitting, is the rule; do not "simplify" it in `admin-gate.ts` or
+   `staging-gate.ts`.
+3. **Set `STAFF_MFA_SEAL_KEY` before the first enrolment, then keep it.** It wraps
+   every TOTP seed, and the two ways it can go wrong are answered differently:
+
+   - **Unset, or shorter than 32 characters:** `readSealKey`
+     (`apps/api/src/security/totp.ts`) returns `null`, and the enrol, confirm and
+     verify routes answer **`503 service_unavailable`** before any seed is opened
+     (`apps/api/src/staff-auth.ts`). Nothing is corrupted; the surface is simply
+     closed until the key is back.
+   - **Changed, while still at least 32 bytes:** `readSealKey` succeeds, the
+     AES-GCM tag of every stored row no longer verifies, `openTotpSeed` returns
+     `null` (`apps/api/src/security/staff-mfa.ts`), and those same routes report
+     **`400 invalid_code`** — the same answer a mistyped code gets, so the symptom
+     looks like a user who cannot type rather than a key problem.
+
+   Either is a lockout, and neither has a re-key path:
+   `staff_totp_credentials_secret_immutable`
+   (`db/migrations/0023_staff_second_factor.sql`) aborts any update of
+   `secret_ciphertext`, `secret_iv` or `key_version` ("a TOTP secret is replaced,
+   never rewritten"). Recovery is unchanged: a printed recovery code still redeems
+   (that route opens no seed), which revokes the credential and returns a fresh
+   enrolment ticket, and the next enrolment seals a new seed under whatever key is
+   current. If every Global Admin is locked out, the operator-run `staff:provision`
+   is the last path — and its "no existing tester rows" guard means it creates
+   accounts, it cannot repair them. Concretely: changing the key costs every
+   enrolled user one recovery code; unsetting it closes the staff surface to
+   everyone until it is restored.
+4. **`ADMIN_TESTER_LOCAL` stays unset on staging.** It has two effects, and either
+   one is reason enough to keep it out of the Worker's configuration:
+
+   - with it set, `readStaffSecurityConfiguration`
+     (`apps/api/src/security/staff-configuration.ts`) accepts an `http:` loopback
+     `PUBLIC_SITE_ORIGIN` — an origin check satisfiable by a local address on a
+     host that real requests reach;
+   - with it set, `adminTesterGate` (`apps/api/src/security/admin-gate.ts`) lets a
+     loopback request through when the platform supplied **no `cf-connecting-ip`**
+     header: the flag is consulted exactly in that case, so a request that reaches
+     the Worker with a loopback URL and no client IP skips the allowlist instead of
+     failing closed with `403`.
+
+   Local development sets it in `apps/web/.dev.vars.example`, which is not the
+   staging Worker; it appears nowhere in `apps/web/wrangler.staging.jsonc` and must
+   not be added there or as a secret.
+5. **Two post-checks prove the admin gate still bites, and each needs its own
+   vantage.** `stagingTesterGate` runs first on every request
+   (`apps/web/workers/staging-app.ts`), before routing and before the admin gate,
+   so where you read from decides which gate answers.
+
+   **First — `403` from an address on neither list.**
+
+   ```powershell
+   curl.exe -i https://learner-auth-staging.certpath.workers.dev/admin
+   ```
+
+   Expected `403`, from the staging gate. Deleting `ADMIN_TESTER_IPS` does **not**
+   change this answer: the same address still gets `403`, because the staging gate
+   refuses before the admin gate is reached. So the `503` half cannot be read from
+   this address, and this `403` is not a fault.
+
+   **Second — `503` from an address on `STAGING_TESTER_IPS` but not on
+   `ADMIN_TESTER_IPS`.** While both secrets hold the same value, the way to create
+   that vantage is to unset the admin one:
+
+   ```powershell
+   Set-Location apps\web
+   npx wrangler secret delete ADMIN_TESTER_IPS -c wrangler.staging.jsonc
+   Set-Location ..\..
+   curl.exe -i https://learner-auth-staging.certpath.workers.dev/admin
+   curl.exe -i https://learner-auth-staging.certpath.workers.dev/admin/content/certifications
+   ```
+
+   Read those from the tester's own address. Expected `503` on both: the staging
+   gate passes the address, and the admin gate finds no list and closes rather than
+   opens. Then restore the secret **in the same session** to the value of
+   `STAGING_TESTER_IPS` (point 2 above) and repeat the reads — the tester's address
+   should now get the ordinary answer (a redirect to `/admin/sign-in`, not `403`),
+   and an address on neither list should get `403` again.
+
+   The mistake this ordering invites is reading the `503` from an off-list address,
+   seeing `403` instead, and "fixing" it by adding that address or widening the
+   list. `403` from an off-list address is correct at every point in the sequence.
+
+The six settings make the surface reachable; they do not create an account. The
+two Global Admins and one Manager are created by `npm run staff:provision` against
+`certpath-learner-staging`, which requires the database name and the UUID recorded
+for it together — `--remote --database certpath-learner-staging
+--expect-database-id <the UUID in apps/web/wrangler.staging.jsonc>`. The allowlist
+and the guards are in `apps/api/src/staff-provisioning.ts`. That is a remote write
+and an owner-approved step, and its printed enrolment tickets are the only copy.
+It also needs `0023` on the database: provisioning writes three rows into
+`staff_mfa_enrolment_tickets`, a table only `0023_staff_second_factor.sql` creates,
+and staging has had it since 20 November 2026 (§Pre-enablement steps).
 
 ### Afterwards: what to check
 
@@ -597,7 +786,7 @@ npx wrangler delete -c apps/web/wrangler.staging.jsonc
 ```
 
 `delete` removes the Worker, its cron and its secrets. The **database is
-untouched** — `certpath-learner-staging` and its 22 migrations stay, and dropping
+untouched** — `certpath-learner-staging` and its 23 migrations stay, and dropping
 it is the separate teardown decision below. After a delete, `learner-auth-staging`
 answers `code: 10007` again and no remote staging write is outstanding.
 

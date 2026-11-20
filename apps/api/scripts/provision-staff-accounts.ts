@@ -14,11 +14,16 @@
 //   npx tsx apps/api/scripts/provision-staff-accounts.ts \
 //     --admins owner@example.test,deputy@example.test \
 //     --manager editor@example.test \
-//     --remote --expect-database-id <recorded certpath-admin UUID>
+//     --remote \
+//     --database certpath-learner-staging \
+//     --expect-database-id c52e398f-4280-40a6-8244-854186dc6ef2
 //
-// Remote mode resolves `certpath-admin` by name exactly once. The verified UUID
-// is written into a run-only Wrangler config as a binding, and every later read
-// and write addresses that binding - so a database swapped behind the name after
+// Remote mode requires the database name and its recorded UUID together, and
+// both must match an entry in `approvedRemoteDatabases`; a name alone, a UUID
+// alone, or a pair that does not match is refused before Wrangler is spawned.
+// The approved name is then resolved exactly once and the verified UUID is
+// written into a run-only Wrangler config as a binding, and every later read and
+// write addresses that binding - so a database swapped behind the name after
 // preflight receives nothing. The script refuses to continue unless the CLI is
 // authenticated to the Certpath account and the name resolves to that exact UUID,
 // and it refuses if any tester account or the synthetic certification exists.
@@ -39,7 +44,6 @@ import {
   createProvisioningTickets,
   pinRemoteTarget,
   pinnedDatabaseBinding,
-  remoteStaffDatabaseName,
   selectProvisioningTarget,
   type ProvisioningIdentifiers,
   type ProvisioningTarget,
@@ -150,7 +154,7 @@ function createRunner(): WranglerRunner {
  * Writes the verified UUID into a run-only Wrangler config and reads it back.
  * Remote reads and writes address this binding, never the database name.
  */
-function createPinnedConfig(databaseId: string): string {
+function createPinnedConfig(databaseName: string, databaseId: string): string {
   const configPath = join(
     tmpdir(),
     `certpath-staff-provisioning-${process.pid}-${Date.now()}.jsonc`,
@@ -161,7 +165,7 @@ function createPinnedConfig(databaseId: string): string {
     d1_databases: [
       {
         binding: pinnedDatabaseBinding,
-        database_name: remoteStaffDatabaseName,
+        database_name: databaseName,
         database_id: databaseId,
       },
     ],
@@ -232,7 +236,7 @@ const adminsArg = option(argv, "--admins");
 const managerArg = option(argv, "--manager");
 if (!adminsArg || !managerArg) {
   fail(
-    "usage: provision-staff-accounts.ts --admins <email>,<email> --manager <email> [--certification-slug <slug>] [--certification-name <name>] [--exam-version-key <key>] [--password-stdin] [--remote --expect-database-id <uuid>]",
+    "usage: provision-staff-accounts.ts --admins <email>,<email> --manager <email> [--certification-slug <slug>] [--certification-name <name>] [--exam-version-key <key>] [--password-stdin] [--remote --database <name> --expect-database-id <uuid>]",
   );
 }
 
@@ -273,11 +277,17 @@ async function main(): Promise<void> {
   let target: ProvisioningTarget = selection;
   try {
     if (selection.kind === "remote") {
-      await assertRemoteTarget(run, selection.expectedDatabaseId);
-      pinnedConfigPath = createPinnedConfig(selection.expectedDatabaseId);
+      await assertRemoteTarget(run, {
+        name: selection.databaseName,
+        databaseId: selection.expectedDatabaseId,
+      });
+      pinnedConfigPath = createPinnedConfig(
+        selection.databaseName,
+        selection.expectedDatabaseId,
+      );
       target = pinRemoteTarget(selection, pinnedConfigPath);
       console.error(
-        `remote target pinned: ${remoteStaffDatabaseName} (${selection.expectedDatabaseId})`,
+        `remote target pinned: ${selection.databaseName} (${selection.expectedDatabaseId})`,
       );
     }
     await assertNoExistingTesterRows(run, target, { emails, certificationSlug });
@@ -335,7 +345,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `Provisioned the tester staff accounts in ${target.kind === "remote" ? `${remoteStaffDatabaseName} (pinned ${target.expectedDatabaseId})` : `${target.databaseName} (local)`}.`,
+    `Provisioned the tester staff accounts in ${target.kind === "remote" ? `${target.databaseName} (pinned ${target.expectedDatabaseId})` : `${target.databaseName} (local)`}.`,
   );
   console.log(`Global Admin 1: ${emails[0]} (${identifiers.userIds[0]})`);
   console.log(
