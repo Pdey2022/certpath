@@ -142,6 +142,19 @@ database is still an owner-approved step, and the remote path has so far been
 exercised only by tests that mock the Cloudflare CLI against an isolated D1 - never
 against the real database.
 
+**Superseded on 20 November 2026.** Remote mode now requires the database name and
+its recorded UUID together, and only pairs listed in `approvedRemoteDatabases`
+(`apps/api/src/staff-provisioning.ts`) are accepted:
+`--remote --database certpath-learner-staging --expect-database-id <the UUID in
+apps/web/wrangler.staging.jsonc>`. `certpath-admin` was never provisioned, so the
+older `--remote --expect-database-id <recorded certpath-admin UUID>` form now aborts
+with `database-not-provisioned` before Wrangler is spawned; the 5C posture is one
+database, `certpath-learner-staging`. The account assertion, the single name
+resolution compared to the recorded UUID, the pinned run-only config, the
+existing-tester-rows check, the audit rows and the enrolment tickets described
+above are unchanged. See
+[`docs/pilot-provisioning.md`](../pilot-provisioning.md) §Staff surface on staging.
+
 The script seeds exactly one synthetic certification and exam version
 (`--certification-slug`, `--certification-name`, `--exam-version-key`) and assigns
 the Manager to it, so the Manager's entire scope is synthetic data.
