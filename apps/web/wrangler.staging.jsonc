@@ -11,6 +11,8 @@
 	"vars": {
 		"INDEXING_ENABLED": "false",
 		"PUBLIC_SITE_ORIGIN": "https://learner-auth-staging.certpath.workers.dev",
+		"STAFF_MFA_MAX_AGE_MS": "28800000",
+		"STAFF_MFA_ALLOWED_METHODS": "totp",
 		"STAGING_LEARNER_AUTH_ENABLED": "true",
 		"STAGING_LEARNER_EMAIL": "learner@example.test",
 		"AWS_REGION": "eu-north-1",
