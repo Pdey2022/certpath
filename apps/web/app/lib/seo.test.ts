@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   buildPublicMetadata,
   buildRobotsTxt,
   buildSitemapXml,
+  isIndexingEnabled,
   toMetaDescriptors,
 } from "./seo.ts";
+
+// The value the published Worker actually runs with. Read from the config
+// rather than hardcoded, so the flag and the behaviour asserted below cannot
+// drift apart: flipping the config back to "true" fails this test.
+const siteConfigUrl = new URL("../../wrangler.site.jsonc", import.meta.url);
 
 test("public metadata uses the request origin until a canonical origin is set", () => {
   const metadata = buildPublicMetadata({
@@ -86,4 +94,42 @@ test("indexable sitemap contains public routes and no private paths", () => {
   assert.match(sitemap, /https:\/\/example\.test\//);
   assert.match(sitemap, /https:\/\/example\.test\/exams/);
   assert.doesNotMatch(sitemap, /\/app|\/admin/);
+});
+
+// The public site is deliberately non-indexable while the marketing copy still
+// says access is not published yet. This asserts the shipped configuration, not
+// a hypothetical one: `wrangler.site.jsonc` is the config `build:site` selects.
+test("the published site config turns indexing off for every page", () => {
+  const config = JSON.parse(readFileSync(fileURLToPath(siteConfigUrl), "utf8"));
+  const configured = config.vars?.INDEXING_ENABLED;
+
+  // Explicit "false", not a missing var: an absent variable also reads as
+  // disabled, and this test must not pass because the flag disappeared.
+  assert.equal(configured, "false");
+  const indexingEnabled = isIndexingEnabled(configured);
+  assert.equal(indexingEnabled, false);
+
+  const robots = buildRobotsTxt({
+    indexingEnabled,
+    sitemapUrl: "https://certpath-site.certpath.workers.dev/sitemap.xml",
+  });
+  assert.equal(robots, "User-agent: *\nDisallow: /\n");
+
+  const sitemap = buildSitemapXml({
+    origin: "https://certpath-site.certpath.workers.dev",
+    indexingEnabled,
+  });
+  assert.doesNotMatch(sitemap, /<url>/);
+
+  for (const path of ["/", "/exams"]) {
+    const metadata = buildPublicMetadata({
+      requestUrl: `https://certpath-site.certpath.workers.dev${path}`,
+      canonicalOrigin: "https://certpath-site.certpath.workers.dev",
+      path,
+      title: "CertPath",
+      description: "Exam preparation.",
+      indexingEnabled,
+    });
+    assert.equal(metadata.robots, "noindex,nofollow");
+  }
 });

@@ -916,7 +916,7 @@ test("the deploy stamp writes DEPLOYED_COMMIT and refuses anything that is not a
   const file = path.join(directory, "wrangler.json");
   writeFileSync(
     file,
-    JSON.stringify({ name: "certpath-site", vars: { INDEXING_ENABLED: "true" } }),
+    JSON.stringify({ name: "certpath-site", vars: { INDEXING_ENABLED: "false" } }),
   );
 
   assert.equal(
@@ -926,7 +926,7 @@ test("the deploy stamp writes DEPLOYED_COMMIT and refuses anything that is not a
   const stamped = JSON.parse(readFileSync(file, "utf8"));
   assert.equal(stamped.name, "certpath-site");
   assert.equal(stamped.vars.DEPLOYED_COMMIT, "280d53b");
-  assert.equal(stamped.vars.INDEXING_ENABLED, "true");
+  assert.equal(stamped.vars.INDEXING_ENABLED, "false");
 
   // A value that is not a commit never reaches the artefact. The account id
   // is the interesting row: it is 32 hex characters, so a length-only rule

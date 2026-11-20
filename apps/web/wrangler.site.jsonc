@@ -6,7 +6,7 @@
 	"workers_dev": true,
 	"preview_urls": false,
 	"vars": {
-		"INDEXING_ENABLED": "true",
+		"INDEXING_ENABLED": "false",
 		"PUBLIC_SITE_ORIGIN": "https://certpath-site.certpath.workers.dev"
 	},
 	"observability": {
