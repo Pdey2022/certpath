@@ -328,7 +328,21 @@ tsx tools/cissp-import-driver/cli.ts `
   an environment variable, because environment blocks are inherited by child
   processes and often captured.
 - `--unit-limit` exists for the local proof; it refuses to skip units, only to
-  stop after N.
+  stop after N, and the driver does not refuse it on a remote origin. It is
+  **not** a remote canary. The **upload** stage is marked complete once the
+  units it was given are in, so a later unlimited run logs
+  `stage … is already complete` and imports nothing while exiting 0; and a
+  limited `--stage publish` after a full upload stops with `STAGE_ORDER`
+  instead of completing. That stop is not fail-safe at entry — the in-scope
+  questions are published before it throws — and after a successful limited
+  `--stage all` all three stages are already complete, so a later unlimited run
+  skips upload, publish and verify and exits 0 over the partial set. That
+  silence is the sharpest reason the flag is not a canary. A fresh state
+  directory is not an escape either — its preview refuses the rows the limited
+  run created, and presence fails closed with `EXISTING_KEYS`. The remote canary
+  is a watched full run, interrupted to stop: the checkpoint records the intent
+  before each mutation and the outcome after it, so an interrupted run resumes
+  with the same command.
 
 ### The prose file
 
