@@ -210,9 +210,14 @@ export function findCorrectOptionLongest(items: readonly Item[]): Finding[] {
   ];
 }
 
+/**
+ * Case-sensitive on purpose: `[A-H]` is an option *letter*, so it is upper case.
+ * Under `/i` the article "a" matched — "answers a value question" read as a
+ * reference to option A. The design's patterns carry no flag; keep them that way.
+ */
 const LETTER_PATTERNS: ReadonlyArray<RegExp> = [
-  /\boption[s]?\s+[A-H]\b/i,
-  /\b(?:answer|choice)s?\s+[A-H]\b/i,
+  /\boption[s]?\s+[A-H]\b/,
+  /\b(?:answer|choice)s?\s+[A-H]\b/,
   /[A-H][.)]\s/,
 ];
 

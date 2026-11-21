@@ -192,6 +192,57 @@ test("an explanation naming an option letter is flagged, on all three patterns",
   );
 });
 
+/** The letter-reference findings for one explanation placed in a distractor slot. */
+function letterReferenceFindings(explanation: string) {
+  const specs = [
+    spec(1, {
+      options: [
+        { key: "A", text: "First station choice", correct: true, explanation: "Synthetic rationale for the first choice here." },
+        { key: "B", text: "Second station choice", correct: false, explanation },
+        { key: "C", text: "Third station choice", correct: false, explanation: "Synthetic rationale for the third choice here." },
+        { key: "D", text: "Fourth station choice", correct: false, explanation: "Synthetic rationale for the fourth choice here." },
+      ],
+    }),
+  ];
+  return findExplanationIssues(itemsFrom(specs)).filter(
+    (finding) => finding.code === "EXPLANATION_LETTER_REFERENCE",
+  );
+}
+
+/**
+ * Each pair is one position in which an upper-case letter is a reference and a
+ * lower-case one is ordinary English. Asserting both halves together is what
+ * makes a re-added `i` flag fail instead of slipping through.
+ */
+const LETTER_REFERENCE_PAIRS: ReadonlyArray<{
+  reference: string;
+  prose: string;
+  pattern: string;
+}> = [
+  { reference: "option C is the safer control", prose: "option a reader sees is ambiguous", pattern: "\\boption[s]?\\s+[A-H]\\b" },
+  { reference: "options A and B both fail here", prose: "options a writer drafts should be ranked", pattern: "\\boption[s]?\\s+[A-H]\\b" },
+  { reference: "the answer B is the unsafe control", prose: "answers a narrower question than the stem asks", pattern: "\\b(?:answer|choice)s?\\s+[A-H]\\b" },
+  { reference: "the choice D fails the widget case", prose: "does not answer a value question at all", pattern: "\\b(?:answer|choice)s?\\s+[A-H]\\b" },
+  { reference: "answer C settles the widget case", prose: "a choice among alternatives is still a choice", pattern: "\\b(?:answer|choice)s?\\s+[A-H]\\b" },
+  { reference: "See A. Then record the decision", prose: "option ambiguity exists in this stem", pattern: "[A-H][.)]\\s" },
+];
+
+test("each letter reference is flagged and each lower-case twin is not", () => {
+  for (const { reference, prose, pattern } of LETTER_REFERENCE_PAIRS) {
+    const referenceFindings = letterReferenceFindings(reference);
+    assert.equal(referenceFindings.length, 1, `expected a finding for: ${reference}`);
+    assert.equal(referenceFindings[0]!.evidence.pattern, pattern, reference);
+    assert.deepEqual(letterReferenceFindings(prose), [], `expected no finding for: ${prose}`);
+  }
+});
+
+test("the article a in every keyword position is not a letter reference", () => {
+  const explanation =
+    "An option a reviewer sees, options a writer drafts, an answer a manager gives, " +
+    "answers a value question, a choice a team defends, and choices a test asserts are all prose.";
+  assert.deepEqual(letterReferenceFindings(explanation), []);
+});
+
 test("prose containing a lone a or I is not a letter reference", () => {
   const specs = [
     spec(1, {
