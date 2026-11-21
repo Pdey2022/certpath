@@ -23,6 +23,20 @@ export const PILOT_CONFIG_SUFFIX = "/wrangler.pilot.jsonc";
 export const PILOT_USAGE =
   "pilot-command.mjs <build|deploy|dry-run> [--expect-account <account id>]";
 
+// The staff MFA policy `wrangler.pilot.jsonc` declares (#209), with the stale
+// 15-minute value corrected (#169). The deploy ships the built artefact, so it
+// asserts what the build carries rather than trusting the committed config: a
+// build that dropped either var is not the artefact the guard checked.
+//
+// Both names must stay vars, not secrets. A secret of the same name shadows the
+// config `var`, which would make the committed `wrangler.pilot.jsonc` - and the
+// #209 assertion on it - non-authoritative. Before a `deploy:pilot`,
+// `npx wrangler secret list -c wrangler.pilot.jsonc` must show neither name.
+export const PILOT_STAFF_MFA_VARS = Object.freeze({
+  STAFF_MFA_ALLOWED_METHODS: "totp",
+  STAFF_MFA_MAX_AGE_MS: "28800000",
+});
+
 /**
  * Parse the arguments of `deploy` / `dry-run`. Unknown arguments are refused
  * rather than ignored: a mistyped `--expect-acount` would otherwise leave the
@@ -173,6 +187,29 @@ export function assertPilotDeployConfig(generatedConfig) {
       `INDEXING_ENABLED is ${JSON.stringify(vars["INDEXING_ENABLED"] ?? null)}, not "false"; the pilot Worker is non-indexable and a deploy must not change that`,
       1,
     );
+  }
+
+  // The staff MFA policy is carried by the build, so a build that lost it must
+  // not deploy. Missing and wrong are separate refusals, as in the staging
+  // guard: an absent var is a dropped build step, a wrong value is a stale or
+  // unexpected policy. The message says vars, not secrets, because a secret of
+  // the same name would shadow the config var and silently win.
+  for (const [name, expected] of Object.entries(PILOT_STAFF_MFA_VARS)) {
+    if (!(name in vars)) {
+      throw new CliError(
+        "pilot_staff_mfa_missing",
+        `The generated pilot config does not carry ${name}; it must be a config var (not a secret, which would shadow the var and make wrangler.pilot.jsonc non-authoritative), because a build that dropped it is not the artefact the guard checked`,
+        1,
+      );
+    }
+    const value = vars[name];
+    if (value !== expected) {
+      throw new CliError(
+        "pilot_staff_mfa_mismatch",
+        `${name} is ${JSON.stringify(value)}, not ${JSON.stringify(expected)}; it must be a config var (not a secret, which would shadow the var and make wrangler.pilot.jsonc non-authoritative), and the pilot build must carry the committed policy`,
+        1,
+      );
+    }
   }
 
   const stamp = vars["DEPLOYED_COMMIT"];
