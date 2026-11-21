@@ -132,7 +132,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
     throw new DriverError("INVALID_ARGUMENT", "--email is not a plain email address");
   }
-  const origin = normalizeOrigin(values.get("--origin")!);
+  const origin = normalizeOrigin(values.get("--origin")!, "--origin");
 
   return {
     help: false,

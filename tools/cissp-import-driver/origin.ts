@@ -2,22 +2,29 @@ import { DriverError } from "./errors.ts";
 
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-/** Normalises a bare origin and refuses anything that is not one. */
-export function normalizeOrigin(value: string): string {
+/**
+ * Normalises a bare origin and refuses anything that is not one. `flag` is
+ * required and names the argument in every failure message: only the caller
+ * knows whether the value came from `--origin` or `--remote-confirm`.
+ */
+export function normalizeOrigin(value: string, flag: string): string {
   let url: URL;
   try {
     url = new URL(value.trim());
   } catch {
-    throw new DriverError("ORIGIN_INVALID", "--origin is not a URL");
+    throw new DriverError(
+      "ORIGIN_INVALID",
+      `${flag} must be a bare origin including the scheme, e.g. https://example.workers.dev`,
+    );
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new DriverError("ORIGIN_INVALID", "--origin must use http or https");
+    throw new DriverError("ORIGIN_INVALID", `${flag} must use http or https`);
   }
   if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
-    throw new DriverError("ORIGIN_INVALID", "--origin must be a bare origin");
+    throw new DriverError("ORIGIN_INVALID", `${flag} must be a bare origin`);
   }
   if (url.pathname !== "/") {
-    throw new DriverError("ORIGIN_INVALID", "--origin must be a bare origin with no path");
+    throw new DriverError("ORIGIN_INVALID", `${flag} must be a bare origin with no path`);
   }
   return url.origin;
 }
@@ -42,7 +49,7 @@ export interface OriginPolicyOptions {
  * owner approval naming the exact origin. Nothing in this slice runs remotely.
  */
 export function assertOriginPolicy(options: OriginPolicyOptions): void {
-  const origin = normalizeOrigin(options.origin);
+  const origin = normalizeOrigin(options.origin, "--origin");
   if (isLoopbackOrigin(origin)) {
     if (options.allowRemote || options.remoteConfirm !== null) {
       throw new DriverError(
@@ -58,7 +65,7 @@ export function assertOriginPolicy(options: OriginPolicyOptions): void {
       "a non-loopback origin requires --allow-remote and --remote-confirm",
     );
   }
-  if (normalizeOrigin(options.remoteConfirm) !== origin) {
+  if (normalizeOrigin(options.remoteConfirm, "--remote-confirm") !== origin) {
     throw new DriverError(
       "REMOTE_CONFIRM_MISMATCH",
       "--remote-confirm must equal --origin exactly",
