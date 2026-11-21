@@ -172,7 +172,7 @@ makes `combine` fail closed.
 | `STEM_LENGTH_OUTLIER` / `OPTION_LENGTH_OUTLIER` | modified z-score > 3.5 across the run (MAD = 0 means no outliers) |
 | `CORRECT_OPTION_LONGEST_PATTERN` | the correct option is strictly longest in ≥ 50% of a run of ≥ 10 items |
 | `EXPLANATION_THIN` | a distractor explanation shorter than 40 characters |
-| `EXPLANATION_LETTER_REFERENCE` | an explanation names an option letter (`\boption[s]?\s+[A-H]\b`, `\b(?:answer|choice)s?\s+[A-H]\b`, or `[A-H][.)]\s`) |
+| `EXPLANATION_LETTER_REFERENCE` | an explanation names an option letter (`\b[Oo]ption[s]?\s+[A-H]\b`, `\b(?:[Aa]nswer|[Cc]hoice)s?\s+[A-H]\b`, or `[A-H][.)]\s`); the keyword matches in any case, the letter only in upper case |
 | `STEM_NUMBER_INCONSISTENT` | a stem beginning "what is" / "calculate" / "compute" whose one explicit operation does not produce the keyed number |
 
 These are warnings because each is a *distribution over items*, and a legitimate

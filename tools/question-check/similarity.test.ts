@@ -219,11 +219,11 @@ const LETTER_REFERENCE_PAIRS: ReadonlyArray<{
   prose: string;
   pattern: string;
 }> = [
-  { reference: "option C is the safer control", prose: "option a reader sees is ambiguous", pattern: "\\boption[s]?\\s+[A-H]\\b" },
-  { reference: "options A and B both fail here", prose: "options a writer drafts should be ranked", pattern: "\\boption[s]?\\s+[A-H]\\b" },
-  { reference: "the answer B is the unsafe control", prose: "answers a narrower question than the stem asks", pattern: "\\b(?:answer|choice)s?\\s+[A-H]\\b" },
-  { reference: "the choice D fails the widget case", prose: "does not answer a value question at all", pattern: "\\b(?:answer|choice)s?\\s+[A-H]\\b" },
-  { reference: "answer C settles the widget case", prose: "a choice among alternatives is still a choice", pattern: "\\b(?:answer|choice)s?\\s+[A-H]\\b" },
+  { reference: "option C is the safer control", prose: "option a reader sees is ambiguous", pattern: "\\b[Oo]ption[s]?\\s+[A-H]\\b" },
+  { reference: "options A and B both fail here", prose: "options a writer drafts should be ranked", pattern: "\\b[Oo]ption[s]?\\s+[A-H]\\b" },
+  { reference: "the answer B is the unsafe control", prose: "answers a narrower question than the stem asks", pattern: "\\b(?:[Aa]nswer|[Cc]hoice)s?\\s+[A-H]\\b" },
+  { reference: "the choice D fails the widget case", prose: "does not answer a value question at all", pattern: "\\b(?:[Aa]nswer|[Cc]hoice)s?\\s+[A-H]\\b" },
+  { reference: "answer C settles the widget case", prose: "a choice among alternatives is still a choice", pattern: "\\b(?:[Aa]nswer|[Cc]hoice)s?\\s+[A-H]\\b" },
   { reference: "See A. Then record the decision", prose: "option ambiguity exists in this stem", pattern: "[A-H][.)]\\s" },
 ];
 
@@ -236,11 +236,36 @@ test("each letter reference is flagged and each lower-case twin is not", () => {
   }
 });
 
-test("the article a in every keyword position is not a letter reference", () => {
-  const explanation =
-    "An option a reviewer sees, options a writer drafts, an answer a manager gives, " +
-    "answers a value question, a choice a team defends, and choices a test asserts are all prose.";
-  assert.deepEqual(letterReferenceFindings(explanation), []);
+test("the keyword matches in any case, the letter only in upper case", () => {
+  for (const reference of [
+    "option C is wrong",
+    "Option C is wrong",
+    "options A and B",
+    "Choice D",
+    "Answer B",
+    "See A. ",
+  ]) {
+    assert.equal(letterReferenceFindings(reference).length, 1, `expected a finding for: ${reference}`);
+  }
+});
+
+test("the article a after any keyword case is not a letter reference", () => {
+  for (const prose of [
+    "answers a narrower question",
+    "does not answer a value question",
+    "option a reviewer sees",
+    "options a writer drafts",
+    "answer a manager gives",
+    "choice a team defends",
+    "choices a test asserts",
+  ]) {
+    assert.deepEqual(letterReferenceFindings(prose), [], `expected no finding for: ${prose}`);
+  }
+});
+
+/** "The answer is B" is a fourth shape; adding it is a separate decision. */
+test("a copular answer letter is outside the three patterns", () => {
+  assert.deepEqual(letterReferenceFindings("The answer is B"), []);
 });
 
 test("prose containing a lone a or I is not a letter reference", () => {

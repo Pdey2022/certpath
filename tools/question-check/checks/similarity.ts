@@ -211,13 +211,14 @@ export function findCorrectOptionLongest(items: readonly Item[]): Finding[] {
 }
 
 /**
- * Case-sensitive on purpose: `[A-H]` is an option *letter*, so it is upper case.
- * Under `/i` the article "a" matched — "answers a value question" read as a
- * reference to option A. The design's patterns carry no flag; keep them that way.
+ * Keyword any case, letter upper case only. `[A-H]` is an option *letter*, so it
+ * is upper case; the keyword may be sentence-initial ("Choice D") or mid-sentence
+ * ("option C"). No `/i` flag: under it the article "a" also matched, so
+ * "answers a value question" read as a reference to option A.
  */
 const LETTER_PATTERNS: ReadonlyArray<RegExp> = [
-  /\boption[s]?\s+[A-H]\b/,
-  /\b(?:answer|choice)s?\s+[A-H]\b/,
+  /\b[Oo]ption[s]?\s+[A-H]\b/,
+  /\b(?:[Aa]nswer|[Cc]hoice)s?\s+[A-H]\b/,
   /[A-H][.)]\s/,
 ];
 
