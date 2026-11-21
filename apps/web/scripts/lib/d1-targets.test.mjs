@@ -171,10 +171,13 @@ test("a clean set of configs produces one row per binding and no violations", ()
 });
 
 test("every config that binds D1 declares the staff MFA policy with the owner's values", () => {
-  // A config that binds D1 serves the admin API, and the staff security
-  // configuration fails closed to null when the MFA policy is absent: every
-  // /api/admin/auth/* route then answers 503. The owner decided TOTP only and
-  // an 8-hour maximum age, so the exact values are asserted - 15 minutes is
+  // A config that binds D1 serves the admin API. `readStaffSecurityConfiguration`
+  // returns null when the policy is absent, so seven of the eight
+  // /api/admin/auth/* routes answer 503 and `GET /preflight` answers 200 with
+  // `signInEnabled: false`; either way no staff session can be minted. The two
+  // vars are necessary but not sufficient - CSRF_HMAC_SECRET and
+  // STAFF_RATE_LIMIT_HMAC_SECRET are hosted secrets. The owner decided TOTP only
+  // and an 8-hour maximum age, so the exact values are asserted - 15 minutes is
   // the staleness #169 records in .dev.vars.example.
   let checked = 0;
   for (const config of ISOLATION_CONFIGS) {
@@ -190,12 +193,12 @@ test("every config that binds D1 declares the staff MFA policy with the owner's 
     assert.equal(
       vars.STAFF_MFA_ALLOWED_METHODS,
       "totp",
-      `${config.file} binds D1, so it must declare STAFF_MFA_ALLOWED_METHODS="totp"; without it every staff auth route answers 503`,
+      `${config.file} binds D1, so it must declare STAFF_MFA_ALLOWED_METHODS="totp"; without it no staff sign-in is possible`,
     );
     assert.equal(
       vars.STAFF_MFA_MAX_AGE_MS,
       "28800000",
-      `${config.file} binds D1, so it must declare STAFF_MFA_MAX_AGE_MS="28800000"; the owner's maximum age is 8 hours`,
+      `${config.file} binds D1, so it must declare STAFF_MFA_MAX_AGE_MS="28800000"; the owner's maximum age is 8 hours, and no staff sign-in is possible without a policy`,
     );
   }
   assert.ok(
