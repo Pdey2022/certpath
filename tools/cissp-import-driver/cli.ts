@@ -184,9 +184,10 @@ const HELP_TEXT = `Usage:
 Stage 0 (validate) always runs first and makes no request. The driver writes
 only inside --state; the converter's output directory is read-only.
 
---unit-limit is for the local proof only. On a remote run it completes the
-stage it is given, so a later unlimited run would import nothing; watch unit 1
-of a full run instead.
+--unit-limit is for the local proof only. On a remote run the upload stage is
+marked complete once the units it was given are in, so a later unlimited run
+would import nothing, and a limited publish after a full upload stops instead
+of completing; watch unit 1 of a full run instead.
 
 The password and the TOTP code are read from the terminal with echo off, or one
 per line from stdin with --password-stdin / --totp-stdin. Neither is accepted as
