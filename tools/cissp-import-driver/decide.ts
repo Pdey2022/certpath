@@ -27,8 +27,8 @@ export type ConfirmDecision =
 export interface ConfirmDecisionInput {
   /** `ok` when the call returned 2xx; `ambiguous` on timeout, abort or 5xx. */
   outcome: "ok" | "ambiguous" | "stopped";
-  /** What the by-key reconciliation read found; null when it could not run. */
-  observation: ConfirmObservation | null;
+  /** What the by-key reconciliation read found. A read that cannot run throws first. */
+  observation: ConfirmObservation;
   previewExpired: boolean;
   /** True when the same importId has already been retried once. */
   retried: boolean;
@@ -50,23 +50,15 @@ export function decideConfirm(input: ConfirmDecisionInput): ConfirmDecision {
       detail: "the confirm was refused; the unit stays unconfirmed",
     };
   }
-  const observation = input.observation;
-  if (observation === null) {
-    return {
-      action: "stop",
-      code: "CONFIRM_FAILED",
-      detail: "the confirm outcome is unknown and the reconciliation read failed",
-    };
-  }
-  if (observation.kind === "some") {
+  if (input.observation.kind === "some") {
     return {
       action: "stop",
       code: "PARTIAL_IMPORT",
-      detail: `reconciliation found ${observation.presentKeys.length} of the unit's keys`,
+      detail: `reconciliation found ${input.observation.presentKeys.length} of the unit's keys`,
     };
   }
-  if (observation.kind === "all") {
-    return { action: "adopt", ids: observation.ids };
+  if (input.observation.kind === "all") {
+    return { action: "adopt", ids: input.observation.ids };
   }
   if (input.previewExpired) return { action: "re-preview" };
   if (input.retried) {

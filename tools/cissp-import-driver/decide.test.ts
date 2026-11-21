@@ -9,7 +9,12 @@ const IDS = [
 
 test("a 2xx confirm is accepted without a reconciliation read", () => {
   assert.deepEqual(
-    decideConfirm({ outcome: "ok", observation: null, previewExpired: false, retried: false }),
+    decideConfirm({
+      outcome: "ok",
+      observation: { kind: "none" },
+      previewExpired: false,
+      retried: false,
+    }),
     { action: "accept" },
   );
 });
@@ -69,16 +74,6 @@ test("no keys and an expired preview re-previews the same bytes", () => {
     }),
     { action: "re-preview" },
   );
-});
-
-test("a reconciliation read that cannot run stops the run", () => {
-  const decision = decideConfirm({
-    outcome: "ambiguous",
-    observation: null,
-    previewExpired: false,
-    retried: false,
-  });
-  assert.equal(decision.action, "stop");
 });
 
 test("an auth or rate-limit stop is never turned into a retry", () => {
