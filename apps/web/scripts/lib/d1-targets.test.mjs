@@ -2,10 +2,12 @@
 // scripts/lib/d1-targets.mjs is removed: every assertion names the rule the
 // guard exists for.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   CliError,
   DEFER_FOREIGN_KEYS,
+  ISOLATION_CONFIGS,
   MANIFEST_FIELDS,
   analyzeConfigs,
   assertExpectedAccountEnv,
@@ -41,6 +43,8 @@ import {
 const PLACEHOLDER = "00000000-0000-0000-0000-000000000000";
 const STAGING_ID = "11111111-2222-4333-8444-555555555555";
 const PILOT_ID = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+// The committed configs live one level above scripts/lib.
+const webRoot = new URL("../../", import.meta.url);
 
 function configText({ name, databaseName, databaseId }) {
   return JSON.stringify({
@@ -163,6 +167,40 @@ test("a clean set of configs produces one row per binding and no violations", ()
       ["staging", "certpath-learner-staging", "real"],
       ["pilot", "certpath-pilot", "real"],
     ],
+  );
+});
+
+test("every config that binds D1 declares the staff MFA policy with the owner's values", () => {
+  // A config that binds D1 serves the admin API, and the staff security
+  // configuration fails closed to null when the MFA policy is absent: every
+  // /api/admin/auth/* route then answers 503. The owner decided TOTP only and
+  // an 8-hour maximum age, so the exact values are asserted - 15 minutes is
+  // the staleness #169 records in .dev.vars.example.
+  let checked = 0;
+  for (const config of ISOLATION_CONFIGS) {
+    const parsed = parseJsonc(
+      readFileSync(new URL(config.file, webRoot), "utf8"),
+      config.file,
+    );
+    if (!Array.isArray(parsed.d1_databases) || parsed.d1_databases.length === 0) {
+      continue;
+    }
+    checked += 1;
+    const vars = parsed.vars ?? {};
+    assert.equal(
+      vars.STAFF_MFA_ALLOWED_METHODS,
+      "totp",
+      `${config.file} binds D1, so it must declare STAFF_MFA_ALLOWED_METHODS="totp"; without it every staff auth route answers 503`,
+    );
+    assert.equal(
+      vars.STAFF_MFA_MAX_AGE_MS,
+      "28800000",
+      `${config.file} binds D1, so it must declare STAFF_MFA_MAX_AGE_MS="28800000"; the owner's maximum age is 8 hours`,
+    );
+  }
+  assert.ok(
+    checked >= 3,
+    `expected at least 3 of the ${ISOLATION_CONFIGS.length} isolation configs to bind D1; checked ${checked}, so this test would otherwise pass vacuously`,
   );
 });
 
