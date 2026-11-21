@@ -1,0 +1,27 @@
+{
+  "formatVersion": "certpath-question-profile-v1",
+  "certificationKey": "cism",
+  "examVersionId": "cism-exam-v1",
+  "targetRows": 600,
+  "examQuestionCount": 150,
+  "optionCount": 4,
+  "questionKeyPattern": "^cism-[1-9][0-9]*$",
+  "domains": [
+    { "id": "cism-d1", "weightShare": 0.18, "targetRows": 108 },
+    { "id": "cism-d2", "weightShare": 0.2, "targetRows": 120 },
+    { "id": "cism-d3", "weightShare": 0.33, "targetRows": 198 },
+    { "id": "cism-d4", "weightShare": 0.29, "targetRows": 174 }
+  ],
+  "difficultyTargets": null,
+  "catchAllTopicKeys": ["general"],
+  "maxDomainShareDeviation": 0.05,
+  "maxDomainDeviationSlackItems": 3,
+  "answerPosition": {
+    "monotoneBatchMinimum": 4,
+    "biasedMinimumRows": 40,
+    "biasedShare": 0.4,
+    "skewShare": 0.32
+  },
+  "nearDuplicate": { "shingleSize": 5, "threshold": 0.8 },
+  "referenceProcesses": []
+}

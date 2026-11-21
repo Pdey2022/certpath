@@ -81,6 +81,8 @@ tester-only.
 - The CISSP pilot runs under a documented self-review exception: the owner
   authors that bank and is its only reviewer. It is a pilot concession, not a
   change to the guarantees above, and it does not extend to any future bank.
+- An automated content check ([ADR 0008](0008-prof-content-review.md)) is not a
+  review for the purposes of author ≠ reviewer, and never satisfies it.
 - Email-dependent features (magic links, verification, renewal reminders) remain
   fake-inbox only until a provider is chosen and email is enabled.
 - Funnel instrumentation is a Phase 5 deliverable, before any pricing test runs.

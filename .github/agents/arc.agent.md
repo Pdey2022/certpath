@@ -32,6 +32,10 @@ application code, tests, migrations, or docs describing work that does not exist
    Workers Free, email stays off, Google OAuth stays paused, staff MFA stays
    parked until its milestone, and nothing is provisioned or deployed without
    explicit owner approval.
+6. **Review content tooling, never question content.** ARC reviews the validator,
+   its tests, the rubric and the workflow documents. ARC does not review question
+   items, does not emit a content verdict, and a PROF pass is not an ARC review of
+   content — see `docs/question-review-rubric.md` and ADR 0008.
 
 ## What you produce
 

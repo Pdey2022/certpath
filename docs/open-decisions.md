@@ -72,6 +72,15 @@ need an owner or architect decision.
 
 ## Owner decisions still open
 
+### Raised by the PROF design (ADR 0008, 21 November 2026)
+
+| Decision | Why it is open | Options | Decider |
+|---|---|---|---|
+| **F1 — CISM reviewer-of-record posture.** The CISSP self-review exception "does not extend to any future bank", and CISM items are AI-assisted drafts entered under the owner's account, so the owner's review would be self-review. ADR 0008 records the posture as unsettled and PROF is advisory only. | ADR 0006 requires author ≠ reviewer; the database does not enforce it; PROF cannot satisfy it (no `users` row, and an automated check is not a second pair of eyes). | (a) extend the documented exception to CISM with the same wording and state what "AI-assisted draft" means for the record; (b) name a second human reviewer for CISM; (c) defer the CISM import. | Owner |
+| **F3 — difficulty targets.** No agreed difficulty distribution exists in any source-of-truth document; `docs/cissp-bank-import.md` records "all-medium, uncalibrated" as a limitation. | The tool will not invent a product rule. `tools/question-check/profiles/cism-2026.json` carries `difficultyTargets: null` and the check warns (`DIFFICULTY_TARGET_UNSET`) without ever erroring. | (a) publish a target distribution and set `difficultyTargets`; (b) accept "uncalibrated" and keep measuring only. | Owner |
+| **F4 — 3 versus 4 repeat-free mocks.** At 600 items and the exact blueprint weights (18/20/33/29) the bank supports **3** repeat-free full mocks; the programme domain binds. | Filling programme to 200 (a 602-item bank) reaches 4, but moves the share from 33.0% to 33.2% and invites per-batch drift. `coverage.repeatFreeMocks` is reported, not enforced. | (a) accept 3 at the exact weights (recommended); (b) state a 602-item bank with programme at 200. | Owner |
+| **Whether a topic assignment is mandatory on every item.** The validator requires `topic_id`, requires it to exist in the taxonomy, and requires it to belong to the domain; `TOPIC_UNASSIGNED` warns when a `catchAllTopicKeys` topic holds more than 25% of the run. That is provisional tool behaviour, not an approved product rule. | No approved rule says every item must carry a specific topic, as opposed to an explicit catch-all. | (a) require a specific topic on every item; (b) allow a named catch-all subject to the 25% warning. | Owner |
+
 - Launch market's tax, consumer, refund and invoicing obligations (currency is USD).
 - Domain and canonical production origin (brand decided: CertPath, 18 November 2026).
 - Exam launch order beyond CISSP (CISM is prepared but not scheduled).

@@ -22,4 +22,5 @@ exports/
 # author/reviewer split must never enter history, even as a sample. The pattern
 # covers a renamed study folder as well as the current one.
 docs/CISSP*/
+docs/CISM*/
 desktop.ini
