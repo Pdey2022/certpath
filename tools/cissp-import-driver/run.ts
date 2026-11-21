@@ -1081,7 +1081,7 @@ async function convergeQuestion(context: Context, record: QuestionRecord): Promi
   if (questionId === null || revisionId === null) {
     throw new DriverError("CHECKPOINT_INVALID", `question ${record.key} has no server ids`);
   }
-  let recoveries = 0;
+  let conflictRetries = 0;
 
   for (let step = 0; step < 10; step += 1) {
     if (record.state === "published") return;
@@ -1189,8 +1189,8 @@ async function convergeQuestion(context: Context, record: QuestionRecord): Promi
     }
     if (outcome.kind === "rejected") noteConflict(context.checkpoint);
     noteOutcome(context, outcome);
-    recoveries += 1;
-    if (recoveries > 1) {
+    conflictRetries += 1;
+    if (conflictRetries > 1) {
       throw new DriverError(
         "WORKFLOW_CONFLICT",
         `${record.key}: a second conflict after one reconciliation`,

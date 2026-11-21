@@ -144,11 +144,18 @@ not adopted rows or requests: one per create-or-adopt recovery in
 or not the caller then refused it (a resolve that throws does not count, and one
 that answers entirely from the checkpoint does); and one per publish-stage
 observation of a question whose mutation was in flight (`observeQuestion`).
+Do not confuse it with the local `conflictRetries` in `convergeQuestion`
+(`run.ts`, formerly `recoveries`, which is why it read like the counter): that
+local bounds one question's retries after a `409`, is never persisted, and is
+not `checkpoint.counters.recoveries` — only `noteRecovery` moves that counter.
 `counters.http5xx` counts a `5xx` seen on preview, confirm, submit, review or
 publish, and a `5xx` that fails a presence walk — which is why the resolver's
 caller records it before letting `PROTOCOL_ERROR` propagate. It does **not**
-count a `5xx` on a stage-1 taxonomy read, on authentication, or on the stage-4
-observation / stage-5 export reads.
+count a `5xx` on a stage-1 taxonomy *read*, on authentication, or on the stage-4
+observation / stage-5 export reads; a stage-1 *create* that answers `5xx` **is**
+counted, because `createWithRecovery` calls `noteOutcome` on an ambiguous
+create. An operator who sees `http5xx` during a stage-1 failure is therefore
+looking at that create path, not at a broken counter.
 
 ## The two call sites
 
@@ -209,10 +216,18 @@ production always uses `DEFAULT_MAX_PAGES_PER_TOPIC` (40).
   (`GET …/questions` count must be 0); adoption through three pages of a crowded
   topic after a preview this checkpoint made; a fresh checkpoint refusing the
   same adoption with `EXISTING_KEYS`; a mixed local/server unit with no preview
-  refusing only the server half; a refusal the listing cannot corroborate;
-  `PARTIAL_IMPORT` for a genuinely partial unit; a mid-walk `500`; the page
-  bound; a stem/cookie/CSRF/password/TOTP sentinel absent from the checkpoint
-  and the log; and a global pin that no question read ever carries `search`.
+  refusing only the server half; a mixed local/server unit adopting when this
+  checkpoint previewed the bytes (G2 — the licensed half of the same gate); a
+  refusal the listing cannot corroborate; `PARTIAL_IMPORT` for a genuinely
+  partial unit; a mid-walk `500` counted; a mid-walk `429` that is
+  `RATE_LIMITED` and leaves `counters.http5xx` at 0 (G1); a mid-walk `2xx` whose
+  body is not JSON, which is `PROTOCOL_ERROR` with no status and is not counted;
+  the page bound; the sentinel test, which also asserts that the upload manifest
+  was written and that a sign-in and a session read really happened (G3), so a
+  stem/cookie/CSRF/password/TOTP sentinel is absent from the checkpoint, the
+  manifest and the log; and a global pin that no question read ever carries
+  `search` and that every one carries `domainId` and `topicId` (N4) — the claim
+  is that the read is *scoped*, not that the id values are validated.
 - `fixtures.ts` `pageOf` plus its fidelity test: 120 questions at `limit: 50` is
   50 + 50 + 20 with a null cursor only on the last page. The old fake ignored
   `limit`, returned every match and hardcoded `nextCursor: null`, which is why
