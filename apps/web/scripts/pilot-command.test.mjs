@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CliError } from "./lib/d1-targets.mjs";
 import {
+  PILOT_STAFF_MFA_VARS,
   assertPilotDeployConfig,
   parsePilotDeployOptions,
   pilotWranglerArgs,
@@ -25,10 +26,11 @@ import {
 const CLI = fileURLToPath(new URL("./pilot-command.mjs", import.meta.url));
 
 // Shaped like the artefact `npm run build:pilot` writes once the pilot database
-// is provisioned: the stamp the publish job adds, the non-indexable flag and a
-// real database id. The real `wrangler.pilot.jsonc` still carries the all-zero
-// placeholder, which is why the guard's placeholder refusal is tested
-// separately below and why `npm run dry-run:pilot` refuses today.
+// is provisioned: the stamp the publish job adds, the non-indexable flag, the
+// staff MFA policy `wrangler.pilot.jsonc` declares, and a real database id. The
+// real `wrangler.pilot.jsonc` still carries the all-zero placeholder, which is
+// why the guard's placeholder refusal is tested separately below and why
+// `npm run dry-run:pilot` refuses today.
 function pilotConfig() {
   return {
     configPath: "C:\\repo\\apps\\web\\wrangler.pilot.jsonc",
@@ -37,6 +39,8 @@ function pilotConfig() {
     compatibility_date: "2026-11-10",
     vars: {
       INDEXING_ENABLED: "false",
+      STAFF_MFA_ALLOWED_METHODS: "totp",
+      STAFF_MFA_MAX_AGE_MS: "28800000",
       DEPLOYED_COMMIT: "280d53b",
     },
     d1_databases: [
@@ -310,7 +314,17 @@ test("the pilot artefact guard refuses anything that is not the pilot build", (t
       "pilot_database_placeholder",
     ],
     [{ ...config, vars: { ...config.vars, INDEXING_ENABLED: "true" } }, "pilot_indexing_enabled"],
-    [{ ...config, vars: { INDEXING_ENABLED: "false" } }, "pilot_deploy_stamp_missing"],
+    [
+      {
+        ...config,
+        vars: {
+          INDEXING_ENABLED: "false",
+          STAFF_MFA_ALLOWED_METHODS: "totp",
+          STAFF_MFA_MAX_AGE_MS: "28800000",
+        },
+      },
+      "pilot_deploy_stamp_missing",
+    ],
     // `280d53` is one character short of the shortest commit the stamp writes.
     [{ ...config, vars: { ...config.vars, DEPLOYED_COMMIT: "280d53" } }, "pilot_deploy_stamp_missing"],
   ];
@@ -336,6 +350,60 @@ test("the pilot artefact guard refuses anything that is not the pilot build", (t
     () => readPilotGeneratedConfig(unparseable),
     (error) => error instanceof CliError && error.code === "pilot_config_unparsed",
   );
+});
+
+test("the pilot artefact guard requires the staff MFA vars, as vars not secrets", () => {
+  // #212: the build carries the staff MFA policy, so the guard asserts it on the
+  // artefact and not only on the committed config (#209). The stale 15-minute
+  // value from #169 is the regression the value row pins. Every refusal names
+  // the variable and the operator check: the guard reads the built artefact and
+  // cannot see the Worker's secrets, so it points at `wrangler secret list`.
+  for (const [name] of Object.entries(PILOT_STAFF_MFA_VARS)) {
+    const config = pilotConfig();
+    delete config.vars[name];
+    assert.throws(
+      () => assertPilotDeployConfig(config),
+      (error) =>
+        error instanceof CliError &&
+        error.code === "pilot_staff_mfa_missing" &&
+        error.message.includes(name) &&
+        error.message.includes("wrangler secret list"),
+      `expected pilot_staff_mfa_missing naming ${name}`,
+    );
+  }
+
+  const stale = pilotConfig();
+  stale.vars.STAFF_MFA_MAX_AGE_MS = "900000";
+  assert.throws(
+    () => assertPilotDeployConfig(stale),
+    (error) =>
+      error instanceof CliError &&
+      error.code === "pilot_staff_mfa_mismatch" &&
+      error.message.includes("STAFF_MFA_MAX_AGE_MS") &&
+      error.message.includes('"900000"') &&
+      error.message.includes("wrangler secret list"),
+    "expected pilot_staff_mfa_mismatch naming STAFF_MFA_MAX_AGE_MS as a var",
+  );
+
+  // `tester-gate` is the label 5F deleted, so a build that resurrects it must
+  // fail on the value, not merely on the var's presence.
+  const revived = pilotConfig();
+  revived.vars.STAFF_MFA_ALLOWED_METHODS = "tester-gate";
+  assert.throws(
+    () => assertPilotDeployConfig(revived),
+    (error) =>
+      error instanceof CliError &&
+      error.code === "pilot_staff_mfa_mismatch" &&
+      error.message.includes("STAFF_MFA_ALLOWED_METHODS") &&
+      error.message.includes('"tester-gate"') &&
+      error.message.includes('"totp"'),
+    "expected pilot_staff_mfa_mismatch naming STAFF_MFA_ALLOWED_METHODS with the found and expected values",
+  );
+
+  // The same fixture without those rows above passes: the guard refuses only a
+  // build that dropped or changed the policy.
+  const accepted = assertPilotDeployConfig(pilotConfig());
+  assert.equal(accepted.indexing, "false");
 });
 
 test("only dry-run carries --dry-run, and only deploy has no guard-free path", () => {
