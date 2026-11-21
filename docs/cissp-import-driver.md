@@ -333,11 +333,15 @@ tsx tools/cissp-import-driver/cli.ts `
   units it was given are in, so a later unlimited run logs
   `stage … is already complete` and imports nothing while exiting 0; and a
   limited `--stage publish` after a full upload stops with `STAGE_ORDER`
-  instead of completing. A fresh state directory is not an escape either — its
-  preview refuses the rows the limited run created, and presence fails closed
-  with `EXISTING_KEYS`. The remote canary is a watched full run, interrupted to
-  stop: the checkpoint records the intent before each mutation and the outcome
-  after it, so an interrupted run resumes with the same command.
+  instead of completing. That stop is not fail-safe at entry: on `--stage all`
+  the in-scope questions are published first, and a later unlimited run then
+  skips upload and finishes publish and verify over the partial set, exiting 0 —
+  the sharpest reason the flag is not a canary. A fresh state directory is not
+  an escape either — its preview refuses the rows the limited run created, and
+  presence fails closed with `EXISTING_KEYS`. The remote canary is a watched
+  full run, interrupted to stop: the checkpoint records the intent before each
+  mutation and the outcome after it, so an interrupted run resumes with the
+  same command.
 
 ### The prose file
 
