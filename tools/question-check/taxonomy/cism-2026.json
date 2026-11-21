@@ -1,0 +1,49 @@
+{
+  "formatVersion": "certpath-question-taxonomy-v1",
+  "certificationKey": "cism",
+  "examVersionId": "cism-exam-v1",
+  "domains": [
+    {
+      "id": "cism-d1",
+      "title": "Information Security Governance",
+      "topics": [
+        { "id": "cism-d1-t1", "title": "", "meaning": "" },
+        { "id": "cism-d1-t2", "title": "", "meaning": "" },
+        { "id": "cism-d1-t3", "title": "", "meaning": "" },
+        { "id": "cism-d1-t4", "title": "", "meaning": "" }
+      ]
+    },
+    {
+      "id": "cism-d2",
+      "title": "Information Security Risk Management",
+      "topics": [
+        { "id": "cism-d2-t1", "title": "", "meaning": "" },
+        { "id": "cism-d2-t2", "title": "", "meaning": "" },
+        { "id": "cism-d2-t3", "title": "", "meaning": "" },
+        { "id": "cism-d2-t4", "title": "", "meaning": "" }
+      ]
+    },
+    {
+      "id": "cism-d3",
+      "title": "Information Security Program",
+      "topics": [
+        { "id": "cism-d3-t1", "title": "", "meaning": "" },
+        { "id": "cism-d3-t2", "title": "", "meaning": "" },
+        { "id": "cism-d3-t3", "title": "", "meaning": "" },
+        { "id": "cism-d3-t4", "title": "", "meaning": "" },
+        { "id": "cism-d3-t5", "title": "", "meaning": "" }
+      ]
+    },
+    {
+      "id": "cism-d4",
+      "title": "Incident Management",
+      "topics": [
+        { "id": "cism-d4-t1", "title": "", "meaning": "" },
+        { "id": "cism-d4-t2", "title": "", "meaning": "" },
+        { "id": "cism-d4-t3", "title": "", "meaning": "" },
+        { "id": "cism-d4-t4", "title": "", "meaning": "" },
+        { "id": "cism-d4-t5", "title": "", "meaning": "" }
+      ]
+    }
+  ]
+}
