@@ -118,9 +118,10 @@ own clock.
 Both staff roles require MFA, and 5F has built the factor: an in-Worker RFC 6238
 TOTP code upgrades a password-only session in place, ten one-time recovery codes
 are issued once at enrolment, and a Global-Admin reset replaces a lost factor. The
-`tester-gate` label is retired at the storage layer (`0023`). This surface may not
-be used for real learner data until the deploy, the two Worker settings and one
-enrolment per staff account are done; see
+`tester-gate` label is retired at the storage layer (`0023`). The staging deploy
+and both staging Worker settings are done; this surface may not be used for real
+learner data until the production deploy, the two production Worker settings and
+one enrolment per remaining staff account are done; see
 [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md). That is a security
 dependency, not a preference.
 
@@ -149,6 +150,6 @@ The `tester-gate` assurance is retired in every `supportedMfaMethods` list and
 refused by `0023`'s `app_sessions_no_tester_gate_*` triggers: a configuration
 that still names it answers 503, and no code path can mint the label again. The
 `ADMIN_TESTER_IPS` allowlist is kept as defence in depth and is no longer an
-assurance. The remaining act before non-tester use is the deploy and one
-enrolment per staff account; see
+assurance. The remaining act before non-tester use is the production deploy, the
+two production Worker settings and one enrolment per remaining staff account; see
 [the 5F design record](5f-staff-second-factor.md).

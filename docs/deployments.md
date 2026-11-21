@@ -115,15 +115,18 @@ reports with `db/migrations/*.sql`, and then:
 Nothing in either workflow applies a migration; `wrangler d1 migrations apply`
 exists only in local and provisioning tooling.
 
-**Why staging skips rather than fails.** Staging D1 holds 22 applied migrations
-(`0022` is the last) while `main` carries 23: `0023_staff_second_factor.sql` is
-deliberately deferred by the owner, and the staging Worker does not exist yet.
-Deploying staging code against that schema would be wrong, applying `0023` from
-a pipeline would be worse, and a red build would read as breakage rather than a
-decision. The skip is therefore deliberate and visible — a notice, a summary and
-a log line naming the pending file — and it leaves the site publish unaffected.
-Once `0023` is applied under owner approval, the same gate turns green and the
-next merge publishes the staging Worker.
+**Why staging skipped rather than failed (state on 19-20 November 2026).** While
+`0023_staff_second_factor.sql` was deliberately deferred by the owner and the
+staging Worker did not exist, staging D1 held 22 applied migrations against
+`main`'s 23. Deploying staging code against that schema would have been wrong,
+applying `0023` from a pipeline would have been worse, and a red build would
+have read as breakage rather than a decision. The skip was therefore deliberate
+and visible — a notice, a summary and a log line naming the pending file — and it
+left the site publish unaffected. `0023` was applied under owner approval on
+20 November 2026, the gate cleared, and the staging Worker has deployed on every
+gated run that was not superseded since — a superseded queued run does not
+deploy, and the newest run carries the same or newer commit (most recently
+`7aa7518`, 21 November 2026).
 
 The public site carries no D1 binding, so there is no schema to gate; the
 production workflow's gate step is scoped to the `app` target.

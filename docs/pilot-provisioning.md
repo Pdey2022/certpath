@@ -12,10 +12,11 @@ triggers 141`; export #2 (data-bearing, after the smoke fixture) and rehearsal #
 exited 0 — `replay: schema 101, data 43, triggers 141`, with the `audit_events`
 count equal to the manifest.
 
-**State on 20 November 2026 stands beside the 5C snapshot above:** the staging
-Worker `learner-auth-staging` **is deployed** — twice through the CI pipeline that
-follows a merge to `main`, most recently at `main` = `32b3003`, with the migration
-gate clearing both times (`Schema gate clear: no pending migration`) — and **five
+**State on 21 November 2026 stands beside the 5C snapshot above:** the staging
+Worker `learner-auth-staging` **is deployed** by the CI pipeline that follows a
+merge to `main`, most recently at `main` = `7aa7518` — the migration gate has
+been clear on every run since `0023` was applied (`Schema gate clear: no pending
+migration`) — and **five
 secrets are set** on it: `ADMIN_TESTER_IPS`, `CSRF_HMAC_SECRET`,
 `STAFF_MFA_SEAL_KEY`, `STAFF_RATE_LIMIT_HMAC_SECRET` and `STAGING_TESTER_IPS`.
 Names only: no secret value belongs in this repository. The database has **23
@@ -39,7 +40,7 @@ owner-approved execution changes Cloudflare state.
 ## What 5C is, narrowed
 
 5C creates **one resource**: the D1 database `certpath-learner-staging` in the
-account where the staging Worker (`learner-auth-staging`) will be deployed. That
+account where the staging Worker (`learner-auth-staging`) is now deployed. That
 Worker did not exist during the run — it answered `code: 10007` (not found) on
 18 November 2026, after the database id was recorded (#134) — and it has since
 been deployed by the pipeline (§State above). Its
@@ -50,9 +51,10 @@ pilot event flags, all `"false"`, in #141, and the two staff MFA policy vars in
 It does **not** create:
 
 - the pilot database (`certpath-pilot`) — that waits for the first real learner,
-  which waits for 5F to replace the `tester-gate` assurance;
+  which waits for the staff second factor to be deployed to production and
+  enrolled for every account that will hold data;
 - a learner, an invited learner, a credential or a sign-in link — no real learner
-  data exists until MFA replaces the tester-gate assurance
+  data exists until that deployment and enrolment are done
   ([`docs/delivery-plan.md`](delivery-plan.md) §Operating constraints);
 - a Worker deployment, a route, a secret or a var change. 5C itself changes no
   var: the three `PILOT_*` flags in `apps/web/wrangler.staging.jsonc`
@@ -427,8 +429,10 @@ it, so a pilot build followed by a staging deploy would have shipped a D1-bound
 `certpath-pilot` Worker to the staging host.
 
 `npm run deploy:staging` is that command now. **It has been run:** the staging
-Worker is deployed, twice through the CI pipeline on merges to `main`, most
-recently at `main` = `32b3003`, and the migration gate cleared both times. The
+Worker is deployed by the CI pipeline on merges to `main`, most recently at
+`main` = `7aa7518` (21 November 2026), and the migration gate has been clear on
+every run since `0023` was applied; a queued run superseded by a newer one does
+not deploy, and the newest run carries the same or newer commit. The
 secrets it needs are set (§Staff surface on staging names them). What the command
 adds is the name, the guard and the rollback around every future deploy.
 

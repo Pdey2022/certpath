@@ -441,7 +441,7 @@ carries them. The new modules emit no per-request logging at all.
 
 ## 12. Security dependency: MFA before real learners
 
-**5F has landed the factor; the deploy has not happened.** The `tester-gate`
+**5F has landed the factor and is deployed to staging.** The `tester-gate`
 label is retired: password sign-in mints a session with `mfa_method IS NULL`,
 every admin route and every statement guard answers `mfa-assurance-missing` for
 it, and `POST /admin/auth/mfa/verify` upgrades that same session row to
@@ -456,7 +456,10 @@ The `ADMIN_TESTER_IPS` allowlist stays as **defence in depth** (owner decision,
 surface even for a fully verified session.
 
 **This surface still may not be used for real learner data until the second
-factor is deployed and enrolled for both staff roles.** The code, migration,
+factor is deployed to production, both production Worker settings are set, and
+every staff account that will hold data is enrolled.** The staging factor is
+deployed on 20 November 2026, and one account is enrolled, evidenced in #190;
+enrolment is required per staff account, not once for both roles. The code, migration,
 tests and docs are what this slice ships; `STAFF_MFA_ALLOWED_METHODS=totp` and
 `STAFF_MFA_SEAL_KEY` are deploy-time settings, and with the seal key absent every
 MFA route answers 503 rather than storing a seed in clear.
@@ -481,8 +484,9 @@ is edited to undo any of it.
 2. Per-actor rate limiting for lookup and reveal, plus an alert when one actor's
    reveal count in a day crosses a threshold.
 3. ~~MFA replacement for `tester-gate` as a hard gate before real learner data.~~
-   Built in 5F ([design record](5f-staff-second-factor.md)); the remaining act is
-   the deploy, the two Worker settings and one enrolment per staff account.
+   Built in 5F ([design record](5f-staff-second-factor.md)) and deployed to
+   staging; the remaining act is the production deploy, the two production
+   Worker settings and one enrolment per remaining staff account.
 4. HTTP-level Manager denial tests for commerce, access grants, prices and staff —
    those routes arrive in Phase 4. The guarantee is held here at the capability
    layer (matrix denial, `requireCapability`, the `/capabilities` report and the

@@ -6,18 +6,21 @@ each one can be reviewed, approved and rolled back on its own. This file records
 the slices, their order, their migration reservations and the decisions each one
 needs.
 
-Status: **5A, 5B and 5C are merged, and the 5C run completed on 17 November
-2026.** That run created `certpath-learner-staging` (17 November 2026 at
-22:25:00Z, region `WEUR`) and migrated it through `0021_pilot_events.sql` (21
-applied migrations), recorded its id in #134, and exported and rehearsed twice to
-exit 0. **No Worker is deployed, and no secret, route or
-deployment exists**: `learner-auth-staging` answers `code: 10007` (not found),
-checked 18 November 2026. `0022_pilot_events_retention.sql` was applied to that
-database on 18 November 2026, under owner approval, so it now holds **22 applied
-migrations**, last `0022_pilot_events_retention.sql`, and the retention floor is
-enforced there as well (see §Retention precondition); both funnel flags and
-`PILOT_EVENTS_RETENTION_ENABLED` are `"false"`. #141 decides the staging Worker is
-the events target, **in code only**; see §Events target below.
+Status: **5A, 5B, 5C and 5F are merged, and 5F is deployed to staging. 5D and 5E
+are not started.** The 5C run created `certpath-learner-staging` (17 November
+2026 at 22:25:00Z, region `WEUR`), recorded its id in #134, and exported and
+rehearsed twice to exit 0. That database now holds **23 applied migrations**,
+last `0023_staff_second_factor.sql` (applied remotely on 20 November 2026 after
+an export), and the retention floor is enforced there as well (see §Retention
+precondition); both funnel flags and `PILOT_EVENTS_RETENTION_ENABLED` are
+`"false"`. The staging Worker **`learner-auth-staging` is deployed** by the CI
+pipeline on merges to `main` — the deploy step is skipped while the gate finds a
+pending migration, and a superseded queued run does not deploy — most recently
+`7aa7518` on 21 November 2026, with its
+staff surface configured: five hosted secrets, names only, recorded in
+[pilot-provisioning](pilot-provisioning.md) §State. The approved account and its
+enrolment are recorded in #190. #141 decides the staging Worker is the events
+target, **in code only**; see §Events target below.
 
 ## Slices
 
@@ -28,7 +31,7 @@ the events target, **in code only**; see §Events target below.
 | **5C Provisioning** | One isolated staging D1 (`certpath-learner-staging`): preflight, create, apply the chain, record the id, export #1, rehearse, apply the synthetic smoke fixture, export #2, rehearse #2. **No learner, no pilot database, no Worker, no secret.** | 5A, owner approval | uses the existing chain | **Run completed 17 Nov 2026**: database created (22:25:00Z, `WEUR`) and migrated (21 migrations), id recorded in #134, both exports rehearsed to exit 0; [runbook](pilot-provisioning.md) |
 | **5D Fake door** | Price validation without taking payment | 5B (funnel), 5E (hostname) | none | Owner approval: product and pricing rule |
 | **5E Hostname decision** | Canonical pilot hostname and routing | 5C | none | **Owner approval required**: brand, domain, canonical origin |
-| **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor (in-Worker TOTP, recovery codes, Global-Admin reset) | 5C, ADR 0004 | **0023** | **Design approved 18 November 2026**; [design record](5f-staff-second-factor.md). Code, migration, tests and docs land together; the deploy and `STAFF_MFA_SEAL_KEY` are the owner's |
+| **5F MFA before real learners** | Replace the `tester-gate` assurance with a real second factor (in-Worker TOTP, recovery codes, Global-Admin reset) | 5C, ADR 0004 | **0023** | **Merged (#164) on 18 November 2026 and deployed to staging on 20 November 2026**; [design record](5f-staff-second-factor.md) |
 
 Order: **5A -> 5C -> 5B**, with 5E parallel to 5B and 5D after both. 5F gates the
 first real learner, not the first database.
@@ -104,10 +107,10 @@ failure modes and rollback: [`docs/pilot-events-retention.md`](pilot-events-rete
 
 **The floor is installed in the staging database too.** `0022` was applied
 remotely to `certpath-learner-staging` on 18 November 2026, under owner approval:
-that database now holds **22 applied migrations**, last
-`0022_pilot_events_retention.sql`, and the run verified
-`pilot_events_no_delete` (trigger) and `pilot_events_received_at_idx` (index) in
-`sqlite_master`. Evidence and the stop rule:
+that run left it holding **22 applied migrations**, last
+`0022_pilot_events_retention.sql` (the status above records 23 today), and it
+verified `pilot_events_no_delete` (trigger) and `pilot_events_received_at_idx`
+(index) in `sqlite_master`. Evidence and the stop rule:
 [`docs/pilot-provisioning.md`](pilot-provisioning.md) §Pre-enablement step.
 
 The floor is no longer the blocker for the events flags; the remaining
@@ -115,9 +118,9 @@ precondition is the owner's enablement decision. Both
 `PILOT_EVENTS_ENABLED` and `PILOT_SERVER_EVENTS_ENABLED` stay `"false"` until
 then, and the scheduled prune stays off until the owner turns it on: with it off
 the table accumulates rows and nothing is removed automatically, though every
-in-window delete is still refused by storage. The prune is now also declared for
-the staging Worker, which is the events target — code only, not deployed
-(§Events target below).
+in-window delete is still refused by storage. The prune is also declared for the
+staging Worker, which is the events target, and has shipped with it since the
+staging deploy (§Events target below).
 
 ### Events target (#141): staging, in code only
 
@@ -136,32 +139,28 @@ by `apps/web/wrangler.staging.jsonc`:
 - the handler does not reuse `app.ts`'s handler, which would also run
   question-import cleanup, audit retention and commerce expiry against the
   staging database;
-- nothing is deployed, no flag is turned on, no secret is set, and no route,
-  capability or migration is added. `apps/web/wrangler.jsonc` is unchanged and
-  still binds the all-zero `certpath-local` placeholder.
+- the decision itself added no route, capability or migration and turned no flag
+  on; the deployments and staff secrets that followed are recorded in the status
+  above and in [pilot-provisioning](pilot-provisioning.md) §State.
+  `apps/web/wrangler.jsonc` is unchanged and still binds the all-zero
+  `certpath-local` placeholder.
 
-**What remains before events can be recorded and pruned:** applying `0022` is
-done (the staging database holds 22 applied migrations, last
-`0022_pilot_events_retention.sql`, 18 November 2026 —
-[`docs/pilot-provisioning.md`](pilot-provisioning.md) §Pre-enablement step). What
-remains:
+**What remains before events can be recorded and pruned:** the staging Worker
+is deployed (status above) and `0023` is applied, so the cron already ships and
+stays a no-op until step 2. What remains:
 
-1. deploy the staging Worker (an owner-approved deployment; the cron ships with
-   the deployment and stays a no-op until step 3). Since continuous deployment
-   landed, a merge to `main` publishes it automatically — but only while no
-   migration is pending, and `0023` is pending until it is applied by hand
-   ([deployments](deployments.md));
-2. measure the cron's CPU cost for a 250-row prune against Free's 10 ms limit
+1. measure the cron's CPU cost for a 250-row prune against Free's 10 ms limit
    (#147) — the prune has never run on a deployed Worker, so the batch's cost
    against the cap is unproven;
-3. turn `PILOT_EVENTS_RETENTION_ENABLED` on (owner decision) — not before;
-4. only then consider `PILOT_EVENTS_ENABLED` / `PILOT_SERVER_EVENTS_ENABLED`: the
+2. turn `PILOT_EVENTS_RETENTION_ENABLED` on (owner decision) — not before;
+3. only then consider `PILOT_EVENTS_ENABLED` / `PILOT_SERVER_EVENTS_ENABLED`: the
    coupling test refuses an events flag that is `"true"` while retention is not,
    because that would promise a twelve-month period nothing delivers.
 
-Until step 1, the staging `scheduled` handler is exercised only by
+Until the retention flag is turned on, the staging `scheduled` handler runs and
+returns before preparing a statement; the prune path is exercised only by
 `apps/api/test/pilot-events-retention.test.ts`, which drives it against the real
-`0022` schema in the local runtime. No deployed Worker has run it, so the
+`0022` schema in the local runtime. No deployed Worker has run the prune, so the
 schedule is verified by the committed configuration and that test, not by an
 invocation.
 
@@ -192,17 +191,18 @@ learner and the Worker deployment stayed out.
 | Enrol / verify pages | `apps/web/app/components/staff-mfa.tsx`, `app/routes/admin-mfa-*.tsx` |
 | Enrolment tickets printed beside the passwords | `apps/api/scripts/provision-staff-accounts.ts` |
 
-The second factor is built and tested; it is **not deployed**. `STAFF_MFA_SEAL_KEY`
-is a deploy-time Worker secret that this slice does not set, and with it missing
-every MFA route answers `503 service_unavailable` rather than falling back to a
-plaintext seed.
+The second factor is built, tested and deployed to staging. `STAFF_MFA_SEAL_KEY`
+is a deploy-time Worker secret, set on staging on 20 November 2026 (names only;
+[pilot-provisioning](pilot-provisioning.md) §State). With it missing every MFA
+route answers `503 service_unavailable` rather than falling back to a plaintext
+seed.
 
 ## Resolved decisions
 
 | Decision | Outcome | Date |
 |---|---|---|
 | Export retention | Keep the last 3 dumps; delete 14 days after the migration is confirmed; never commit or upload a dump | Owner decision, 17 November 2026 |
-| Server-originated event consent | **Not required.** Checkout/settlement server rows are written with `consent = 'not-required'`, carry no session id and need no consent reference; `PILOT_SERVER_EVENTS_ENABLED` is unblocked but stays `"false"` pending an enablement decision: the retention floor (#110) has landed in `0022` and was applied to staging on 18 November 2026, and before any events flag turns on there are two further gates per §Events target (#141) — deploying the staging Worker and the #147 CPU measurement | Owner decision, 17 November 2026; amended 18 November 2026 |
+| Server-originated event consent | **Not required.** Checkout/settlement server rows are written with `consent = 'not-required'`, carry no session id and need no consent reference; `PILOT_SERVER_EVENTS_ENABLED` is unblocked but stays `"false"` pending an enablement decision: the retention floor (#110) has landed in `0022` and was applied to staging on 18 November 2026, and before any events flag turns on there is one further gate per §Events target (#141) — the #147 CPU measurement; the staging Worker that owns them is deployed | Owner decision, 17 November 2026; amended 18 November 2026 |
 | 5C scope | **One staging database, no learner.** `certpath-learner-staging` is the only resource 5C will ever create; the pilot database and the invited learner are withdrawn because no real learner data exists until MFA replaces the tester-gate assurance ([`docs/delivery-plan.md`](delivery-plan.md) §Operating constraints) | Owner decision, 17 November 2026 |
 
 ## Open decisions that still block Phase 5
@@ -213,8 +213,8 @@ plaintext seed.
 - Enabling the retention prune and the events flags (owner). The enforcement
   itself landed in `0022` (#110); what is left is the decision to turn
   `PILOT_EVENTS_RETENTION_ENABLED`, `PILOT_EVENTS_ENABLED` and
-  `PILOT_SERVER_EVENTS_ENABLED` on — and, before any of that, deploying the
-  staging Worker that now owns them (#141).
+  `PILOT_SERVER_EVENTS_ENABLED` on — and, before any of that, the #147 CPU
+  measurement the deployed staging Worker still needs (#141).
 
 ## Not in 5A
 

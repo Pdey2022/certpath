@@ -7,8 +7,8 @@ precondition for enabling `PILOT_EVENTS_ENABLED`.
 
 Status: **owner approved the design on 18 November 2026, with one addition —
 consent withdrawal stops future events only.** Implemented in `0022`; the floor is
-installed locally and in the staging database (22 applied migrations, 18 November
-2026); no flag is enabled and nothing is deployed.
+installed locally and in the staging database (22 applied migrations on 18
+November 2026, 23 today); no flag is enabled, and the staging Worker is deployed.
 
 ## Scope
 
@@ -175,7 +175,7 @@ Two different Workers, two different configuration files, one prune:
 | Config | Worker | `scheduled` handler | Today |
 |---|---|---|---|
 | `apps/web/wrangler.jsonc` | `certpath-foundation` | `apps/web/workers/app.ts`, beside question-import cleanup, audit retention and commerce expiry | local/foundation config; binds the all-zero `certpath-local` placeholder |
-| `apps/web/wrangler.staging.jsonc` | `learner-auth-staging` | `apps/web/workers/staging-app.ts` → `schedulePilotEventRetention` in `apps/web/workers/pilot-events-retention-schedule.ts` | the floor is installed in its database; the Worker is declared in code, **not deployed**; every `PILOT_*` flag `"false"` |
+| `apps/web/wrangler.staging.jsonc` | `learner-auth-staging` | `apps/web/workers/staging-app.ts` → `schedulePilotEventRetention` in `apps/web/workers/pilot-events-retention-schedule.ts` | the floor is installed in its database; the Worker is deployed by the pipeline on merges to `main` (latest `7aa7518`, 21 November 2026); every `PILOT_*` flag `"false"` |
 
 Both declare the same `*/5 * * * *` cron. The staging handler runs the pilot
 prune and nothing else, so the staging database never sees the question-import,
@@ -185,21 +185,23 @@ reads no row.
 
 The floor is installed in both places. Locally, the chain is applied to a fresh D1
 by the fresh-chain check on every `npm run verify`. Remotely, `0022` was applied
-to `certpath-learner-staging` on 18 November 2026, under owner approval: that
-database now holds **22 applied migrations**, last
-`0022_pilot_events_retention.sql`, with `pilot_events_no_delete` and
+to `certpath-learner-staging` on 18 November 2026, under owner approval: that run
+left it holding **22 applied migrations**, last
+`0022_pilot_events_retention.sql` (23 today, last
+`0023_staff_second_factor.sql`), with `pilot_events_no_delete` and
 `pilot_events_received_at_idx` verified in `sqlite_master`
 ([`docs/pilot-provisioning.md`](pilot-provisioning.md) §Pre-enablement step). The
 prune still never runs: `PILOT_EVENTS_RETENTION_ENABLED` is `"false"` in both
-configs and no Worker is deployed.
+configs, and the deployed staging Worker's cron returns before preparing a
+statement.
 
 The foundation Worker is not the events target. Its `certpath-local` binding is
 the all-zero placeholder, and the owner decided on 18 November 2026 (#141) that
-pilot events are recorded and pruned by the staging Worker. That Worker does not
-exist yet: the database was recorded (#134), the Worker answers `code: 10007`
-(not found) as checked on 18 November 2026, so no deployed Worker can record or
-prune pilot events today. What remains is the deployment and the enablement
-decision — [`docs/pilot-hardening.md`](pilot-hardening.md) §Events target.
+pilot events are recorded and pruned by the staging Worker. That Worker exists:
+it answered `code: 10007` (not found) on 18 November 2026 and was deployed by the
+pipeline after `0023` was applied, so it runs today but records and prunes
+nothing until a flag is turned on. What remains is the enablement decision —
+[`docs/pilot-hardening.md`](pilot-hardening.md) §Events target.
 
 ## Failure modes
 

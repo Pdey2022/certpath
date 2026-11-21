@@ -1,5 +1,9 @@
 # Public site release (Workers Free)
 
+**Partly superseded, 20 November 2026:** `certpath-site` is deployed and answers
+200. The "not deployed" status below and "the only live deployment" describe the
+state before the 20 November publish.
+
 **Status:** Prepared for review; **not deployed**. The existing demo stays live at
 `https://certpath-ui-preview.certpath.workers.dev` on the Workers Free plan.
 

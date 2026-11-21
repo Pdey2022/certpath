@@ -112,8 +112,10 @@ need an owner or architect decision.
   dump and enforcing its retention are still open.
 - Real MFA method to replace the tester-gate assurance before real learner data.
   **Resolved 18 November 2026**: in-Worker TOTP, owner-approved with the 5F design;
-  see [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md). What remains
-  is the deploy and the two Worker settings, not a decision.
+  see [`docs/5f-staff-second-factor.md`](5f-staff-second-factor.md). The staging
+  deploy and both Worker settings are done ([pilot-provisioning](pilot-provisioning.md)
+  §State); what remains is the production deploy, the two production Worker
+  settings and one enrolment per remaining staff account, not a decision.
 - Production secret rotation without invalidating sessions. `key_version` on
   `staff_totp_credentials` exists for it, and MFA-step re-wrapping is still open.
 - Whether the production admin panel runs on the same Worker as learner traffic.
