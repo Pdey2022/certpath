@@ -29,8 +29,12 @@ export type ConfirmDecision =
   | { action: "stop"; code: DriverErrorCode; detail: string };
 
 export interface ConfirmDecisionInput {
-  /** `ok` when the call returned 2xx; `ambiguous` on timeout, abort or 5xx. */
-  outcome: "ok" | "ambiguous" | "stopped";
+  /**
+   * `ok` when the call returned 2xx; `ambiguous` on timeout, abort or 5xx.
+   * `run.ts` returns on a 2xx before consulting this table, so `"ok"` exists
+   * for the table's own completeness rather than as a path production takes.
+   */
+  outcome: "ok" | "ambiguous";
   /** What the by-key reconciliation read found. A read that cannot run throws first. */
   observation: ConfirmObservation;
   previewExpired: boolean;
@@ -47,13 +51,6 @@ export interface ConfirmDecisionInput {
  */
 export function decideConfirm(input: ConfirmDecisionInput): ConfirmDecision {
   if (input.outcome === "ok") return { action: "accept" };
-  if (input.outcome === "stopped") {
-    return {
-      action: "stop",
-      code: "CONFIRM_FAILED",
-      detail: "the confirm was refused; the unit stays unconfirmed",
-    };
-  }
   if (input.observation.kind === "some") {
     return {
       action: "stop",

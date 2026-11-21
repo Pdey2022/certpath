@@ -146,20 +146,23 @@ that answers entirely from the checkpoint does); and one per publish-stage
 observation of a question whose mutation was in flight (`observeQuestion`).
 Do not confuse it with the local `conflictRetries` in `convergeQuestion`
 (`run.ts`, formerly `recoveries`, which is why it read like the counter): that
-local bounds one question's reconcile-and-retry after a non-`ok` mutation
-answer — a `409`, a `5xx`, a timeout — and the second such answer stops the run.
-It is never persisted and is not `checkpoint.counters.recoveries`; only
-`noteRecovery` moves that counter.
+local bounds one question's reconcile-and-retry after a `409` or any ambiguous
+answer (`5xx`, `timeout`, `network` — the only reasons `call` can return as
+ambiguous); the second such answer stops the run, while a non-`409` `4xx`
+throws immediately, before this counter moves. It is never persisted and is not
+`checkpoint.counters.recoveries`; only `noteRecovery` moves that counter.
 `counters.http5xx` counts a `5xx` seen on preview, confirm, submit, review or
 publish, and a `5xx` that fails a presence walk — which is why the resolver's
 caller records it before letting `PROTOCOL_ERROR` propagate. It does **not**
 count a `5xx` on a stage-1 taxonomy *read*, on authentication, or on the stage-4
 observation / stage-5 export reads. A stage-1 *create* that answers `5xx` is
-counted **only when the recovery could not adopt the row**: `createWithRecovery`
-calls `noteOutcome` after `adopt` returns `null`, so a `5xx` whose create
-actually landed is adopted, adds a `counters.recoveries` entry and adds nothing
-to `http5xx`. An operator who sees `http5xx` rise during stage 1 is therefore
-looking at that create path; a `0` does not prove the create failed.
+counted only for a create that is followed by another attempt — a sequence of
+three creates counts at most twice: `createWithRecovery` calls `noteOutcome`
+after `adopt` returns `null`, so a `5xx` whose create actually landed is adopted
+and adds nothing to `http5xx`, and the third create's `5xx` is thrown without
+being counted. An
+operator who sees `http5xx` rise during stage 1 is therefore looking at that
+create path; a `0` does not prove the create failed.
 
 ## The two call sites
 

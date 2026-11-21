@@ -102,6 +102,12 @@ interface StubOptions extends ConfirmBehaviourOptions {
    * not JSON - the other way a page can be unusable.
    */
   unusableBodyPageAt?: number;
+  /**
+   * Answers every stage-1 create of this certification slug with a `500`,
+   * after `commit` decides whether the row landed first. Scoped by slug, so a
+   * failure cannot leak into the next create and prove nothing about this one.
+   */
+  certificationCreateFailure?: { slug: string; commit: boolean };
 }
 
 /** Every `GET …/questions` URL any stub issued, for the global `search` pin. */
@@ -123,6 +129,16 @@ function createStub(options: StubOptions = {}) {
   let publicationReads = 0;
   let questionReads = 0;
   let seeded = 0;
+  // Stage 1's taxonomy store: the fake holds only what its own creates landed,
+  // so an adopt read sees exactly the row a lost answer left behind.
+  const certifications: Array<{ id: string; slug: string; displayName: string }> = [];
+  const examVersions: Array<{ id: string; versionKey: string; title: string }> = [];
+  const domains: Array<{ id: string; domainKey: string; title: string; order: number }> = [];
+  const topicsByDomain = new Map<
+    string,
+    Array<{ id: string; topicKey: string; title: string; order: number }>
+  >();
+  let certificationCreates = 0;
   const questionUrls: string[] = [];
   let observedUnitStateDuringConfirm: string | null = null;
   let observedConfirmBody: string | null = null;
@@ -154,6 +170,16 @@ function createStub(options: StubOptions = {}) {
       status,
       headers: { "content-type": "application/json" },
     });
+  }
+
+  /** One page of a collection, in the route's own `{ items, nextCursor }` shape. */
+  function pageJson(items: ReadonlyArray<{ id: string }>, query: URLSearchParams): Response {
+    const page = pageOf(
+      items,
+      { cursor: query.get("cursor"), limit: Number(query.get("limit") ?? 50) },
+      (item) => item.id,
+    );
+    return json({ items: page.items, nextCursor: page.nextCursor });
   }
 
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -391,6 +417,70 @@ function createStub(options: StubOptions = {}) {
       return json({ pointerVersion: 1 });
     }
 
+    // Stage 1's taxonomy endpoints. One certification and one exam version per
+    // run is all the driver walks, and every row a create lands is readable
+    // back, which is what `createWithRecovery`'s adopt branch depends on.
+    if (path === "/api/admin/content/certifications") {
+      if (init?.method === "POST") {
+        certificationCreates += 1;
+        const body = JSON.parse(String(init.body)) as { id: string; slug: string; displayName: string };
+        const failure = options.certificationCreateFailure;
+        const fails = failure !== undefined && failure.slug === body.slug;
+        if (!fails || failure?.commit === true) {
+          certifications.push({ id: body.id, slug: body.slug, displayName: body.displayName });
+        }
+        return fails
+          ? json({ error: { code: "service_unavailable", requestId: "stub-tax-1" } }, 500)
+          : json({ id: body.id }, 201);
+      }
+      return pageJson(certifications, parsed.searchParams);
+    }
+
+    const examVersionsMatch = /\/certifications\/([^/]+)\/exam-versions$/.exec(path);
+    if (examVersionsMatch) {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { versionKey: string; title: string };
+        const id = `version-${examVersions.length + 1}`;
+        examVersions.push({ id, versionKey: body.versionKey, title: body.title });
+        return json({ id }, 201);
+      }
+      return pageJson(examVersions, parsed.searchParams);
+    }
+
+    const domainsMatch = /\/certifications\/([^/]+)\/exam-versions\/([^/]+)\/domains$/.exec(path);
+    if (domainsMatch) {
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init?.body)) as {
+          domainKey: string;
+          title: string;
+          order: number;
+        };
+        const id = `dom-${domains.length + 1}`;
+        domains.push({ id, domainKey: body.domainKey, title: body.title, order: body.order });
+        return json({ id }, 201);
+      }
+      return pageJson(domains, parsed.searchParams);
+    }
+
+    const topicsMatch =
+      /\/certifications\/([^/]+)\/exam-versions\/([^/]+)\/domains\/([^/]+)\/topics$/.exec(path);
+    if (topicsMatch) {
+      const domainId = topicsMatch[3]!;
+      const topics = topicsByDomain.get(domainId) ?? [];
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init?.body)) as {
+          topicKey: string;
+          title: string;
+          order: number;
+        };
+        const id = `top-${domainId}-${topics.length + 1}`;
+        topics.push({ id, topicKey: body.topicKey, title: body.title, order: body.order });
+        topicsByDomain.set(domainId, topics);
+        return json({ id }, 201);
+      }
+      return pageJson(topics, parsed.searchParams);
+    }
+
     if (path.endsWith("/export")) {
       const published = [...questions.values()].filter((question) => question.publication !== null);
       const rows = published.map((question) => {
@@ -415,6 +505,10 @@ function createStub(options: StubOptions = {}) {
     confirmBatches,
     questionUrls,
     seedQuestion,
+    certifications,
+    get certificationCreates() {
+      return certificationCreates;
+    },
     get questionReads() {
       return questionReads;
     },
@@ -610,6 +704,57 @@ test("a confirm that commits and then answers 500 is reconciled by question key,
   assert.equal(new Set(checkpoint.questions.map((question) => question.key)).size, 5);
   assert.equal(stub.questions.size, 5);
   assert.equal(checkpoint.counters.recoveries >= 1, true);
+});
+
+test("a stage-1 create that commits and then answers 500 is adopted, not created twice", async () => {
+  // No other test walks the taxonomy stage, so `createWithRecovery` was
+  // unexercised and the counters paragraph in docs/cissp-import-driver-presence.md
+  // was unproven. The certification create lands and loses its answer; the
+  // recovery read must find the row instead of creating a second one.
+  const { harness, stub } = buildHarness("ok", 5, {
+    certificationCreateFailure: { slug: "synthetic-pilot", commit: true },
+  });
+
+  await runDriver(
+    { ...harness.options, stage: "taxonomy", createCertification: true, unitLimit: null },
+    harness.deps,
+  );
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(stub.certificationCreates, 1);
+  assert.equal(stub.certifications.length, 1);
+  assert.equal(checkpoint.taxonomy.certification.created, false);
+  assert.equal(checkpoint.taxonomy.certification.id, stub.certifications[0]!.id);
+  assert.equal(checkpoint.counters.http5xx, 0);
+  assert.equal(checkpoint.counters.recoveries, 1);
+  assert.equal(checkpoint.stages.taxonomy, "complete");
+});
+
+test("a stage-1 create that never lands stops with PROTOCOL_ERROR and counts two 5xx, not three", async () => {
+  // The other half of the guard: the loop runs `noteOutcome` only for a create
+  // that is followed by another attempt, so three creates count twice and the
+  // third 5xx is thrown uncounted. Counting it would tell an operator the
+  // server failed three times where the record says two.
+  const { harness, stub } = buildHarness("ok", 5, {
+    certificationCreateFailure: { slug: "synthetic-pilot", commit: false },
+  });
+
+  await assert.rejects(
+    runDriver(
+      { ...harness.options, stage: "taxonomy", createCertification: true, unitLimit: null },
+      harness.deps,
+    ),
+    (error: unknown) => error instanceof DriverError && error.code === "PROTOCOL_ERROR",
+  );
+
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.equal(stub.certificationCreates, 3);
+  assert.equal(checkpoint.counters.http5xx, 2);
+  assert.equal(checkpoint.counters.recoveries, 2);
+  assert.equal(stub.certifications.length, 0);
+  assert.equal(checkpoint.stages.taxonomy, "in-progress");
+  assert.equal(checkpoint.lastError?.code, "PROTOCOL_ERROR");
+  assert.equal(checkpoint.lastError?.status, 500);
 });
 
 test("a submit that commits and then answers 500 is observed, not re-sent", async () => {
@@ -1175,7 +1320,7 @@ test("a 429 mid-walk is RATE_LIMITED and is not counted as a server error", asyn
   // confirm that preceded it.
   const { harness, stub } = buildHarness("confirm-409", 5, {
     decoys: crowdingDecoys(60),
-    failPageAt: 1,
+    failPageAt: 2,
     failPageStatus: 429,
   });
 
@@ -1184,7 +1329,7 @@ test("a 429 mid-walk is RATE_LIMITED and is not counted as a server error", asyn
     (error: unknown) => error instanceof DriverError && error.code === "RATE_LIMITED",
   );
 
-  assert.equal(stub.questionReads, 1);
+  assert.equal(stub.questionReads, 2);
   const checkpoint = readCheckpoint(harness.stateDir)!;
   assert.notEqual(checkpoint.units[0]!.state, "confirmed");
   assert.equal(checkpoint.questions.length, 0);
