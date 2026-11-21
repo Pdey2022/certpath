@@ -12,6 +12,10 @@ export interface ConfirmedQuestionIds {
   revisionId: string;
 }
 
+/**
+ * `none` means the read was exhausted and established that no key is present —
+ * never that the read was inconclusive, because that throws.
+ */
 export type ConfirmObservation =
   | { kind: "all"; ids: ConfirmedQuestionIds[] }
   | { kind: "some"; presentKeys: string[]; missingKeys: string[] }

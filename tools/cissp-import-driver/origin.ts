@@ -3,11 +3,11 @@ import { DriverError } from "./errors.ts";
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
- * Normalises a bare origin and refuses anything that is not one. `flag` names
- * the argument in every failure message, because `--origin` and
- * `--remote-confirm` share this check.
+ * Normalises a bare origin and refuses anything that is not one. `flag` is
+ * required and names the argument in every failure message: only the caller
+ * knows whether the value came from `--origin` or `--remote-confirm`.
  */
-export function normalizeOrigin(value: string, flag = "--origin"): string {
+export function normalizeOrigin(value: string, flag: string): string {
   let url: URL;
   try {
     url = new URL(value.trim());
@@ -49,7 +49,7 @@ export interface OriginPolicyOptions {
  * owner approval naming the exact origin. Nothing in this slice runs remotely.
  */
 export function assertOriginPolicy(options: OriginPolicyOptions): void {
-  const origin = normalizeOrigin(options.origin);
+  const origin = normalizeOrigin(options.origin, "--origin");
   if (isLoopbackOrigin(origin)) {
     if (options.allowRemote || options.remoteConfirm !== null) {
       throw new DriverError(
