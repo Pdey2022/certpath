@@ -163,11 +163,13 @@ looking at that create path; a `0` does not prove the create failed.
 
 ## The two call sites
 
-**Ambiguous confirm.** `decideConfirm` does not change: the fix is behind the
-observation. `resolveUnitPresence` returns a richer `UnitPresence` and `run.ts`
-maps it down to `ConfirmObservation`, so `decide.ts` stays the pure decision
-table the acceptance test pins. The read covers the whole unit; with the
-subset-preview recovery gone there is no narrower set left to read.
+**Ambiguous confirm.** `decideConfirm` keeps its decision shape: the fix is
+behind the observation. Its `observation` input was later narrowed to non-null
+in #194 — a read that cannot run throws before the table is consulted, so the
+table never sees an inconclusive read. `resolveUnitPresence` returns a richer
+`UnitPresence` and `run.ts` maps it down to `ConfirmObservation`, so `decide.ts`
+stays the pure decision table the acceptance test pins. The read covers the whole
+unit; with the subset-preview recovery gone there is no narrower set left to read.
 
 **Preview refused with `existing_question_key`.** When *every* issue is
 `existing_question_key`, the server already holds the unit's rows, so the driver

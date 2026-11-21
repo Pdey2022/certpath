@@ -306,7 +306,7 @@ test("the error envelope keeps only a code, a request id, issues and a summary",
 });
 
 test("loopback origins are accepted and remote ones need all three gates", () => {
-  assert.equal(normalizeOrigin("http://localhost:5173/"), "http://localhost:5173");
+  assert.equal(normalizeOrigin("http://localhost:5173/", "--origin"), "http://localhost:5173");
   assert.equal(isLoopbackOrigin("http://127.0.0.1:5173"), true);
   assert.equal(isLoopbackOrigin("http://[::1]:5173"), true);
   assert.equal(isLoopbackOrigin("https://certpath.example"), false);
@@ -348,6 +348,31 @@ test("loopback origins are accepted and remote ones need all three gates", () =>
         approval: "issue-1",
       }),
     (error: unknown) => error instanceof DriverError && error.code === "REMOTE_CONFIRM_MISMATCH",
+  );
+  // A scheme-less --remote-confirm must blame the flag that is actually wrong.
+  assert.throws(
+    () =>
+      assertOriginPolicy({
+        origin: "https://certpath.example",
+        allowRemote: true,
+        remoteConfirm: "certpath.example",
+        approval: "issue-1",
+      }),
+    (error: unknown) =>
+      error instanceof DriverError &&
+      error.code === "ORIGIN_INVALID" &&
+      error.message.includes("--remote-confirm") &&
+      error.message.includes("scheme"),
+  );
+  // ...and a scheme-less --origin must still name --origin, not --remote-confirm.
+  assert.throws(
+    () => normalizeOrigin("certpath.example", "--origin"),
+    (error: unknown) =>
+      error instanceof DriverError &&
+      error.code === "ORIGIN_INVALID" &&
+      error.message.includes("--origin") &&
+      !error.message.includes("--remote-confirm") &&
+      error.message.includes("scheme"),
   );
   assert.throws(
     () =>
