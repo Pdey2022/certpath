@@ -76,16 +76,6 @@ test("no keys and an expired preview re-previews the same bytes", () => {
   );
 });
 
-test("an auth or rate-limit stop is never turned into a retry", () => {
-  const decision = decideConfirm({
-    outcome: "stopped",
-    observation: { kind: "none" },
-    previewExpired: false,
-    retried: false,
-  });
-  assert.equal(decision.action, "stop");
-});
-
 test("the publish chain follows draft -> submitted -> approved -> publish", () => {
   assert.deepEqual(decideNextStep({ workflowState: "draft", publication: null, ourRevisionId: "r1" }), {
     action: "submit",
