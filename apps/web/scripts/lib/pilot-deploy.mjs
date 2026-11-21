@@ -28,10 +28,14 @@ export const PILOT_USAGE =
 // asserts what the build carries rather than trusting the committed config: a
 // build that dropped either var is not the artefact the guard checked.
 //
-// Both names must stay vars, not secrets. A secret of the same name shadows the
-// config `var`, which would make the committed `wrangler.pilot.jsonc` - and the
-// #209 assertion on it - non-authoritative. Before a `deploy:pilot`,
+// Both names must stay vars. This guard reads the built artefact and cannot
+// see the Worker's secrets, so it can prove only what the build carries; the
+// operator check is separate. Before a `deploy:pilot`,
 // `npx wrangler secret list -c wrangler.pilot.jsonc` must show neither name.
+// Wrangler replaces a same-named remote secret with this var on deploy, so
+// such a secret is destroyed by the deploy rather than silently preferred.
+// Only local `wrangler dev` prefers `.dev.vars` over the config var, and that
+// is the only direction where the file wins.
 export const PILOT_STAFF_MFA_VARS = Object.freeze({
   STAFF_MFA_ALLOWED_METHODS: "totp",
   STAFF_MFA_MAX_AGE_MS: "28800000",
@@ -192,13 +196,14 @@ export function assertPilotDeployConfig(generatedConfig) {
   // The staff MFA policy is carried by the build, so a build that lost it must
   // not deploy. Missing and wrong are separate refusals, as in the staging
   // guard: an absent var is a dropped build step, a wrong value is a stale or
-  // unexpected policy. The message says vars, not secrets, because a secret of
-  // the same name would shadow the config var and silently win.
+  // unexpected policy. The messages name the operator check, because this guard
+  // cannot see the Worker's secrets and a same-named remote secret is replaced
+  // by this var on deploy.
   for (const [name, expected] of Object.entries(PILOT_STAFF_MFA_VARS)) {
     if (!(name in vars)) {
       throw new CliError(
         "pilot_staff_mfa_missing",
-        `The generated pilot config does not carry ${name}; it must be a config var (not a secret, which would shadow the var and make wrangler.pilot.jsonc non-authoritative), because a build that dropped it is not the artefact the guard checked`,
+        `The generated pilot config does not carry ${name}; it must be a config var. This guard reads the built artefact and cannot see the Worker's secrets, so check with npx wrangler secret list -c wrangler.pilot.jsonc before deploying - Wrangler replaces a same-named remote secret with this var, so no such secret should exist`,
         1,
       );
     }
@@ -206,7 +211,7 @@ export function assertPilotDeployConfig(generatedConfig) {
     if (value !== expected) {
       throw new CliError(
         "pilot_staff_mfa_mismatch",
-        `${name} is ${JSON.stringify(value)}, not ${JSON.stringify(expected)}; it must be a config var (not a secret, which would shadow the var and make wrangler.pilot.jsonc non-authoritative), and the pilot build must carry the committed policy`,
+        `${name} is ${JSON.stringify(value)}, not ${JSON.stringify(expected)}; it must be a config var. This guard reads the built artefact and cannot see the Worker's secrets, so check with npx wrangler secret list -c wrangler.pilot.jsonc before deploying - Wrangler replaces a same-named remote secret with this var, so no such secret should exist`,
         1,
       );
     }
