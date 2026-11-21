@@ -1,5 +1,8 @@
 # Tester-only production admin rollout
 
+**Partly superseded, 20 November 2026:** 5F's second factor is deployed to staging, so
+"staff MFA stays parked" below describes the state this plan was written against.
+
 **Status:** Plan only, prepared for review. No account was provisioned, no Worker
 was deployed, no password was created, and no production admin panel exists.
 **Scope:** the tester-only staff admin surface on Workers Free, with two individual

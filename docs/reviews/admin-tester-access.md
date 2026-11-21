@@ -1,5 +1,8 @@
 # Tester-only production admin panel
 
+**Partly superseded, 20 November 2026:** 5F's second factor is deployed to staging, so
+"staff MFA (parked)" below describes the state this review was written against.
+
 **Status:** Implemented for local review in a draft pull request. No worker was
 deployed, no production database was touched, and no production account exists.
 **Scope:** The real admin pages and APIs behind one tester gate and real staff

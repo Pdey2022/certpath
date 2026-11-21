@@ -8,17 +8,17 @@ issue tracking** so a phase cannot quietly start before its prerequisites exist.
 Each phase ships as one or more draft pull requests against `main`, with a
 decision record where a product rule is involved.
 
-## Current position (17 November 2026)
+## Current position (21 November 2026)
 
 | Area | State |
 |---|---|
 | Milestones 0-3C | Complete: foundation, prototype, local security, versioned content, admin editor/review/imports, learner practice, timed mocks, dashboard |
-| Admin tester gate and staff sign-in | Built and merged; tester-only, MFA parked, assurance labelled `tester-gate` |
-| Staff provisioning | Local and UUID-pinned remote mode merged; never run against a real database |
-| **Phase 4 Commerce** | **Complete and merged (#87)**: entitlements, checkout, settlement, refunds with access revocation |
-| **Phase 5 Pilot hardening** | **In progress**: 5A data-safety tooling in review; 5B-5F not started ([slice plan](pilot-hardening.md)) |
-| Evidence | Isolated workflow passed (sign-in, edit, reload); Worker CPU still **unmeasured** (Observability returns 403) |
-| Decisions | ADR 0003-0006 accepted; `docs/permissions.md` and `docs/open-decisions.md` updated |
+| Staff sign-in and second factor | **5F merged (#164) and deployed to staging**: in-Worker TOTP, recovery codes and a Global-Admin reset replace the `tester-gate` assurance. The IP allowlist and the staging gate remain as defence in depth, not as assurance |
+| Staff provisioning | Remote mode merged (#188), and the staging staff surface is configured — five hosted secret **names** only, recorded in [pilot-provisioning](pilot-provisioning.md) §State. The provisioned account and its enrolled factor are recorded in #190, not in a repository file |
+| **Phase 4 Commerce** | **Complete and merged (#87)**: entitlements, checkout, settlement, refunds with access revocation — **against the fake provider**. `PAYMENT_PROVIDER` (`none`) and `COMMERCE_ENABLED` (`false`) are declared only in `apps/web/wrangler.jsonc`; every other Wrangler config omits both, which the exact-string gate reads as off. No real charge has ever been possible |
+| **Phase 5 Pilot hardening** | **5A, 5B, 5C and 5F merged; 5D and 5E not started.** `learner-auth-staging` is deployed by the pipeline (latest `7aa7518`, 21 November 2026), the database holds **23 applied migrations** (last `0023_staff_second_factor.sql`), exports and rehearsed restores pass, and both funnel flags plus `PILOT_EVENTS_RETENTION_ENABLED` are `"false"`. 5D (fake door) and 5E (hostname) wait on owner decisions ([slice plan](pilot-hardening.md)) |
+| Evidence | Worker CPU still **unmeasured**; the staging deploy, migration ledger and rehearsed restores are recorded in [pilot-provisioning](pilot-provisioning.md) §State. The isolated sign-in/edit/reload proof from the tester-gate era survives in [reviews/admin-production-rollout.md](reviews/admin-production-rollout.md) |
+| Decisions | ADR 0003-0007 accepted; `docs/permissions.md`, `docs/open-decisions.md` and `docs/pilot-provisioning.md` are current |
 
 ## Phases
 
@@ -70,7 +70,8 @@ its only reviewer ([decisions](decisions/0006-content-and-operations-posture.md)
 - **Email stays off** until a transactional provider is chosen; Cloudflare Email
   Workers covers inbound only.
 - **No production deployment** without owner approval, and no real learner data
-  until MFA replaces the tester-gate assurance.
+  until the staff second factor is deployed to production and every staff account
+  that will hold data is enrolled.
 - **Public site and demo stay live and unchanged** by admin or commerce work.
 
 ## Risk register
@@ -79,7 +80,7 @@ its only reviewer ([decisions](decisions/0006-content-and-operations-posture.md)
 |---|---|---|
 | Content authored later than code | Pilot slips with a working app and an empty bank | Content starts in parallel; ~600/exam scoped, not "unlimited" |
 | Readiness percentage seen as a guarantee | Trust damage, refunds | Bands, basis line, versioned formula, 14-day decay |
-| Platform-wide learner access with MFA parked | PII exposure | Tester allowlist only; MFA is a Phase 5 gate |
+| Learner access wider than the staff surface allows | PII exposure | 5F's second factor is deployed; the tester allowlist and the staging gate still restrict who can reach the app |
 | Previews share the production D1 | Accidental writes during review | Isolated staging D1 (Phase 5) |
 | Pricing never validated | Wrong price baked into checkout | Fake-door test before Phase 4 commitments |
 | Worker CPU still unmeasured | Unknown headroom for CAT work | Obtain Observability access before Phase 6 sizing |

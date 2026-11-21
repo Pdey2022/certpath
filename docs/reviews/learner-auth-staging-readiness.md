@@ -17,6 +17,11 @@ was upgraded. PR #15 and the staff MFA/Cognito sandboxes remain untouched.
 > handler prepares no statement and reads no row — so the "keep cron jobs off"
 > precondition below is about an enablement run, not about the committed config.
 
+> **Update, 21 November 2026.** The staging Worker is deployed and the database
+> holds 23 applied migrations, last `0023_staff_second_factor.sql`. The
+> `code: 10007` state above and the readiness verdict at the top are historical;
+> current state is in [pilot-provisioning](../pilot-provisioning.md) §State.
+
 ## Readiness summary
 
 The HTTPS sign-in path is implemented for local review only. No Cloudflare or
