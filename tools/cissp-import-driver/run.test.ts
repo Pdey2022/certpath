@@ -104,9 +104,8 @@ interface StubOptions extends ConfirmBehaviourOptions {
   unusableBodyPageAt?: number;
   /**
    * Answers every stage-1 create of this certification slug with a `500`,
-   * after `commit` decides whether the row landed first. Scoped by slug for
-   * the same reason `failPageAt` is scoped to one page: a failure that leaks
-   * into the next create would prove nothing about this one.
+   * after `commit` decides whether the row landed first. Scoped by slug, so a
+   * failure cannot leak into the next create and prove nothing about this one.
    */
   certificationCreateFailure?: { slug: string; commit: boolean };
 }
@@ -727,7 +726,7 @@ test("a stage-1 create that commits and then answers 500 is adopted, not created
   assert.equal(checkpoint.taxonomy.certification.created, false);
   assert.equal(checkpoint.taxonomy.certification.id, stub.certifications[0]!.id);
   assert.equal(checkpoint.counters.http5xx, 0);
-  assert.equal(checkpoint.counters.recoveries >= 1, true);
+  assert.equal(checkpoint.counters.recoveries, 1);
   assert.equal(checkpoint.stages.taxonomy, "complete");
 });
 
@@ -752,7 +751,7 @@ test("a stage-1 create that never lands stops with PROTOCOL_ERROR and counts two
   assert.equal(stub.certificationCreates, 3);
   assert.equal(checkpoint.counters.http5xx, 2);
   assert.equal(checkpoint.counters.recoveries, 2);
-  assert.equal(checkpoint.taxonomy.certification.created, false);
+  assert.equal(stub.certifications.length, 0);
   assert.equal(checkpoint.stages.taxonomy, "in-progress");
   assert.equal(checkpoint.lastError?.code, "PROTOCOL_ERROR");
   assert.equal(checkpoint.lastError?.status, 500);
@@ -1315,13 +1314,13 @@ test("a listing that fails mid-walk stops with PROTOCOL_ERROR and records nothin
   assert.equal(checkpoint.lastError?.status, 500);
 });
 
-test("a 429 on the first walk page is RATE_LIMITED and is not counted as a server error", async () => {
+test("a 429 mid-walk is RATE_LIMITED and is not counted as a server error", async () => {
   // The other direction of the same guard: the increment must not fire for a
   // status the client has its own code for, and must not double-count with the
   // confirm that preceded it.
   const { harness, stub } = buildHarness("confirm-409", 5, {
     decoys: crowdingDecoys(60),
-    failPageAt: 1,
+    failPageAt: 2,
     failPageStatus: 429,
   });
 
@@ -1330,7 +1329,7 @@ test("a 429 on the first walk page is RATE_LIMITED and is not counted as a serve
     (error: unknown) => error instanceof DriverError && error.code === "RATE_LIMITED",
   );
 
-  assert.equal(stub.questionReads, 1);
+  assert.equal(stub.questionReads, 2);
   const checkpoint = readCheckpoint(harness.stateDir)!;
   assert.notEqual(checkpoint.units[0]!.state, "confirmed");
   assert.equal(checkpoint.questions.length, 0);
