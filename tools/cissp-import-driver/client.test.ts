@@ -349,6 +349,31 @@ test("loopback origins are accepted and remote ones need all three gates", () =>
       }),
     (error: unknown) => error instanceof DriverError && error.code === "REMOTE_CONFIRM_MISMATCH",
   );
+  // A scheme-less --remote-confirm must blame the flag that is actually wrong.
+  assert.throws(
+    () =>
+      assertOriginPolicy({
+        origin: "https://certpath.example",
+        allowRemote: true,
+        remoteConfirm: "certpath.example",
+        approval: "issue-1",
+      }),
+    (error: unknown) =>
+      error instanceof DriverError &&
+      error.code === "ORIGIN_INVALID" &&
+      error.message.includes("--remote-confirm") &&
+      error.message.includes("scheme"),
+  );
+  // ...and a scheme-less --origin must still name --origin, not --remote-confirm.
+  assert.throws(
+    () => normalizeOrigin("certpath.example"),
+    (error: unknown) =>
+      error instanceof DriverError &&
+      error.code === "ORIGIN_INVALID" &&
+      error.message.includes("--origin") &&
+      !error.message.includes("--remote-confirm") &&
+      error.message.includes("scheme"),
+  );
   assert.throws(
     () =>
       assertOriginPolicy({
