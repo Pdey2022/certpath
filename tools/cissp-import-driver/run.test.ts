@@ -97,6 +97,11 @@ interface StubOptions extends ConfirmBehaviourOptions {
   failPageAt?: number;
   /** The status that failure answers with. Defaults to `500`. */
   failPageStatus?: number;
+  /**
+   * Answers the k-th `GET …/questions` (1-based) with a `200` whose body is
+   * not JSON - the other way a page can be unusable.
+   */
+  unusableBodyPageAt?: number;
 }
 
 /** Every `GET …/questions` URL any stub issued, for the global `search` pin. */
@@ -284,6 +289,12 @@ function createStub(options: StubOptions = {}) {
           },
           status,
         );
+      }
+      if (options.unusableBodyPageAt === questionReads) {
+        return new Response("not json", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
       const domainId = parsed.searchParams.get("domainId");
       const topicId = parsed.searchParams.get("topicId");
@@ -637,7 +648,7 @@ test("a publish that commits and then answers 500 is observed, not re-sent", asy
 test("a submit that never lands stops after one reconciliation, with the intent still set", async () => {
   // The bound is what stops a run grinding against a broken server: one
   // observation is allowed, a second conflict is not. This row is the one that
-  // proves `recoveries > 1` actually bites - without it the guard could be
+  // proves `conflictRetries > 1` actually bites - without it the guard could be
   // deleted and every other test would stay green.
   const { harness, stub } = buildHarness("submit-500-no-commit", 1);
 
@@ -1180,6 +1191,33 @@ test("a 429 mid-walk is RATE_LIMITED and is not counted as a server error", asyn
   assert.equal(checkpoint.counters.http5xx, 0);
   assert.equal(checkpoint.lastError?.code, "RATE_LIMITED");
   assert.equal(checkpoint.lastError?.status, 429);
+});
+
+test("a 2xx mid-walk whose body is not JSON is PROTOCOL_ERROR and is not counted", async () => {
+  // The failure table's last walk row: a malformed 2xx throws PROTOCOL_ERROR
+  // with no status, so it must not be counted in `http5xx`. Counting any
+  // DriverError, or inventing a status for it, would silently contradict the
+  // documented row.
+  const { harness, stub } = buildHarness("confirm-409", 5, {
+    decoys: crowdingDecoys(60),
+    unusableBodyPageAt: 2,
+  });
+
+  await assert.rejects(
+    runStages(harness, ["transform", "upload"], null),
+    (error: unknown) =>
+      error instanceof DriverError && error.code === "PROTOCOL_ERROR" && error.status === undefined,
+  );
+
+  assert.equal(stub.questionReads, 2);
+  const checkpoint = readCheckpoint(harness.stateDir)!;
+  assert.notEqual(checkpoint.units[0]!.state, "confirmed");
+  assert.equal(checkpoint.questions.length, 0);
+  // No status was seen, so nothing was counted - and the confirm's 409 is not
+  // a server error either.
+  assert.equal(checkpoint.counters.http5xx, 0);
+  assert.equal(checkpoint.lastError?.code, "PROTOCOL_ERROR");
+  assert.equal(checkpoint.lastError?.status, null);
 });
 
 test("the page bound stops the walk with PRESENCE_UNKNOWN instead of concluding absence", async () => {
